@@ -2725,6 +2725,7 @@ def run_portfolio_backtest(
     out_trades_csv: str = "backtest_trades.csv",
     out_summary_csv: str = "backtest_summary.csv",
 ):
+    accepted_signals = {}
     # ---- HER ÇALIŞTIRMA ÖNCESİ CSV TEMİZLE ----
     if os.path.exists(out_trades_csv):
         os.remove(out_trades_csv)
@@ -2775,7 +2776,6 @@ def run_portfolio_backtest(
 
     tm = SimTradeManager(initial_balance=TRADING_CONFIG["initial_balance"])
     logged_cfg_pairs = set()
-    accepted_signals = {}
 
     # Ana backtest döngüsü
     while heap:
