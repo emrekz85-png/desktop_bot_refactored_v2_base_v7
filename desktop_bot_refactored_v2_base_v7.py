@@ -157,7 +157,7 @@ DEFAULT_STRATEGY_CONFIG = {
     "slope": 0.4,
     "at_active": False,
     "use_trailing": False,
-    "use_dynamic_pbema_tp": False,
+    "use_dynamic_pbema_tp": True,
     "hold_n": 4,
     "min_hold_frac": 0.65,
     "pb_touch_tolerance": 0.0018,
@@ -344,7 +344,7 @@ def load_optimized_config(symbol, timeframe):
         "slope": 0.5,
         "at_active": False,
         "use_trailing": False,
-        "use_dynamic_pbema_tp": False,
+        "use_dynamic_pbema_tp": True,
     }
 
     symbol_cfg = SYMBOL_PARAMS.get(symbol, {})
@@ -508,7 +508,7 @@ class TradeManager:
                 config = load_optimized_config(symbol, tf)
                 use_trailing = config.get("use_trailing", False)
                 use_partial = not use_trailing
-                use_dynamic_tp = config.get("use_dynamic_pbema_tp", False)
+                use_dynamic_tp = config.get("use_dynamic_pbema_tp", True)
 
                 # --- Fiyatlar ---
                 if t_type == "LONG":
@@ -524,11 +524,23 @@ class TradeManager:
                     pnl_percent_fav = (entry - fav_price) / entry
                     in_profit = fav_price < entry
 
+                # Dinamik PBEMA TP: varsa her mumda bulutun güncel seviyesini hedefle
+                dyn_tp = tp
+                if use_dynamic_tp:
+                    try:
+                        if pb_top is not None and pb_bot is not None:
+                            dyn_tp = float(pb_bot) if t_type == "LONG" else float(pb_top)
+                    except Exception:
+                        dyn_tp = tp
+                    self.open_trades[i]["tp"] = dyn_tp
+
                 # Ekranda gösterilecek anlık PnL (kapanışa göre)
                 self.open_trades[i]["pnl"] = pnl_percent_close * size
 
                 # Hedefe ilerleme oranı (en iyi fiyata göre)
-                total_dist = abs(tp - entry)
+                total_dist = abs(dyn_tp - entry)
+                if total_dist <= 0:
+                    continue
                 current_dist = abs(fav_price - entry)
                 progress = current_dist / total_dist if total_dist > 0 else 0.0
 
@@ -551,6 +563,8 @@ class TradeManager:
                         partial_record["status"] = "PARTIAL TP (50%)"
                         partial_record["close_time"] = (candle_time_utc + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
                         partial_record["close_price"] = float(fav_price)
+                        partial_record["pb_ema_top"] = pb_top
+                        partial_record["pb_ema_bot"] = pb_bot
                         self.history.append(partial_record)
 
                         # Açık trade'i güncelle: yarı pozisyon kaldı, margin yarıya indi
@@ -592,18 +606,6 @@ class TradeManager:
 
                 # ---------- SL / TP KONTROLÜ ----------
                 sl = float(self.open_trades[i]["sl"])
-
-                # Dinamik PBEMA TP: varsa her mumda bulutun güncel seviyesini hedefle
-                dyn_tp = tp
-                if use_dynamic_tp:
-                    try:
-                        if pb_top is not None and pb_bot is not None:
-                            if t_type == "LONG":
-                                dyn_tp = float(pb_bot)
-                            else:
-                                dyn_tp = float(pb_top)
-                    except Exception:
-                        dyn_tp = tp
 
                 if t_type == "LONG":
                     hit_tp = candle_high >= dyn_tp
@@ -668,6 +670,8 @@ class TradeManager:
                 trade["pnl"] = final_net_pnl
                 trade["close_time"] = (candle_time_utc + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
                 trade["close_price"] = float(exit_fill)
+                trade["pb_ema_top"] = pb_top
+                trade["pb_ema_bot"] = pb_bot
 
                 self.history.append(trade)
                 just_closed_trades.append(trade)
@@ -2719,6 +2723,7 @@ class SimTradeManager:
             config = load_optimized_config(symbol, tf)
             use_trailing = config.get("use_trailing", False)
             use_partial = not use_trailing
+            use_dynamic_tp = config.get("use_dynamic_pbema_tp", True)
 
             if t_type == "LONG":
                 close_price = candle_close
@@ -2733,9 +2738,20 @@ class SimTradeManager:
                 pnl_percent_fav = (entry - fav_price) / entry
                 in_profit = fav_price < entry
 
+            dyn_tp = tp
+            if use_dynamic_tp:
+                try:
+                    if pb_top is not None and pb_bot is not None:
+                        dyn_tp = float(pb_bot) if t_type == "LONG" else float(pb_top)
+                except Exception:
+                    dyn_tp = tp
+                self.open_trades[i]["tp"] = dyn_tp
+
             self.open_trades[i]["pnl"] = pnl_percent_close * size
 
-            total_dist = abs(tp - entry)
+            total_dist = abs(dyn_tp - entry)
+            if total_dist <= 0:
+                continue
             current_dist = abs(fav_price - entry)
             progress = current_dist / total_dist if total_dist > 0 else 0.0
 
@@ -2801,16 +2817,6 @@ class SimTradeManager:
                             self.open_trades[i]["trailing_active"] = True
 
             sl = float(self.open_trades[i]["sl"])
-
-            dyn_tp = tp
-            try:
-                if pb_top is not None and pb_bot is not None:
-                    if t_type == "LONG":
-                        dyn_tp = float(pb_bot)
-                    else:
-                        dyn_tp = float(pb_top)
-            except Exception:
-                dyn_tp = tp
 
             if t_type == "LONG":
                 hit_tp = candle_high >= dyn_tp
@@ -3174,12 +3180,31 @@ def plot_trade(
     - RR kutuları (risk / reward alanları, TradingView RR Tool benzeri)
     """
 
-    trade = df_trades[df_trades["id"] == trade_id]
-    if trade.empty:
+    trades_for_id = df_trades[df_trades["id"] == trade_id].copy()
+    if trades_for_id.empty:
         print(f"[PLOT] Trade not found: {trade_id}")
         return
 
-    tr = trade.iloc[0]
+    def _safe_dt_col(df: pd.DataFrame, col: str):
+        if col in df.columns:
+            return pd.to_datetime(df[col], utc=True, errors="coerce")
+        return pd.Series([pd.NaT] * len(df))
+
+    trades_for_id["_close_dt"] = _safe_dt_col(trades_for_id, "close_time")
+    trades_for_id["_open_dt"] = _safe_dt_col(trades_for_id, "open_time_utc")
+    trades_for_id["_ts_dt"] = _safe_dt_col(trades_for_id, "timestamp")
+    trades_for_id["_sort_dt"] = trades_for_id["_close_dt"].fillna(trades_for_id["_open_dt"]).fillna(
+        trades_for_id["_ts_dt"]
+    )
+    trades_for_id["_row_order"] = np.arange(len(trades_for_id))
+
+    non_partial = trades_for_id[
+        ~trades_for_id["status"].astype(str).str.contains("PARTIAL", case=False, na=False)
+    ]
+    if not non_partial.empty:
+        tr = non_partial.sort_values(["_sort_dt", "_row_order"]).iloc[-1]
+    else:
+        tr = trades_for_id.sort_values(["_sort_dt", "_row_order"]).iloc[-1]
 
     # 1) Trade zamanı
     ts_trade_utc = None
