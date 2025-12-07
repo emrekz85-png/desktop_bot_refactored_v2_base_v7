@@ -169,6 +169,160 @@ DEFAULT_STRATEGY_CONFIG = {
 }
 
 
+def _generate_candidate_configs():
+    """Create a compact grid of configs to search for higher trade density."""
+
+    rr_vals = np.arange(1.2, 2.6, 0.3)
+    rsi_vals = np.arange(35, 76, 10)
+    slope_vals = np.arange(0.2, 0.9, 0.2)
+    at_vals = [False, True]
+
+    candidates = []
+    for rr, rsi, slope, at_active in itertools.product(rr_vals, rsi_vals, slope_vals, at_vals):
+        candidates.append(
+            {
+                "rr": round(float(rr), 2),
+                "rsi": int(rsi),
+                "slope": round(float(slope), 2),
+                "at_active": bool(at_active),
+                "use_trailing": False,
+                "use_dynamic_pbema_tp": False,
+            }
+        )
+
+    # Birkaç agresif trailing seçeneği ekle
+    trailing_extras = []
+    for base in candidates[:: max(1, len(candidates) // 20)]:  # toplamı şişirmeden örnekle
+        cfg = dict(base)
+        cfg["use_trailing"] = True
+        trailing_extras.append(cfg)
+
+    return candidates + trailing_extras
+
+
+def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) -> Tuple[float, int]:
+    """Simulate a single timeframe with the given config and return (net_pnl, trades)."""
+
+    tm = SimTradeManager(initial_balance=TRADING_CONFIG["initial_balance"])
+    warmup = 250
+    end = len(df) - 2
+    if end <= warmup:
+        return 0.0, 0
+
+    for i in range(warmup, end):
+        row = df.iloc[i]
+        event_time = row["timestamp"] + _tf_to_timedelta(tf)
+        tm.update_trades(
+            sym,
+            tf,
+            candle_high=float(row["high"]),
+            candle_low=float(row["low"]),
+            candle_close=float(row["close"]),
+            candle_time_utc=row["timestamp"] + _tf_to_timedelta(tf),
+            pb_top=float(row.get("pb_ema_top", row["close"])),
+            pb_bot=float(row.get("pb_ema_bot", row["close"])),
+        )
+
+        s_type, s_entry, s_tp, s_sl, s_reason = TradingEngine.check_signal_diagnostic(
+            df,
+            index=i,
+            min_rr=config["rr"],
+            rsi_limit=config["rsi"],
+            slope_thresh=config["slope"],
+            use_alphatrend=config.get("at_active", False),
+            hold_n=config.get("hold_n", DEFAULT_STRATEGY_CONFIG["hold_n"]),
+            min_hold_frac=config.get("min_hold_frac", DEFAULT_STRATEGY_CONFIG["min_hold_frac"]),
+            pb_touch_tolerance=config.get("pb_touch_tolerance", DEFAULT_STRATEGY_CONFIG["pb_touch_tolerance"]),
+            body_tolerance=config.get("body_tolerance", DEFAULT_STRATEGY_CONFIG["body_tolerance"]),
+            cloud_keltner_gap_min=config.get("cloud_keltner_gap_min", DEFAULT_STRATEGY_CONFIG["cloud_keltner_gap_min"]),
+            tp_min_dist_ratio=config.get("tp_min_dist_ratio", DEFAULT_STRATEGY_CONFIG["tp_min_dist_ratio"]),
+            tp_max_dist_ratio=config.get("tp_max_dist_ratio", DEFAULT_STRATEGY_CONFIG["tp_max_dist_ratio"]),
+            adx_min=config.get("adx_min", DEFAULT_STRATEGY_CONFIG["adx_min"]),
+        )
+
+        if not (s_type and "ACCEPTED" in s_reason):
+            continue
+
+        # Ana backtest ile aynı kısıtlar: aktif pozisyon varsa veya cooldown sürüyorsa atla
+        has_open = any(
+            t["symbol"] == sym and t["timeframe"] == tf
+            for t in tm.open_trades
+        )
+        if has_open or tm.check_cooldown(sym, tf, event_time):
+            continue
+
+        tm.open_trade(
+            {
+                "symbol": sym,
+                "timeframe": tf,
+                "type": s_type,
+                "setup": s_reason,
+                "entry": s_entry,
+                "tp": s_tp,
+                "sl": s_sl,
+                "timestamp": row["timestamp"],
+                "open_time_utc": row["timestamp"],
+                "use_trailing": config.get("use_trailing", False),
+                "use_dynamic_pbema_tp": config.get("use_dynamic_pbema_tp", False),
+            }
+        )
+
+    return tm.total_pnl, len(tm.history)
+
+
+def _optimize_backtest_configs(streams: dict, requested_pairs: list):
+    """Brute-force search to find the best config (by net pnl) per symbol/timeframe."""
+
+    candidates = _generate_candidate_configs()
+    total_jobs = len([1 for pair in requested_pairs if pair in streams]) * len(candidates)
+    if total_jobs == 0:
+        return {}
+
+    best_by_pair = {}
+    completed = 0
+    next_progress = 5
+
+    print(f"[OPT] {len(candidates)} farklı ayar taranacak (her zaman dilimi için).")
+
+    for sym, tf in requested_pairs:
+        if (sym, tf) not in streams:
+            continue
+
+        df = streams[(sym, tf)]
+        best_cfg = None
+        best_pnl = -float("inf")
+        best_trades = 0
+
+        for cfg in candidates:
+            net_pnl, trades = _score_config_for_stream(df, sym, tf, cfg)
+            completed += 1
+            progress = (completed / total_jobs) * 100
+            if progress >= next_progress:
+                print(f"[OPT] %{progress:.1f} tamamlandı...")
+                next_progress += 5
+
+            if trades == 0:
+                continue
+
+            if net_pnl > best_pnl:
+                best_pnl = net_pnl
+                best_cfg = cfg
+                best_trades = trades
+
+        if best_cfg:
+            best_by_pair[(sym, tf)] = {**best_cfg, "_net_pnl": best_pnl, "_trades": best_trades}
+            print(
+                f"[OPT][{sym}-{tf}] En iyi ayar: RR={best_cfg['rr']}, RSI={best_cfg['rsi']}, "
+                f"Slope={best_cfg['slope']}, AT={'Açık' if best_cfg['at_active'] else 'Kapalı'} | "
+                f"Net PnL={best_pnl:.2f}, Trades={best_trades}"
+            )
+        else:
+            print(f"[OPT][{sym}-{tf}] Uygun ayar bulunamadı (yetersiz trade)")
+
+    print("[OPT] Tarama tamamlandı. Bulunan ayarlar backtest'e uygulanacak.")
+    return best_by_pair
+
+
 def load_optimized_config(symbol, timeframe):
     """Return optimized config for given symbol/timeframe with safe defaults."""
 
@@ -2775,15 +2929,20 @@ def run_portfolio_backtest(
         print("Backtest için veri yok (internet / Binance erişimi?)")
         return
 
+    # --- 1) Her sembol/zaman dilimi için en iyi ayarı tara ---
+    best_configs = _optimize_backtest_configs(streams, requested_pairs)
+
     # Çoklu stream için zaman bazlı event kuyruğu
     heap = []
     ptr = {}
+    total_events = 0
     for (sym, tf), df in streams.items():
         warmup = 250
         end = len(df) - 2
         if end <= warmup:
             continue
         ptr[(sym, tf)] = warmup
+        total_events += max(0, end - warmup)
         heapq.heappush(
             heap,
             (df.loc[warmup, "timestamp"] + _tf_to_timedelta(tf), sym, tf),
@@ -2791,6 +2950,8 @@ def run_portfolio_backtest(
 
     tm = SimTradeManager(initial_balance=TRADING_CONFIG["initial_balance"])
     logged_cfg_pairs = set()
+    processed_events = 0
+    next_progress = 10
 
     # Ana backtest döngüsü
     while heap:
@@ -2815,9 +2976,14 @@ def run_portfolio_backtest(
         )
 
         # Bu sembol/timeframe için optimize edilmiş config
-        config = load_optimized_config(sym, tf)
+        config = best_configs.get((sym, tf)) or load_optimized_config(sym, tf)
         if (sym, tf) not in logged_cfg_pairs:
-            print(f"[BACKTEST][CFG] {sym}-{tf} -> {config}")
+            cfg_info = dict(config)
+            extra = ""
+            if (sym, tf) in best_configs:
+                meta = best_configs[(sym, tf)]
+                extra = f" | OPT NetPnL={meta['_net_pnl']:.2f} Trades={meta['_trades']}"
+            print(f"[BACKTEST][CFG] {sym}-{tf} -> {cfg_info}{extra}")
             logged_cfg_pairs.add((sym, tf))
         rr, rsi, slope = config["rr"], config["rsi"], config["slope"]
         use_at = config.get("at_active", False)
@@ -2883,6 +3049,14 @@ def run_portfolio_backtest(
                 heap,
                 (df.loc[i2, "timestamp"] + _tf_to_timedelta(tf), sym, tf),
             )
+
+        # Progress log
+        processed_events += 1
+        if total_events > 0:
+            progress = (processed_events / total_events) * 100
+            if progress >= next_progress:
+                print(f"[BACKTEST] %{progress:.1f} tamamlandı...")
+                next_progress += 10
     print(f"[DEBUG] Toplam kapatılmış trade sayısı: {len(tm.history)}")
     if tm.history:
         print("[DEBUG] İlk trade örneği:", tm.history[0])
@@ -2949,6 +3123,16 @@ def run_portfolio_backtest(
     print("Backtest bitti.")
     if not summary_df.empty:
         print(summary_df.to_string(index=False))
+
+    if best_configs:
+        print("\n[OPT] En iyi ayar özeti (Net PnL'e göre):")
+        for (sym, tf), cfg in sorted(best_configs.items()):
+            print(
+                f"  - {sym}-{tf}: RR={cfg['rr']}, RSI={cfg['rsi']}, Slope={cfg['slope']}, "
+                f"AT={'Açık' if cfg['at_active'] else 'Kapalı'}, Trailing={cfg.get('use_trailing', False)} | "
+                f"NetPnL={cfg['_net_pnl']:.2f}, Trades={cfg['_trades']}"
+            )
+
     print(f"Final Wallet (sim): ${tm.wallet_balance:.2f} | Total PnL: ${tm.total_pnl:.2f}")
 
     total_trades = trades_df["id"].nunique() if not trades_df.empty and "id" in trades_df.columns else 0
