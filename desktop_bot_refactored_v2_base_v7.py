@@ -2744,6 +2744,7 @@ def run_portfolio_backtest(
     import heapq
 
     streams = {}
+    requested_pairs = list(itertools.product(symbols, timeframes))
     tf_limit_log = set()
     for sym in symbols:
         for tf in timeframes:
@@ -2759,6 +2760,7 @@ def run_portfolio_backtest(
 
             df = TradingEngine.get_historical_data_pagination(sym, tf, total_candles=tf_candle_limit)
             if df is None or df.empty or len(df) < 400:
+                print(f"[BACKTEST] {sym}-{tf} datası bulunamadı veya yetersiz (len={0 if df is None else len(df)})")
                 continue
 
             df = TradingEngine.calculate_indicators(df)
@@ -2920,6 +2922,21 @@ def run_portfolio_backtest(
                     "net_pnl": pnl,
                 }
             )
+
+    # Eksik kalan sembol/zaman dilimlerini 0 trade ile rapora ekle
+    existing_pairs = {(row["symbol"], row["timeframe"]) for row in summary_rows}
+    for sym, tf in requested_pairs:
+        if (sym, tf) in existing_pairs:
+            continue
+        summary_rows.append(
+            {
+                "symbol": sym,
+                "timeframe": tf,
+                "trades": 0,
+                "win_rate_pct": 0.0,
+                "net_pnl": 0.0,
+            }
+        )
 
     summary_df = (
         pd.DataFrame(summary_rows).sort_values(["symbol", "timeframe"])
