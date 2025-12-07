@@ -149,6 +149,24 @@ CHART_TEMPLATE = """
 """
 
 
+DEFAULT_STRATEGY_CONFIG = {
+    "rr": 3.0,
+    "rsi": 60,
+    "slope": 0.5,
+    "at_active": False,
+    "use_trailing": False,
+    "use_dynamic_pbema_tp": False,
+    "hold_n": 5,
+    "min_hold_frac": 0.8,
+    "pb_touch_tolerance": 0.0012,
+    "body_tolerance": 0.0015,
+    "cloud_keltner_gap_min": 0.003,
+    "tp_min_dist_ratio": 0.0015,
+    "tp_max_dist_ratio": 0.03,
+    "adx_min": 12.0,
+}
+
+
 def load_optimized_config(symbol, timeframe):
     """Return optimized config for given symbol/timeframe with safe defaults."""
 
@@ -792,6 +810,14 @@ class TradingEngine:
             rsi_limit: float = 60.0,
             slope_thresh: float = 0.5,
             use_alphatrend: bool = True,
+            hold_n: int = 5,
+            min_hold_frac: float = 0.8,
+            pb_touch_tolerance: float = 0.0012,
+            body_tolerance: float = 0.0015,
+            cloud_keltner_gap_min: float = 0.003,
+            tp_min_dist_ratio: float = 0.0015,
+            tp_max_dist_ratio: float = 0.03,
+            adx_min: float = 12.0,
     ) -> Tuple[Optional[str], Optional[float], Optional[float], Optional[float], str]:
         """
         Base Setup için LONG / SHORT sinyali üretir.
@@ -836,16 +862,17 @@ class TradingEngine:
             return None, None, None, None, "Index Out of Range"
 
         # --- Parametreler ---
-        hold_n = 5
-        min_hold_frac = 0.8
-        touch_tol = 0.0012
-        body_tol = 0.0015
-        cloud_keltner_gap_min = 0.003
-        tp_min_dist_ratio = 0.0015
-        tp_max_dist_ratio = 0.03
+        hold_n = int(max(1, hold_n or 1))
+        min_hold_frac = float(min_hold_frac if min_hold_frac is not None else 0.8)
+        touch_tol = float(pb_touch_tolerance if pb_touch_tolerance is not None else 0.0012)
+        body_tol = float(body_tolerance if body_tolerance is not None else 0.0015)
+        cloud_keltner_gap_min = float(cloud_keltner_gap_min if cloud_keltner_gap_min is not None else 0.003)
+        tp_min_dist_ratio = float(tp_min_dist_ratio if tp_min_dist_ratio is not None else 0.0015)
+        tp_max_dist_ratio = float(tp_max_dist_ratio if tp_max_dist_ratio is not None else 0.03)
+        adx_min = float(adx_min if adx_min is not None else 12.0)
 
         # ADX filtresi
-        if float(curr["adx"]) < 12.0:
+        if float(curr["adx"]) < adx_min:
             return None, None, None, None, "ADX Low"
 
         if abs_index < hold_n + 1:
@@ -898,9 +925,10 @@ class TradingEngine:
 
         keltner_pb_gap_long = (pb_bot - lower_band) / lower_band if lower_band != 0 else 0.0
 
+        within_cloud_long = pb_bot <= close <= pb_top * (1 + touch_tol)
         pb_target_long = (
                 long_direction_ok and
-                (pb_bot > close) and
+                ((close <= pb_bot * (1 + touch_tol)) or within_cloud_long) and
                 (keltner_pb_gap_long >= cloud_keltner_gap_min)
         )
 
@@ -917,9 +945,10 @@ class TradingEngine:
 
         keltner_pb_gap_short = (upper_band - pb_top) / upper_band if upper_band != 0 else 0.0
 
+        within_cloud_short = pb_bot * (1 - touch_tol) <= close <= pb_top
         pb_target_short = (
                 short_direction_ok and
-                (pb_top < close) and
+                ((close >= pb_top * (1 - touch_tol)) or within_cloud_short) and
                 (keltner_pb_gap_short >= cloud_keltner_gap_min)
         )
 
@@ -1226,9 +1255,17 @@ class LiveBotWorker(QThread):
 
     def update_settings(self, symbol, tf, rr, rsi, slope):
         if symbol in SYMBOL_PARAMS:
-            at = SYMBOL_PARAMS[symbol][tf].get("at_active", False)
-            SYMBOL_PARAMS[symbol][tf] = {"rr": rr, "rsi": rsi, "slope": slope, "at_active": at,
-                                         "use_trailing": SYMBOL_PARAMS[symbol][tf].get("use_trailing", False)}
+            current = SYMBOL_PARAMS[symbol].get(tf, {})
+            at = current.get("at_active", False)
+            updated = current.copy()
+            updated.update({
+                "rr": rr,
+                "rsi": rsi,
+                "slope": slope,
+                "at_active": at,
+                "use_trailing": current.get("use_trailing", False),
+            })
+            SYMBOL_PARAMS[symbol][tf] = updated
 
     def update_show_rr(self, s):
         self.show_rr = s
@@ -1306,7 +1343,20 @@ class LiveBotWorker(QThread):
                         at_status_log = "AT:ON" if use_at else "AT:OFF"
 
                         s_type, s_entry, s_tp, s_sl, s_reason = TradingEngine.check_signal_diagnostic(
-                            df_closed, index=-1, min_rr=rr, rsi_limit=rsi, slope_thresh=slope, use_alphatrend=use_at
+                            df_closed,
+                            index=-1,
+                            min_rr=rr,
+                            rsi_limit=rsi,
+                            slope_thresh=slope,
+                            use_alphatrend=use_at,
+                            hold_n=config.get("hold_n"),
+                            min_hold_frac=config.get("min_hold_frac"),
+                            pb_touch_tolerance=config.get("pb_touch_tolerance"),
+                            body_tolerance=config.get("body_tolerance"),
+                            cloud_keltner_gap_min=config.get("cloud_keltner_gap_min"),
+                            tp_min_dist_ratio=config.get("tp_min_dist_ratio"),
+                            tp_max_dist_ratio=config.get("tp_max_dist_ratio"),
+                            adx_min=config.get("adx_min"),
                         )
 
                         setup_tag = "Unknown"
@@ -1482,7 +1532,20 @@ class OptimizerWorker(QThread):
 
                     for i in range(start_idx, limit_idx):
                         s_type, _, s_tp_raw, s_sl_raw, s_reason = TradingEngine.check_signal_diagnostic(
-                            df, index=i, min_rr=rr, rsi_limit=rsi, slope_thresh=slope, use_alphatrend=at_active
+                            df,
+                            index=i,
+                            min_rr=rr,
+                            rsi_limit=rsi,
+                            slope_thresh=slope,
+                            use_alphatrend=at_active,
+                            hold_n=DEFAULT_STRATEGY_CONFIG["hold_n"],
+                            min_hold_frac=DEFAULT_STRATEGY_CONFIG["min_hold_frac"],
+                            pb_touch_tolerance=DEFAULT_STRATEGY_CONFIG["pb_touch_tolerance"],
+                            body_tolerance=DEFAULT_STRATEGY_CONFIG["body_tolerance"],
+                            cloud_keltner_gap_min=DEFAULT_STRATEGY_CONFIG["cloud_keltner_gap_min"],
+                            tp_min_dist_ratio=DEFAULT_STRATEGY_CONFIG["tp_min_dist_ratio"],
+                            tp_max_dist_ratio=DEFAULT_STRATEGY_CONFIG["tp_max_dist_ratio"],
+                            adx_min=DEFAULT_STRATEGY_CONFIG["adx_min"],
                         )
 
                         if s_type and "ACCEPTED" in s_reason:
@@ -2751,9 +2814,18 @@ def run_portfolio_backtest(
             rsi_limit=rsi,
             slope_thresh=slope,
             use_alphatrend=use_at,
+            hold_n=config.get("hold_n"),
+            min_hold_frac=config.get("min_hold_frac"),
+            pb_touch_tolerance=config.get("pb_touch_tolerance"),
+            body_tolerance=config.get("body_tolerance"),
+            cloud_keltner_gap_min=config.get("cloud_keltner_gap_min"),
+            tp_min_dist_ratio=config.get("tp_min_dist_ratio"),
+            tp_max_dist_ratio=config.get("tp_max_dist_ratio"),
+            adx_min=config.get("adx_min"),
         )
 
         if s_type and "ACCEPTED" in str(s_reason):
+            accepted_signals[(sym, tf)] = accepted_signals.get((sym, tf), 0) + 1
             # Aynı sembol/timeframe için açık trade var mı?
             has_open = any(
                 t["symbol"] == sym and t["timeframe"] == tf
@@ -2798,6 +2870,10 @@ def run_portfolio_backtest(
     print(f"[DEBUG] Toplam kapatılmış trade sayısı: {len(tm.history)}")
     if tm.history:
         print("[DEBUG] İlk trade örneği:", tm.history[0])
+    if accepted_signals:
+        print("[DEBUG] Kabul edilen sinyal sayıları:")
+        for (sym, tf), cnt in sorted(accepted_signals.items()):
+            print(f"  - {sym}-{tf}: {cnt}")
 
     # Tüm history'den DataFrame oluştur ve CSV / özet yaz
     trades_df = pd.DataFrame(tm.history)
