@@ -2893,7 +2893,8 @@ def run_portfolio_backtest(
     out_trades_csv: str = "backtest_trades.csv",
     out_summary_csv: str = "backtest_summary.csv",
 ):
-    accepted_signals = {}
+    accepted_signals_raw = {}
+    opened_signals = {}
     # ---- HER ÇALIŞTIRMA ÖNCESİ CSV TEMİZLE ----
     if os.path.exists(out_trades_csv):
         os.remove(out_trades_csv)
@@ -3019,7 +3020,7 @@ def run_portfolio_backtest(
         )
 
         if s_type and "ACCEPTED" in str(s_reason):
-            accepted_signals[(sym, tf)] = accepted_signals.get((sym, tf), 0) + 1
+            accepted_signals_raw[(sym, tf)] = accepted_signals_raw.get((sym, tf), 0) + 1
             # Aynı sembol/timeframe için açık trade var mı?
             has_open = any(
                 t["symbol"] == sym and t["timeframe"] == tf
@@ -3052,6 +3053,7 @@ def run_portfolio_backtest(
                         "open_time_utc": open_ts,
                     }
                 )
+                opened_signals[(sym, tf)] = opened_signals.get((sym, tf), 0) + 1
 
         # Sonraki bara ilerle
         i2 = i + 1
@@ -3072,9 +3074,13 @@ def run_portfolio_backtest(
     print(f"[DEBUG] Toplam kapatılmış trade sayısı: {len(tm.history)}")
     if tm.history:
         print("[DEBUG] İlk trade örneği:", tm.history[0])
-    if accepted_signals:
-        print("[DEBUG] Kabul edilen sinyal sayıları:")
-        for (sym, tf), cnt in sorted(accepted_signals.items()):
+    if accepted_signals_raw:
+        print("[DEBUG] Kabul edilen (ham) sinyal sayıları:")
+        for (sym, tf), cnt in sorted(accepted_signals_raw.items()):
+            print(f"  - {sym}-{tf}: {cnt}")
+    if opened_signals:
+        print("[DEBUG] Açılışa dönüşen sinyal sayıları (backtest tablo ile hizalı):")
+        for (sym, tf), cnt in sorted(opened_signals.items()):
             print(f"  - {sym}-{tf}: {cnt}")
 
     # Tüm history'den DataFrame oluştur ve CSV / özet yaz
@@ -3292,7 +3298,7 @@ def plot_trade(
 
 def replay_backtest_trades(
     trades_csv: str = "backtest_trades.csv",
-    max_trades: int = 20,
+    max_trades: Optional[int] = None,
     window: int = 60,
 ):
     """
@@ -3313,12 +3319,14 @@ def replay_backtest_trades(
         print("[REPLAY] 'id' kolonu yok, trade'ler beklenen formatta değil.")
         return
 
-    # Sadece kapanmış trade'leri al (istersen bunu değiştirebilirsin)
+    # Status kolonu varsa, en azından boş olmayanları bırak ki tüm kapananlar çizilsin
     if "status" in df_trades.columns:
-        df_trades = df_trades[df_trades["status"].isin(["CLOSED", "TP", "SL", "STOP", "STOPPED"])]
-    if df_trades.empty:
-        print("[REPLAY] Çizilecek trade yok.")
-        return
+        df_trades = df_trades[df_trades["status"].notna()]
+        # Yaşanacak olası format değişikliklerinde kazanım/kayıp etiketleri yine de gösterilsin
+        df_trades = df_trades[df_trades["status"].astype(str).str.len() > 0]
+        if df_trades.empty:
+            print("[REPLAY] 'status' kolonu boş, çizilecek trade yok.")
+            return
 
     # Zaman sırasına göre sırala
     if "open_time_utc" in df_trades.columns:
@@ -3328,8 +3336,9 @@ def replay_backtest_trades(
         df_trades["timestamp"] = pd.to_datetime(df_trades["timestamp"], errors="coerce")
         df_trades = df_trades.sort_values("timestamp")
 
-    # En fazla max_trades kadarını al
-    df_trades = df_trades.head(max_trades)
+    # En fazla max_trades kadarını al (None verilirse hepsini çiz)
+    if isinstance(max_trades, int) and max_trades > 0:
+        df_trades = df_trades.head(max_trades)
 
     print(f"[REPLAY] Toplam {len(df_trades)} trade çizilecek.")
 
