@@ -2489,7 +2489,15 @@ class SimTradeManager:
             if in_profit and use_partial:
                 if (not trade.get("partial_taken")) and progress >= 0.50:
                     partial_size = size / 2.0
-                    partial_pnl = pnl_percent_fav * partial_size
+
+                    if t_type == "LONG":
+                        partial_fill = float(fav_price) * (1 - self.slippage_pct)
+                        partial_pnl_percent = (partial_fill - entry) / entry
+                    else:
+                        partial_fill = float(fav_price) * (1 + self.slippage_pct)
+                        partial_pnl_percent = (entry - partial_fill) / entry
+
+                    partial_pnl = partial_pnl_percent * partial_size
                     commission = partial_size * TRADING_CONFIG["total_fee"]
                     net_partial_pnl = partial_pnl - commission
                     margin_release = initial_margin / 2.0
@@ -2505,7 +2513,9 @@ class SimTradeManager:
                     partial_record["close_time"] = (
                         candle_time_utc + timedelta(hours=3)
                     ).strftime("%Y-%m-%d %H:%M")
-                    partial_record["close_price"] = float(fav_price)
+                    partial_record["close_price"] = float(partial_fill)
+                    partial_record["pb_ema_top"] = pb_top
+                    partial_record["pb_ema_bot"] = pb_bot
                     self.history.append(partial_record)
 
                     self.open_trades[i]["size"] = partial_size
@@ -2609,6 +2619,8 @@ class SimTradeManager:
             trade["pnl"] = final_net_pnl
             trade["close_time"] = (candle_time_utc + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
             trade["close_price"] = float(exit_fill)
+            trade["pb_ema_top"] = pb_top
+            trade["pb_ema_bot"] = pb_bot
 
             self.history.append(trade)
             just_closed_trades.append(trade)
