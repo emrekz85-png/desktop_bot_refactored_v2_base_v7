@@ -36,6 +36,8 @@ candles = 50000
 REFRESH_RATE = 3
 CSV_FILE = "trades.csv"
 CONFIG_FILE = "config.json"
+# Backtestler için maks. mum sayısı sınırları
+BACKTEST_CANDLE_LIMITS = {"1m": 4000, "5m": 4000, "15m": 4000, "1h": 4000}
 
 # --- 💰 EKONOMİK MODEL (Tüm Modüller Burayı Kullanacak) ---
 #  uyarınca tek bir konfigürasyon yapısı:
@@ -2742,9 +2744,20 @@ def run_portfolio_backtest(
     import heapq
 
     streams = {}
+    tf_limit_log = set()
     for sym in symbols:
         for tf in timeframes:
-            df = TradingEngine.get_historical_data_pagination(sym, tf, total_candles=candles)
+            tf_candle_limit = BACKTEST_CANDLE_LIMITS.get(tf, candles)
+            if tf_candle_limit:
+                tf_candle_limit = min(candles, tf_candle_limit)
+            else:
+                tf_candle_limit = candles
+
+            if tf not in tf_limit_log and tf_candle_limit != candles:
+                print(f"[BACKTEST] {tf} mum geçmişi {tf_candle_limit} ile sınırlandı.")
+                tf_limit_log.add(tf)
+
+            df = TradingEngine.get_historical_data_pagination(sym, tf, total_candles=tf_candle_limit)
             if df is None or df.empty or len(df) < 400:
                 continue
 
@@ -2920,6 +2933,10 @@ def run_portfolio_backtest(
     if not summary_df.empty:
         print(summary_df.to_string(index=False))
     print(f"Final Wallet (sim): ${tm.wallet_balance:.2f} | Total PnL: ${tm.total_pnl:.2f}")
+
+    total_trades = trades_df["id"].nunique() if not trades_df.empty and "id" in trades_df.columns else 0
+    if total_trades < 5:
+        print("[BACKTEST] Çok az trade bulundu. Daha fazla sonuç için RR/RSI/Slope limitlerini biraz gevşetmeyi düşünebilirsin.")
 
 def plot_trade(
     df_prices: pd.DataFrame,
@@ -3129,7 +3146,7 @@ if __name__ == "__main__":
     run_portfolio_backtest(
         symbols=SYMBOLS,
         timeframes=TIMEFRAMES,
-        candles=50000,   # <-- GENİŞLEDİ
+        candles=4000,   # 1m/5m/15m/1h için sınır yeterli
         out_trades_csv=OUT_TRADES,
         out_summary_csv=OUT_SUMMARY,
     )
