@@ -168,11 +168,27 @@ DEFAULT_STRATEGY_CONFIG = {
 
 
 def load_optimized_config(symbol, timeframe):
-    config = DEFAULT_STRATEGY_CONFIG.copy()
+    """Return optimized config for given symbol/timeframe with safe defaults."""
+
+    defaults = {
+        "rr": 3.0,
+        "rsi": 60,
+        "slope": 0.5,
+        "at_active": False,
+        "use_trailing": False,
+        "use_dynamic_pbema_tp": False,
+    }
+
     symbol_cfg = SYMBOL_PARAMS.get(symbol, {})
     tf_cfg = symbol_cfg.get(timeframe, {}) if isinstance(symbol_cfg, dict) else {}
-    config.update(tf_cfg)
-    return config
+
+    merged = {**defaults, **tf_cfg}
+
+    # Backward compatibility: ensure missing keys fall back to defaults
+    for k, v in defaults.items():
+        merged.setdefault(k, v)
+
+    return merged
 
 
 
@@ -2758,7 +2774,7 @@ def run_portfolio_backtest(
         )
 
     tm = SimTradeManager(initial_balance=TRADING_CONFIG["initial_balance"])
-    accepted_signals = {k: 0 for k in streams.keys()}
+    logged_cfg_pairs = set()
 
     # Ana backtest döngüsü
     while heap:
@@ -2784,6 +2800,9 @@ def run_portfolio_backtest(
 
         # Bu sembol/timeframe için optimize edilmiş config
         config = load_optimized_config(sym, tf)
+        if (sym, tf) not in logged_cfg_pairs:
+            print(f"[BACKTEST][CFG] {sym}-{tf} -> {config}")
+            logged_cfg_pairs.add((sym, tf))
         rr, rsi, slope = config["rr"], config["rsi"], config["slope"]
         use_at = config.get("at_active", False)
 
