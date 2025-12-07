@@ -211,13 +211,14 @@ def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) 
 
     for i in range(warmup, end):
         row = df.iloc[i]
+        event_time = row["timestamp"] + _tf_to_timedelta(tf)
         tm.update_trades(
             sym,
             tf,
             candle_high=float(row["high"]),
             candle_low=float(row["low"]),
             candle_close=float(row["close"]),
-            candle_time_utc=row["timestamp"] + _tf_to_timedelta(tf),
+            candle_time_utc=event_time,
             pb_top=float(row.get("pb_ema_top", row["close"])),
             pb_bot=float(row.get("pb_ema_bot", row["close"])),
         )
@@ -242,23 +243,35 @@ def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) 
         if not (s_type and "ACCEPTED" in s_reason):
             continue
 
+        has_open = any(
+            t.get("symbol") == sym and t.get("timeframe") == tf for t in tm.open_trades
+        )
+        if has_open or tm.check_cooldown(sym, tf, event_time):
+            continue
+
+        next_row = df.iloc[i + 1]
+        entry_open = float(next_row["open"])
+        open_ts = next_row["timestamp"]
+        ts_str = (open_ts + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
+
         tm.open_trade(
             {
                 "symbol": sym,
                 "timeframe": tf,
                 "type": s_type,
                 "setup": s_reason,
-                "entry": s_entry,
+                "entry": entry_open,
                 "tp": s_tp,
                 "sl": s_sl,
-                "timestamp": row["timestamp"],
-                "open_time_utc": row["timestamp"],
+                "timestamp": ts_str,
+                "open_time_utc": open_ts,
                 "use_trailing": config.get("use_trailing", False),
                 "use_dynamic_pbema_tp": config.get("use_dynamic_pbema_tp", False),
             }
         )
 
-    return tm.total_pnl, len(tm.history)
+    unique_trades = len({t.get("id") for t in tm.history}) if tm.history else 0
+    return tm.total_pnl, unique_trades
 
 
 def _optimize_backtest_configs(streams: dict, requested_pairs: list):
