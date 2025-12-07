@@ -201,7 +201,15 @@ def _generate_candidate_configs():
 
 
 def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) -> Tuple[float, int]:
-    """Simulate a single timeframe with the given config and return (net_pnl, trades)."""
+    """Simulate a single timeframe with the given config and return (net_pnl, trades).
+
+    Not: Öndeki uyumsuzluk, tarayıcıdaki skorlamanın mum kapanışından
+    aynı mumda giriş yapıp cooldown/açık trade kontrollerini atlaması yüzünden
+    backtestten daha fazla trade ve PnL raporlamasından kaynaklanıyordu. Burada
+    backtest ile birebir aynı kuralları (cooldown, açık trade engeli ve bir
+    sonraki mum açılışından giriş) uygularız ki skor ve backtest sonuçları
+    tutarlı kalsın.
+    """
 
     tm = SimTradeManager(initial_balance=TRADING_CONFIG["initial_balance"])
     warmup = 250
