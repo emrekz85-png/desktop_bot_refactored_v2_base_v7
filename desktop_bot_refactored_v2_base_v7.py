@@ -31,7 +31,7 @@ import plotly.utils
 # ⚙️ GENEL AYARLAR VE SABİTLER (MERKEZİ YÖNETİM)
 # ==========================================
 SYMBOLS = ["BTCUSDT"]
-TIMEFRAMES = ["5m", "15m", "1h"]
+TIMEFRAMES = ["1m", "5m", "15m", "1h"]
 candles = 50000
 REFRESH_RATE = 3
 CSV_FILE = "trades.csv"
@@ -57,18 +57,18 @@ TRADING_CONFIG = {
 # ==========================================
 SYMBOL_PARAMS = {
     "BTCUSDT": {
-        # 1m: RR 1.5 ile hızlı scalp (33.40 R)
-        "1m": {"rr": 1.5, "rsi": 60, "slope": 0.7, "at_active": True, "use_trailing": False},
+        # 1m: Daha esnek scalp (daha fazla sinyal için RR ve slope düşürüldü)
+        "1m": {"rr": 1.3, "rsi": 70, "slope": 0.4, "at_active": False, "use_trailing": False},
 
-        # 5m: AlphaTrend AÇIK ve Trailing (45.23 R)
-        "5m": {"rr": 3.0, "rsi": 60, "slope": 0.5, "at_active": True, "use_trailing": False},
+        # 5m: AlphaTrend opsiyonel, slope yumuşatıldı
+        "5m": {"rr": 2.0, "rsi": 70, "slope": 0.4, "at_active": False, "use_trailing": False},
 
         # 4h: AlphaTrend KAPALI (Saf Trend) (16.53 R)
         "4h": {"rr": 2.0, "rsi": 30, "slope": 0.3, "at_active": False, "use_trailing": False},
 
         # Ara dönemler (1h fena değil, eklendi)
-        "15m": {"rr": 2.0, "rsi": 50, "slope": 0.7, "at_active": False, "use_trailing": False},
-        "1h": {"rr": 2.0, "rsi": 40, "slope": 0.9, "at_active": True, "use_trailing": False}
+        "15m": {"rr": 1.8, "rsi": 55, "slope": 0.6, "at_active": False, "use_trailing": False},
+        "1h": {"rr": 1.8, "rsi": 45, "slope": 0.8, "at_active": True, "use_trailing": False}
     },
     "ETHUSDT": {
         # 1m: AlphaTrend KAPALI daha iyi (19.25 R)
@@ -152,20 +152,20 @@ CHART_TEMPLATE = """
 
 
 DEFAULT_STRATEGY_CONFIG = {
-    "rr": 3.0,
-    "rsi": 60,
-    "slope": 0.5,
+    "rr": 2.0,
+    "rsi": 65,
+    "slope": 0.4,
     "at_active": False,
     "use_trailing": False,
     "use_dynamic_pbema_tp": False,
-    "hold_n": 5,
-    "min_hold_frac": 0.8,
-    "pb_touch_tolerance": 0.0012,
-    "body_tolerance": 0.0015,
-    "cloud_keltner_gap_min": 0.003,
-    "tp_min_dist_ratio": 0.0015,
-    "tp_max_dist_ratio": 0.03,
-    "adx_min": 12.0,
+    "hold_n": 4,
+    "min_hold_frac": 0.65,
+    "pb_touch_tolerance": 0.0018,
+    "body_tolerance": 0.0020,
+    "cloud_keltner_gap_min": 0.0025,
+    "tp_min_dist_ratio": 0.0010,
+    "tp_max_dist_ratio": 0.035,
+    "adx_min": 10.0,
 }
 
 
@@ -2744,6 +2744,7 @@ def run_portfolio_backtest(
     import heapq
 
     streams = {}
+    requested_pairs = list(itertools.product(symbols, timeframes))
     tf_limit_log = set()
     for sym in symbols:
         for tf in timeframes:
@@ -2759,6 +2760,7 @@ def run_portfolio_backtest(
 
             df = TradingEngine.get_historical_data_pagination(sym, tf, total_candles=tf_candle_limit)
             if df is None or df.empty or len(df) < 400:
+                print(f"[BACKTEST] {sym}-{tf} datası bulunamadı veya yetersiz (len={0 if df is None else len(df)})")
                 continue
 
             df = TradingEngine.calculate_indicators(df)
@@ -2920,6 +2922,21 @@ def run_portfolio_backtest(
                     "net_pnl": pnl,
                 }
             )
+
+    # Eksik kalan sembol/zaman dilimlerini 0 trade ile rapora ekle
+    existing_pairs = {(row["symbol"], row["timeframe"]) for row in summary_rows}
+    for sym, tf in requested_pairs:
+        if (sym, tf) in existing_pairs:
+            continue
+        summary_rows.append(
+            {
+                "symbol": sym,
+                "timeframe": tf,
+                "trades": 0,
+                "win_rate_pct": 0.0,
+                "net_pnl": 0.0,
+            }
+        )
 
     summary_df = (
         pd.DataFrame(summary_rows).sort_values(["symbol", "timeframe"])
@@ -3141,7 +3158,7 @@ if __name__ == "__main__":
     OUT_SUMMARY = "backtest_summary.csv"
 
     SYMBOLS = ["BTCUSDT"]
-    TIMEFRAMES = ["5m", "15m", "1h"]  # <-- EKLEDİK
+    TIMEFRAMES = ["1m", "5m", "15m", "1h"]  # <-- EKLEDİK
 
     run_portfolio_backtest(
         symbols=SYMBOLS,
