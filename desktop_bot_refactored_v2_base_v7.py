@@ -2363,6 +2363,274 @@ class SimTradeManager:
         del self.cooldowns[k]
         return False
 
+    def _next_id(self):
+        tid = self._id
+        self._id += 1
+        return tid
+
+    def open_trade(self, trade_data):
+        tf = trade_data["timeframe"]
+        sym = trade_data["symbol"]
+
+        if (sym, tf) in self.cooldowns:
+            if datetime.utcnow() < self.cooldowns[(sym, tf)]:
+                return
+            del self.cooldowns[(sym, tf)]
+
+        setup_type = trade_data.get("setup", "Unknown")
+
+        if self.wallet_balance < 10:
+            return
+
+        raw_entry = float(trade_data["entry"])
+        trade_type = trade_data["type"]
+
+        if trade_type == "LONG":
+            real_entry = raw_entry * (1 + self.slippage_pct)
+        else:
+            real_entry = raw_entry * (1 - self.slippage_pct)
+
+        margin_to_use = self.wallet_balance * TRADING_CONFIG["usable_balance_pct"]
+        trade_size = margin_to_use * TRADING_CONFIG["leverage"]
+
+        open_time_val = trade_data.get("open_time_utc") or datetime.utcnow()
+        if isinstance(open_time_val, pd.Timestamp):
+            open_time_val = open_time_val.to_pydatetime()
+        open_time_str = open_time_val.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        new_trade = {
+            "id": self._next_id(),
+            "symbol": sym,
+            "timestamp": trade_data.get("timestamp", datetime.utcnow().strftime("%Y-%m-%d %H:%M")),
+            "open_time_utc": open_time_str,
+            "timeframe": tf,
+            "type": trade_type,
+            "setup": setup_type,
+            "entry": real_entry,
+            "tp": float(trade_data["tp"]),
+            "sl": float(trade_data["sl"]),
+            "size": trade_size,
+            "margin": margin_to_use,
+            "status": "OPEN",
+            "pnl": 0.0,
+            "breakeven": False,
+            "trailing_active": False,
+            "partial_taken": False,
+            "has_cash": True,
+            "close_time": "",
+            "close_price": "",
+        }
+
+        self.wallet_balance -= margin_to_use
+        self.locked_margin += margin_to_use
+        self.open_trades.append(new_trade)
+
+    def update_trades(
+        self,
+        symbol,
+        tf,
+        candle_high,
+        candle_low,
+        candle_close,
+        candle_time_utc=None,
+        pb_top=None,
+        pb_bot=None,
+    ):
+        """
+        Trade update modeli (Sim backtest):
+        - Mum içi (high/low) ile TP/SL tetiklerini yakalar.
+        - TP, mümkünse dinamik olarak PBEMA cloud seviyesine göre değerlendirilir.
+        - Aynı mumda hem TP hem SL görülürse konservatif olarak STOP seçer.
+        - Partial TP (%50) + breakeven / trailing SL desteklenir.
+        - Çıkışta slippage + komisyon + basit funding maliyeti düşer.
+        """
+        if candle_time_utc is None:
+            candle_time_utc = datetime.utcnow()
+
+        closed_indices = []
+        just_closed_trades = []
+
+        for i, trade in enumerate(self.open_trades):
+            if trade.get("symbol") != symbol:
+                continue
+            if trade.get("timeframe") != tf:
+                continue
+
+            entry = float(trade["entry"])
+            tp = float(trade["tp"])
+            sl = float(trade["sl"])
+            size = float(trade["size"])
+            t_type = trade["type"]
+            initial_margin = float(trade.get("margin", size / TRADING_CONFIG["leverage"]))
+
+            config = load_optimized_config(symbol, tf)
+            use_trailing = config.get("use_trailing", False)
+            use_partial = not use_trailing
+
+            if t_type == "LONG":
+                close_price = candle_close
+                fav_price = candle_high
+                pnl_percent_close = (close_price - entry) / entry
+                pnl_percent_fav = (fav_price - entry) / entry
+                in_profit = fav_price > entry
+            else:
+                close_price = candle_close
+                fav_price = candle_low
+                pnl_percent_close = (entry - close_price) / entry
+                pnl_percent_fav = (entry - fav_price) / entry
+                in_profit = fav_price < entry
+
+            self.open_trades[i]["pnl"] = pnl_percent_close * size
+
+            total_dist = abs(tp - entry)
+            current_dist = abs(fav_price - entry)
+            progress = current_dist / total_dist if total_dist > 0 else 0.0
+
+            if in_profit and use_partial:
+                if (not trade.get("partial_taken")) and progress >= 0.50:
+                    partial_size = size / 2.0
+
+                    if t_type == "LONG":
+                        partial_fill = float(fav_price) * (1 - self.slippage_pct)
+                        partial_pnl_percent = (partial_fill - entry) / entry
+                    else:
+                        partial_fill = float(fav_price) * (1 + self.slippage_pct)
+                        partial_pnl_percent = (entry - partial_fill) / entry
+
+                    partial_pnl = partial_pnl_percent * partial_size
+                    commission = partial_size * TRADING_CONFIG["total_fee"]
+                    net_partial_pnl = partial_pnl - commission
+                    margin_release = initial_margin / 2.0
+
+                    self.wallet_balance += margin_release + net_partial_pnl
+                    self.locked_margin -= margin_release
+                    self.total_pnl += net_partial_pnl
+
+                    partial_record = trade.copy()
+                    partial_record["size"] = partial_size
+                    partial_record["pnl"] = net_partial_pnl
+                    partial_record["status"] = "PARTIAL TP (50%)"
+                    partial_record["close_time"] = (
+                        candle_time_utc + timedelta(hours=3)
+                    ).strftime("%Y-%m-%d %H:%M")
+                    partial_record["close_price"] = float(partial_fill)
+                    partial_record["pb_ema_top"] = pb_top
+                    partial_record["pb_ema_bot"] = pb_bot
+                    self.history.append(partial_record)
+
+                    self.open_trades[i]["size"] = partial_size
+                    self.open_trades[i]["margin"] = margin_release
+                    self.open_trades[i]["partial_taken"] = True
+                    self.open_trades[i]["sl"] = entry
+                    self.open_trades[i]["breakeven"] = True
+
+                elif (not trade.get("breakeven")) and progress >= 0.40:
+                    self.open_trades[i]["sl"] = entry
+                    self.open_trades[i]["breakeven"] = True
+
+            if in_profit and use_trailing:
+                if (not trade.get("breakeven")) and progress >= 0.40:
+                    self.open_trades[i]["sl"] = entry
+                    self.open_trades[i]["breakeven"] = True
+
+                if progress >= 0.50:
+                    trail_buffer = total_dist * 0.40
+                    current_sl = float(self.open_trades[i]["sl"])
+                    if t_type == "LONG":
+                        new_sl = close_price - trail_buffer
+                        if new_sl > current_sl:
+                            self.open_trades[i]["sl"] = new_sl
+                            self.open_trades[i]["trailing_active"] = True
+                    else:
+                        new_sl = close_price + trail_buffer
+                        if new_sl < current_sl:
+                            self.open_trades[i]["sl"] = new_sl
+                            self.open_trades[i]["trailing_active"] = True
+
+            sl = float(self.open_trades[i]["sl"])
+
+            dyn_tp = tp
+            try:
+                if pb_top is not None and pb_bot is not None:
+                    if t_type == "LONG":
+                        dyn_tp = float(pb_bot)
+                    else:
+                        dyn_tp = float(pb_top)
+            except Exception:
+                dyn_tp = tp
+
+            if t_type == "LONG":
+                hit_tp = candle_high >= dyn_tp
+                hit_sl = candle_low <= sl
+            else:
+                hit_tp = candle_low <= dyn_tp
+                hit_sl = candle_high >= sl
+
+            if not (hit_tp or hit_sl):
+                continue
+
+            if hit_tp and hit_sl:
+                reason = "STOP (BothHit)"
+                exit_level = sl
+            elif hit_tp:
+                reason = "WIN (TP)"
+                exit_level = dyn_tp
+            else:
+                reason = "STOP"
+                exit_level = sl
+
+            current_size = float(self.open_trades[i]["size"])
+            margin_release = float(self.open_trades[i].get("margin", initial_margin))
+
+            if t_type == "LONG":
+                exit_fill = float(exit_level) * (1 - self.slippage_pct)
+                pnl_percent = (exit_fill - entry) / entry
+            else:
+                exit_fill = float(exit_level) * (1 + self.slippage_pct)
+                pnl_percent = (entry - exit_fill) / entry
+
+            gross_pnl = pnl_percent * current_size
+            commission = current_size * TRADING_CONFIG["total_fee"]
+
+            funding_cost = 0.0
+            try:
+                open_time_str = trade.get("open_time_utc", "")
+                if open_time_str:
+                    open_dt = datetime.strptime(open_time_str, "%Y-%m-%dT%H:%M:%SZ")
+                    hours = max(0.0, (candle_time_utc - open_dt).total_seconds() / 3600.0)
+                    funding_cost = abs(current_size) * TRADING_CONFIG["funding_rate_8h"] * (hours / 8.0)
+            except Exception:
+                funding_cost = 0.0
+
+            final_net_pnl = gross_pnl - commission - funding_cost
+
+            self.wallet_balance += margin_release + final_net_pnl
+            self.locked_margin -= margin_release
+            self.total_pnl += final_net_pnl
+
+            if "STOP" in reason:
+                wait_minutes = 10 if tf == "1m" else (30 if tf == "5m" else 60)
+                self.cooldowns[(symbol, tf)] = datetime.utcnow() + timedelta(minutes=wait_minutes)
+
+            if trade.get("breakeven") and abs(final_net_pnl) < 1e-6 and "STOP" in reason:
+                reason = "BE"
+
+            trade["status"] = reason
+            trade["pnl"] = final_net_pnl
+            trade["close_time"] = (candle_time_utc + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
+            trade["close_price"] = float(exit_fill)
+            trade["pb_ema_top"] = pb_top
+            trade["pb_ema_bot"] = pb_bot
+
+            self.history.append(trade)
+            just_closed_trades.append(trade)
+            closed_indices.append(i)
+
+        for idx in sorted(closed_indices, reverse=True):
+            del self.open_trades[idx]
+
+        return just_closed_trades
+
 
 
 def run_portfolio_backtest(
