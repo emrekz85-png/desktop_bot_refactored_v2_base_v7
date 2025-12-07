@@ -2475,7 +2475,6 @@ class SimTradeManager:
             config = load_optimized_config(symbol, tf)
             use_trailing = config.get("use_trailing", False)
             use_partial = not use_trailing
-            use_dynamic_tp = config.get("use_dynamic_pbema_tp", False)
 
             if t_type == "LONG":
                 close_price = candle_close
@@ -2560,15 +2559,14 @@ class SimTradeManager:
             sl = float(self.open_trades[i]["sl"])
 
             dyn_tp = tp
-            if use_dynamic_tp:
-                try:
-                    if pb_top is not None and pb_bot is not None:
-                        if t_type == "LONG":
-                            dyn_tp = float(pb_bot)
-                        else:
-                            dyn_tp = float(pb_top)
-                except Exception:
-                    dyn_tp = tp
+            try:
+                if pb_top is not None and pb_bot is not None:
+                    if t_type == "LONG":
+                        dyn_tp = float(pb_bot)
+                    else:
+                        dyn_tp = float(pb_top)
+            except Exception:
+                dyn_tp = tp
 
             if t_type == "LONG":
                 hit_tp = candle_high >= dyn_tp
