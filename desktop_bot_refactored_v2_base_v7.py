@@ -211,7 +211,6 @@ def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) 
 
     for i in range(warmup, end):
         row = df.iloc[i]
-        event_time = row["timestamp"] + _tf_to_timedelta(tf)
         tm.update_trades(
             sym,
             tf,
@@ -243,42 +242,17 @@ def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) 
         if not (s_type and "ACCEPTED" in s_reason):
             continue
 
-        # Ana backtest ile aynı kısıtlar: aktif pozisyon varsa veya cooldown sürüyorsa atla.
-        # Bu, optimizasyon aşamasındaki trade sayısı ile gerçek backtest sonuçlarının
-        # uyumlu kalmasını sağlar (aynı anda sadece bir trade ve cooldown koruması).
-        has_open = any(
-            t["symbol"] == sym and t["timeframe"] == tf
-            for t in tm.open_trades
-        )
-        if has_open or tm.check_cooldown(sym, tf, event_time):
-            continue
-
-        # Ana backtest ile aynı: giriş bir sonraki mumun açılışından alınır.
-        if i + 1 >= len(df):
-            break
-
-        next_row = df.iloc[i + 1]
-        entry_open = float(next_row["open"])
-        open_ts = next_row["timestamp"]
-        ts_str = (open_ts + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
-
-        # Setup etiketini çıkart (örn: Base)
-        setup_tag = "Unknown"
-        s_reason_str = str(s_reason)
-        if "ACCEPTED" in s_reason_str and "(" in s_reason_str and ")" in s_reason_str:
-            setup_tag = s_reason_str[s_reason_str.find("(") + 1 : s_reason_str.find(")")]
-
         tm.open_trade(
             {
                 "symbol": sym,
                 "timeframe": tf,
                 "type": s_type,
-                "setup": setup_tag,
-                "entry": entry_open,
+                "setup": s_reason,
+                "entry": s_entry,
                 "tp": s_tp,
                 "sl": s_sl,
-                "timestamp": ts_str,
-                "open_time_utc": open_ts,
+                "timestamp": row["timestamp"],
+                "open_time_utc": row["timestamp"],
                 "use_trailing": config.get("use_trailing", False),
                 "use_dynamic_pbema_tp": config.get("use_dynamic_pbema_tp", False),
             }
