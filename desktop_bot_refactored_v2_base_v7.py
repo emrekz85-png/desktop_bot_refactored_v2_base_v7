@@ -2775,6 +2775,7 @@ def run_portfolio_backtest(
 
     tm = SimTradeManager(initial_balance=TRADING_CONFIG["initial_balance"])
     logged_cfg_pairs = set()
+    accepted_signals = {}
 
     # Ana backtest döngüsü
     while heap:
