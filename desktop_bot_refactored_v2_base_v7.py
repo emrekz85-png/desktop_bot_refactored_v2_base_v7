@@ -211,7 +211,6 @@ def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) 
 
     for i in range(warmup, end):
         row = df.iloc[i]
-        event_time = row["timestamp"] + _tf_to_timedelta(tf)
         tm.update_trades(
             sym,
             tf,
@@ -241,14 +240,6 @@ def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) 
         )
 
         if not (s_type and "ACCEPTED" in s_reason):
-            continue
-
-        # Ana backtest ile aynı kısıtlar: aktif pozisyon varsa veya cooldown sürüyorsa atla
-        has_open = any(
-            t["symbol"] == sym and t["timeframe"] == tf
-            for t in tm.open_trades
-        )
-        if has_open or tm.check_cooldown(sym, tf, event_time):
             continue
 
         tm.open_trade(
