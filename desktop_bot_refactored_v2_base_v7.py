@@ -1934,21 +1934,58 @@ class AutoBacktestWorker(QThread):
 
     def run_full_analysis(self):
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
-        report_lines = [f"--- GÜNLÜK BACKTEST RAPORU ({timestamp}) ---",
-                        f"Gerçekçi Mod: %{TRADING_CONFIG['slippage_rate'] * 100} Slippage, %{TRADING_CONFIG['total_fee'] * 100} Fee\n"]
+        report_lines = [
+            f"--- GÜNLÜK BACKTEST RAPORU ({timestamp}) ---",
+            f"Gerçekçi Mod: %{TRADING_CONFIG['slippage_rate'] * 100} Slippage, %{TRADING_CONFIG['total_fee'] * 100} Fee",
+            "BTC/ETH/SOL | TF: 1m,5m,15m,1h | Mum: 15000",
+            "",
+        ]
 
-        # ... (Tarama mantığı aynen kalsın, sadece hesaplamalarda TRADING_CONFIG kullanılacak) ...
-        # KOD KISALTMASI: Buradaki hesaplama mantığı OptimizerWorker ile aynıdır.
-        # Önemli olan kayıt yerini düzeltmek.
-
-        # --- DOSYA KAYDETME DÜZELTMESİ  ---
         try:
-            # Programın çalıştığı dizinde 'raporlar' klasörü oluştur
+            max_daily_candles = max(DAILY_REPORT_CANDLE_LIMITS.values())
+            print("[AUTO] Günlük backtest başlıyor (15k mum)")
+            result = run_portfolio_backtest(
+                symbols=SYMBOLS,
+                timeframes=[tf for tf in TIMEFRAMES if tf in DAILY_REPORT_CANDLE_LIMITS],
+                candles=max_daily_candles,
+                out_trades_csv="daily_report_trades.csv",
+                out_summary_csv="daily_report_summary.csv",
+                limit_map=DAILY_REPORT_CANDLE_LIMITS,
+            ) or {}
+
+            summary_rows = result.get("summary", []) if isinstance(result, dict) else []
+            best_configs = result.get("best_configs", {}) if isinstance(result, dict) else {}
+
+            if summary_rows:
+                report_lines.append("Özet Tablosu:")
+                for row in summary_rows:
+                    report_lines.append(
+                        f"- {row['symbol']}-{row['timeframe']}: Trades={row['trades']}, WR={row['win_rate_pct']:.1f}%, NetPnL={row['net_pnl']:.2f}"
+                    )
+                report_lines.append("")
+            else:
+                report_lines.append("⚠️ Veri bulunamadı veya backtest başarısız.")
+
+            if best_configs:
+                save_best_configs(best_configs)
+                report_lines.append("En İyi Ayarlar (Net PnL'e göre):")
+                for (sym, tf), cfg in sorted(best_configs.items()):
+                    report_lines.append(
+                        f"- {sym}-{tf}: RR={cfg['rr']}, RSI={cfg['rsi']}, Slope={cfg['slope']}, AT={'Açık' if cfg.get('at_active') else 'Kapalı'}, Trailing={cfg.get('use_trailing', False)} | NetPnL={cfg.get('_net_pnl', 0):.2f}, Trades={cfg.get('_trades', 0)}"
+                    )
+                report_lines.append("")
+
+        except Exception as e:
+            err_msg = f"Rapor hatası: {e}"
+            print(err_msg)
+            report_lines.append(err_msg)
+
+        # --- DOSYA KAYDETME ---
+        try:
             report_dir = os.path.join(os.getcwd(), "raporlar")
             if not os.path.exists(report_dir):
                 os.makedirs(report_dir)
 
-            # Dosya adı: Rapor_YIL-AY-GÜN_SAAT.txt
             file_name = f"Rapor_{datetime.now().strftime('%Y-%m-%d_%H%M')}.txt"
             file_path = os.path.join(report_dir, file_name)
 
@@ -3083,6 +3120,7 @@ def run_portfolio_backtest(
     candles: int = 3000,
     out_trades_csv: str = "backtest_trades.csv",
     out_summary_csv: str = "backtest_summary.csv",
+    limit_map: Optional[dict] = None,
 ):
     accepted_signals_raw = {}
     opened_signals = {}
@@ -3102,11 +3140,13 @@ def run_portfolio_backtest(
     import heapq
 
     streams = {}
+    limit_map = limit_map or {}
     requested_pairs = list(itertools.product(symbols, timeframes))
     tf_limit_log = set()
     for sym in symbols:
         for tf in timeframes:
-            tf_candle_limit = BACKTEST_CANDLE_LIMITS.get(tf, candles)
+            active_limit_map = limit_map if limit_map else BACKTEST_CANDLE_LIMITS
+            tf_candle_limit = active_limit_map.get(tf, candles)
             if tf_candle_limit:
                 tf_candle_limit = min(candles, tf_candle_limit)
             else:
