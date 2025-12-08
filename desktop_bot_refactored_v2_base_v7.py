@@ -2,6 +2,8 @@ import sys
 import os
 import time
 import json
+import io
+import contextlib
 import pandas as pd
 import pandas_ta as ta
 import numpy as np
@@ -30,7 +32,7 @@ import plotly.utils
 # ==========================================
 # ⚙️ GENEL AYARLAR VE SABİTLER (MERKEZİ YÖNETİM)
 # ==========================================
-SYMBOLS = ["BTCUSDT"]
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 TIMEFRAMES = ["1m", "5m", "15m", "1h"]
 candles = 50000
 REFRESH_RATE = 3
@@ -38,6 +40,10 @@ CSV_FILE = "trades.csv"
 CONFIG_FILE = "config.json"
 # Backtestler için maks. mum sayısı sınırları
 BACKTEST_CANDLE_LIMITS = {"1m": 4000, "5m": 4000, "15m": 4000, "1h": 4000}
+# Günlük rapor ve uzun soluklu taramalar için genişletilmiş limit
+DAILY_REPORT_CANDLE_LIMITS = {"1m": 15000, "5m": 15000, "15m": 15000, "1h": 15000}
+BEST_CONFIGS_FILE = "best_configs.json"
+BEST_CONFIG_CACHE = {}
 
 # --- 💰 EKONOMİK MODEL (Tüm Modüller Burayı Kullanacak) ---
 #  uyarınca tek bir konfigürasyon yapısı:
@@ -336,7 +342,28 @@ def _optimize_backtest_configs(streams: dict, requested_pairs: list):
 
 
 def load_optimized_config(symbol, timeframe):
-    """Return optimized config for given symbol/timeframe with safe defaults."""
+    """Return optimized config for given symbol/timeframe with safe defaults.
+
+    Öncelik sırası:
+    1. GUI'den veya CLI'den yapılan backtest sonucunda kaydedilen en iyi ayarlar
+    2. SYMBOL_PARAMS içinde tanımlı manuel ayarlar
+    3. Güvenli varsayılanlar
+    """
+
+    def _load_best_configs():
+        global BEST_CONFIG_CACHE
+        if BEST_CONFIG_CACHE:
+            return BEST_CONFIG_CACHE
+        if os.path.exists(BEST_CONFIGS_FILE):
+            try:
+                with open(BEST_CONFIGS_FILE, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                # Beklenen format: {"SYMBOL": {"tf": {...}}}
+                if isinstance(raw, dict):
+                    BEST_CONFIG_CACHE = raw
+            except Exception:
+                BEST_CONFIG_CACHE = {}
+        return BEST_CONFIG_CACHE
 
     defaults = {
         "rr": 3.0,
@@ -347,8 +374,14 @@ def load_optimized_config(symbol, timeframe):
         "use_dynamic_pbema_tp": True,
     }
 
+    best_cfgs = _load_best_configs()
     symbol_cfg = SYMBOL_PARAMS.get(symbol, {})
     tf_cfg = symbol_cfg.get(timeframe, {}) if isinstance(symbol_cfg, dict) else {}
+
+    if isinstance(best_cfgs, dict):
+        sym_dict = best_cfgs.get(symbol, {}) if isinstance(best_cfgs.get(symbol), dict) else {}
+        if isinstance(sym_dict, dict) and timeframe in sym_dict:
+            tf_cfg = {**tf_cfg, **sym_dict.get(timeframe, {})}
 
     merged = {**defaults, **tf_cfg}
 
@@ -357,6 +390,29 @@ def load_optimized_config(symbol, timeframe):
         merged.setdefault(k, v)
 
     return merged
+
+
+def save_best_configs(best_configs: dict):
+    """Persist best backtest configs to disk and cache for live bot usage."""
+
+    global BEST_CONFIG_CACHE
+    cleaned = {}
+    for (key, cfg) in best_configs.items():
+        # key can be tuple (sym, tf) or nested dict
+        if isinstance(key, tuple) and len(key) == 2:
+            sym, tf = key
+            cleaned.setdefault(sym, {})
+            cleaned[sym][tf] = {k: v for k, v in cfg.items() if not str(k).startswith("_")}
+        elif isinstance(cfg, dict):
+            # already nested
+            cleaned[key] = cfg
+
+    BEST_CONFIG_CACHE = cleaned
+    try:
+        with open(BEST_CONFIGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(cleaned, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 
 
@@ -1880,21 +1936,58 @@ class AutoBacktestWorker(QThread):
 
     def run_full_analysis(self):
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M')
-        report_lines = [f"--- GÜNLÜK BACKTEST RAPORU ({timestamp}) ---",
-                        f"Gerçekçi Mod: %{TRADING_CONFIG['slippage_rate'] * 100} Slippage, %{TRADING_CONFIG['total_fee'] * 100} Fee\n"]
+        report_lines = [
+            f"--- GÜNLÜK BACKTEST RAPORU ({timestamp}) ---",
+            f"Gerçekçi Mod: %{TRADING_CONFIG['slippage_rate'] * 100} Slippage, %{TRADING_CONFIG['total_fee'] * 100} Fee",
+            "BTC/ETH/SOL | TF: 1m,5m,15m,1h | Mum: 15000",
+            "",
+        ]
 
-        # ... (Tarama mantığı aynen kalsın, sadece hesaplamalarda TRADING_CONFIG kullanılacak) ...
-        # KOD KISALTMASI: Buradaki hesaplama mantığı OptimizerWorker ile aynıdır.
-        # Önemli olan kayıt yerini düzeltmek.
-
-        # --- DOSYA KAYDETME DÜZELTMESİ  ---
         try:
-            # Programın çalıştığı dizinde 'raporlar' klasörü oluştur
+            max_daily_candles = max(DAILY_REPORT_CANDLE_LIMITS.values())
+            print("[AUTO] Günlük backtest başlıyor (15k mum)")
+            result = run_portfolio_backtest(
+                symbols=SYMBOLS,
+                timeframes=[tf for tf in TIMEFRAMES if tf in DAILY_REPORT_CANDLE_LIMITS],
+                candles=max_daily_candles,
+                out_trades_csv="daily_report_trades.csv",
+                out_summary_csv="daily_report_summary.csv",
+                limit_map=DAILY_REPORT_CANDLE_LIMITS,
+            ) or {}
+
+            summary_rows = result.get("summary", []) if isinstance(result, dict) else []
+            best_configs = result.get("best_configs", {}) if isinstance(result, dict) else {}
+
+            if summary_rows:
+                report_lines.append("Özet Tablosu:")
+                for row in summary_rows:
+                    report_lines.append(
+                        f"- {row['symbol']}-{row['timeframe']}: Trades={row['trades']}, WR={row['win_rate_pct']:.1f}%, NetPnL={row['net_pnl']:.2f}"
+                    )
+                report_lines.append("")
+            else:
+                report_lines.append("⚠️ Veri bulunamadı veya backtest başarısız.")
+
+            if best_configs:
+                save_best_configs(best_configs)
+                report_lines.append("En İyi Ayarlar (Net PnL'e göre):")
+                for (sym, tf), cfg in sorted(best_configs.items()):
+                    report_lines.append(
+                        f"- {sym}-{tf}: RR={cfg['rr']}, RSI={cfg['rsi']}, Slope={cfg['slope']}, AT={'Açık' if cfg.get('at_active') else 'Kapalı'}, Trailing={cfg.get('use_trailing', False)} | NetPnL={cfg.get('_net_pnl', 0):.2f}, Trades={cfg.get('_trades', 0)}"
+                    )
+                report_lines.append("")
+
+        except Exception as e:
+            err_msg = f"Rapor hatası: {e}"
+            print(err_msg)
+            report_lines.append(err_msg)
+
+        # --- DOSYA KAYDETME ---
+        try:
             report_dir = os.path.join(os.getcwd(), "raporlar")
             if not os.path.exists(report_dir):
                 os.makedirs(report_dir)
 
-            # Dosya adı: Rapor_YIL-AY-GÜN_SAAT.txt
             file_name = f"Rapor_{datetime.now().strftime('%Y-%m-%d_%H%M')}.txt"
             file_path = os.path.join(report_dir, file_name)
 
@@ -1908,6 +2001,33 @@ class AutoBacktestWorker(QThread):
                                             f"🌙 Rapor Hazır: {file_name}")
         except Exception as e:
             print(f"Rapor hatası: {e}")
+
+
+class BacktestWorker(QThread):
+    log_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(dict)
+
+    def __init__(self, symbols, timeframes, candles):
+        super().__init__()
+        self.symbols = symbols
+        self.timeframes = timeframes
+        self.candles = candles
+
+    def run(self):
+        buf = io.StringIO()
+        result = {}
+        try:
+            with contextlib.redirect_stdout(buf):
+                result = run_portfolio_backtest(
+                    symbols=self.symbols,
+                    timeframes=self.timeframes,
+                    candles=self.candles,
+                ) or {}
+        except Exception as e:
+            buf.write(f"\n[BACKTEST][GUI] Hata: {e}\n{traceback.format_exc()}\n")
+        finally:
+            self.log_signal.emit(buf.getvalue())
+            self.finished_signal.emit(result if isinstance(result, dict) else {})
 
 
 # --- GUI (ANA PENCERE) ---
@@ -1940,6 +2060,7 @@ class MainWindow(QMainWindow):
         self.show_rr_tools = True
         self.data_cache = {sym: {tf: (None, None) for tf in TIMEFRAMES} for sym in SYMBOLS}
         self.current_symbol = SYMBOLS[0]
+        self.backtest_worker = None
 
         central = QWidget();
         self.setCentralWidget(central);
@@ -2111,6 +2232,20 @@ class MainWindow(QMainWindow):
 
         asset_group.setLayout(asset_layout)
         hist_layout.addWidget(asset_group)
+
+        # Portföy tablosu (canlı işlemlerle senkron)
+        portfolio_group = QGroupBox("Portföy Durumu")
+        port_layout = QVBoxLayout()
+        self.portfolio_table = QTableWidget()
+        self.portfolio_table.setColumnCount(9)
+        self.portfolio_table.setHorizontalHeaderLabels([
+            "Sembol", "TF", "Yön", "Giriş", "TP", "SL", "Kilitli Marj", "Poz. Büyüklüğü", "Anlık PnL"
+        ])
+        self.portfolio_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        port_layout.addWidget(self.portfolio_table)
+        portfolio_group.setLayout(port_layout)
+        hist_layout.addWidget(portfolio_group)
+
         # Tabloyu oluştur
         self.pnl_table = self.create_pnl_table()
 
@@ -2142,7 +2277,30 @@ class MainWindow(QMainWindow):
         hist_layout.addWidget(hist_group)
         self.main_tabs.addTab(history_widget, "📜 Geçmiş & Varlık")
 
-        # 4. SEKME: Optimizasyon (Temizlendi & Otomatikleştirildi)
+        # 4. SEKME: Backtest
+        backtest_widget = QWidget();
+        backtest_layout = QVBoxLayout(backtest_widget)
+        bt_cfg = QHBoxLayout()
+        bt_cfg.addWidget(QLabel("Semboller:"));
+        bt_cfg.addWidget(QLabel(", ".join(SYMBOLS)))
+        bt_cfg.addWidget(QLabel("TF:"));
+        bt_cfg.addWidget(QLabel(", ".join(TIMEFRAMES)))
+        bt_cfg.addWidget(QLabel("Mum Sayısı:"));
+        self.backtest_candles = QSpinBox();
+        self.backtest_candles.setRange(500, 4000);
+        self.backtest_candles.setValue(4000);
+        bt_cfg.addWidget(self.backtest_candles)
+        self.btn_run_backtest = QPushButton("🧪 Backtest Çalıştır");
+        self.btn_run_backtest.clicked.connect(self.start_backtest);
+        bt_cfg.addWidget(self.btn_run_backtest)
+        backtest_layout.addLayout(bt_cfg)
+
+        self.backtest_logs = QTextEdit();
+        self.backtest_logs.setReadOnly(True);
+        backtest_layout.addWidget(self.backtest_logs)
+        self.main_tabs.addTab(backtest_widget, "🧪 Backtest")
+
+        # 5. SEKME: Optimizasyon (Temizlendi & Otomatikleştirildi)
         opt_widget = QWidget();
         opt_layout = QVBoxLayout(opt_widget)
         grid_group = QGroupBox("Parametre Aralıkları");
@@ -2153,11 +2311,6 @@ class MainWindow(QMainWindow):
         btn_test_report.clicked.connect(self.force_daily_report)
         opt_layout.addWidget(btn_test_report)
         # ----------------------------------------
-
-        self.opt_logs = QTextEdit();
-        self.opt_logs.setReadOnly(True);
-        opt_layout.addWidget(self.opt_logs)
-        self.main_tabs.addTab(opt_widget, "🔧 Optimizasyon")
 
         # RR Ayarları
         grid_layout.addWidget(QLabel("RR:"));
@@ -2215,8 +2368,6 @@ class MainWindow(QMainWindow):
         # ----------------------------
 
         self.btn_run_opt = QPushButton("🚀 TAM TARAMA BAŞLAT");
-
-        self.btn_run_opt = QPushButton("🚀 TAM TARAMA BAŞLAT");
         self.btn_run_opt.clicked.connect(self.run_optimization);
         candles_layout.addWidget(self.btn_run_opt)
         opt_layout.addLayout(candles_layout)
@@ -2225,6 +2376,9 @@ class MainWindow(QMainWindow):
         self.opt_logs.setReadOnly(True);
         opt_layout.addWidget(self.opt_logs)
         self.main_tabs.addTab(opt_widget, "🔧 Optimizasyon")
+
+        # Açılışta canlı takip sekmesini öne çıkar
+        self.main_tabs.setCurrentWidget(live_widget)
 
         # BAŞLATMA
         self.current_params = {}
@@ -2286,10 +2440,12 @@ class MainWindow(QMainWindow):
 
     def refresh_trade_table_from_manager(self):
         try:
+            open_trades = list(trade_manager.open_trades)
             # --- 1. GÜNCEL KASA VERİLERİNİ ÇEK ---
             wallet_bal = trade_manager.wallet_balance  # Kullanılabilir
             locked = trade_manager.locked_margin  # İşlemdeki
-            total_equity = wallet_bal + locked  # Toplam Varlık
+            open_pnl = sum(float(t.get("pnl", 0)) for t in open_trades)
+            total_equity = wallet_bal + locked + open_pnl  # Toplam Varlık + açık pozisyon PnL'i
             total_pnl = trade_manager.total_pnl  # Toplam Net Kâr (Komisyon düşülmüş)
 
             # Günlük PnL Hesapla (Bugün kapanan işlemler)
@@ -2321,7 +2477,6 @@ class MainWindow(QMainWindow):
                     self.lbl_daily_pnl_val.setStyleSheet("color: white; font-size: 16px; font-weight: bold;")
 
             # --- 3. AÇIK İŞLEMLER TABLOSU ---
-            open_trades = list(trade_manager.open_trades)
             open_trades.sort(key=lambda x: x['id'], reverse=True)
             self.open_trades_table.setRowCount(len(open_trades))
             cols_open = ["timestamp", "symbol", "timeframe", "type", "setup", "entry", "tp", "sl", "size", "pnl",
@@ -2356,6 +2511,9 @@ class MainWindow(QMainWindow):
                         item.setForeground(QColor("#00ff00") if val == "LONG" else QColor("#ff0000"))
                         item.setFont(QFont("Arial", 10, QFont.Bold))
                     self.open_trades_table.setItem(row_idx, col_idx, item)
+
+            # Portföy tablosunu güncelle
+            self.update_portfolio_table(open_trades)
 
             # --- 4. GEÇMİŞ İŞLEMLER TABLOSU (BE GÜNCELLEMESİ EKLENDİ) ---
             hist_trades = list(trade_manager.history)
@@ -2409,6 +2567,45 @@ class MainWindow(QMainWindow):
                 f.write(f"\n[{datetime.now()}] HATA: {str(e)}\n")
                 f.write(traceback.format_exc())  # Hatanın hangi satırda olduğunu yazar
 
+    def update_portfolio_table(self, open_trades):
+        if not hasattr(self, "portfolio_table"):
+            return
+
+        self.portfolio_table.setRowCount(len(open_trades))
+        cols = ["symbol", "timeframe", "type", "entry", "tp", "sl", "margin", "size", "pnl"]
+
+        for row_idx, trade in enumerate(open_trades):
+            for col_idx, key in enumerate(cols):
+                val = trade.get(key, "")
+
+                if key in {"entry", "tp", "sl"}:
+                    display = f"{float(val):.4f}" if val != "" else "-"
+                elif key == "margin":
+                    display = f"${float(val):,.2f}"
+                elif key == "size":
+                    display = f"${float(val):,.2f}"
+                elif key == "pnl":
+                    pnl_val = float(val)
+                    display = f"${pnl_val:,.2f}"
+                else:
+                    display = str(val)
+
+                item = QTableWidgetItem(display)
+
+                if key == "type":
+                    item.setForeground(QColor("#00ff00") if val == "LONG" else QColor("#ff5555"))
+                    item.setFont(QFont("Arial", 10, QFont.Bold))
+                elif key == "pnl":
+                    pnl_val = float(val)
+                    if pnl_val > 0:
+                        item.setForeground(QColor("#00ff00"))
+                    elif pnl_val < 0:
+                        item.setForeground(QColor("#ff5555"))
+                elif key == "margin":
+                    item.setForeground(QColor("#00ccff"))
+
+                self.portfolio_table.setItem(row_idx, col_idx, item)
+
     def save_config(self):
         self.tg_token = self.txt_token.text().strip();
         self.tg_chat_id = self.txt_chatid.text().strip()
@@ -2455,6 +2652,33 @@ class MainWindow(QMainWindow):
     def reset_balances(self):
         if QMessageBox.question(self, 'Onay', "Sıfırla?",
                                 QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes: trade_manager.reset_balances(); self.refresh_trade_table_from_manager()
+
+    def start_backtest(self):
+        if getattr(self, "backtest_worker", None) and self.backtest_worker.isRunning():
+            QMessageBox.information(self, "Devam Ediyor", "Backtest zaten çalışıyor...")
+            return
+
+        self.backtest_logs.clear()
+        self.backtest_logs.append("🧪 Backtest başlatıldı. Lütfen bekleyin...")
+        candles = self.backtest_candles.value()
+
+        self.backtest_worker = BacktestWorker(SYMBOLS, TIMEFRAMES, candles)
+        self.backtest_worker.log_signal.connect(self.append_backtest_log)
+        self.backtest_worker.finished_signal.connect(self.on_backtest_finished)
+        self.btn_run_backtest.setEnabled(False)
+        self.backtest_worker.start()
+
+    def append_backtest_log(self, text):
+        self.backtest_logs.append(text)
+
+    def on_backtest_finished(self, result: dict):
+        self.btn_run_backtest.setEnabled(True)
+        best_configs = result.get("best_configs", {}) if isinstance(result, dict) else {}
+        if best_configs:
+            save_best_configs(best_configs)
+            self.backtest_logs.append("✅ En iyi ayarlar canlı trade'e aktarıldı.")
+        else:
+            self.backtest_logs.append("⚠️ Backtest sonucu bulunamadı.")
 
     # --- OPTIMIZATION STARTUP (FIXED) ---
         # --- GÜNCELLENMİŞ RUN OPTIMIZATION ---
@@ -2898,6 +3122,7 @@ def run_portfolio_backtest(
     candles: int = 3000,
     out_trades_csv: str = "backtest_trades.csv",
     out_summary_csv: str = "backtest_summary.csv",
+    limit_map: Optional[dict] = None,
 ):
     accepted_signals_raw = {}
     opened_signals = {}
@@ -2917,11 +3142,13 @@ def run_portfolio_backtest(
     import heapq
 
     streams = {}
+    limit_map = limit_map or {}
     requested_pairs = list(itertools.product(symbols, timeframes))
     tf_limit_log = set()
     for sym in symbols:
         for tf in timeframes:
-            tf_candle_limit = BACKTEST_CANDLE_LIMITS.get(tf, candles)
+            active_limit_map = limit_map if limit_map else BACKTEST_CANDLE_LIMITS
+            tf_candle_limit = active_limit_map.get(tf, candles)
             if tf_candle_limit:
                 tf_candle_limit = min(candles, tf_candle_limit)
             else:
@@ -3163,6 +3390,17 @@ def run_portfolio_backtest(
     if total_trades < 5:
         print("[BACKTEST] Çok az trade bulundu. Daha fazla sonuç için RR/RSI/Slope limitlerini biraz gevşetmeyi düşünebilirsin.")
 
+    # Sonuçları GUI/LIVE ile paylaşmak için kaydet
+    save_best_configs(best_configs)
+    result = {
+        "summary": summary_rows,
+        "best_configs": best_configs,
+        "trades_csv": out_trades_csv,
+        "summary_csv": out_summary_csv,
+    }
+
+    return result
+
 def plot_trade(
     df_prices: pd.DataFrame,
     df_trades: pd.DataFrame,
@@ -3384,25 +3622,10 @@ def replay_backtest_trades(
 
 
 if __name__ == "__main__":
-    OUT_TRADES = "backtest_trades.csv"
-    OUT_SUMMARY = "backtest_summary.csv"
-
-    SYMBOLS = ["BTCUSDT"]
-    TIMEFRAMES = ["1m", "5m", "15m", "1h"]  # <-- EKLEDİK
-
-    run_portfolio_backtest(
-        symbols=SYMBOLS,
-        timeframes=TIMEFRAMES,
-        candles=4000,   # 1m/5m/15m/1h için sınır yeterli
-        out_trades_csv=OUT_TRADES,
-        out_summary_csv=OUT_SUMMARY,
-    )
-
-    replay_backtest_trades(
-        trades_csv=OUT_TRADES,
-        max_trades=10,
-        window=100,
-    )
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec_())
 
 
 
