@@ -1425,11 +1425,27 @@ class TradingEngine:
                 if dash: line_data['line']['dash'] = dash
                 traces.append(line_data)
 
-            add_line('PB Top', plot_df['pb_ema_top'], 'rgba(128,128,128,0.5)')
-            add_line('PB Bot', plot_df['pb_ema_bot'], 'rgba(128,128,128,0.5)')
-            add_line('Keltner Up', plot_df['keltner_upper'], 'rgba(255, 50, 50, 0.6)', 1, 'dot')
-            add_line('Keltner Low', plot_df['keltner_lower'], 'rgba(50, 255, 50, 0.6)', 1, 'dot')
-            add_line('Baseline', plot_df['baseline'], 'rgba(255, 255, 0, 0.8)', 1)
+            # PBEMA bulutu: açık mavi bant (Matplotlib backtest görünümüyle eşleştirildi)
+            pb_color = '#42a5f5'
+            traces.append({
+                'type': 'scatter', 'mode': 'lines', 'x': timestamps_str,
+                'y': plot_df['pb_ema_bot'].fillna(0).tolist(),
+                'line': {'color': pb_color, 'width': 1},
+                'name': 'PB Bot', 'hoverinfo': 'skip',
+                'fill': None
+            })
+            traces.append({
+                'type': 'scatter', 'mode': 'lines', 'x': timestamps_str,
+                'y': plot_df['pb_ema_top'].fillna(0).tolist(),
+                'line': {'color': pb_color, 'width': 1},
+                'name': 'PB Top', 'hoverinfo': 'skip',
+                'fill': 'tonexty', 'fillcolor': 'rgba(66, 165, 245, 0.18)'
+            })
+
+            # Keltner bantları ve baseline (rapor renkleriyle hizalı)
+            add_line('Keltner Up', plot_df['keltner_upper'], 'rgba(255, 50, 50, 0.8)', 1, 'dot')
+            add_line('Keltner Low', plot_df['keltner_lower'], 'rgba(50, 255, 50, 0.8)', 1, 'dot')
+            add_line('Baseline', plot_df['baseline'], 'rgba(255, 215, 0, 0.95)', 1)
             if 'alphatrend' in plot_df.columns: add_line('AlphaTrend', plot_df['alphatrend'], '#00ccff', 2)
 
             shapes = []
@@ -3559,20 +3575,31 @@ def plot_trade(
 
     # Keltner + baseline
     if "keltner_upper" in w.columns and "keltner_lower" in w.columns:
-        ax.plot(w["timestamp"], w["keltner_upper"], linewidth=0.8, label="Keltner Upper")
-        ax.plot(w["timestamp"], w["keltner_lower"], linewidth=0.8, label="Keltner Lower")
+        ax.plot(
+            w["timestamp"], w["keltner_upper"],
+            linewidth=0.9, color="#ff5252", linestyle=":", label="Keltner Upper"
+        )
+        ax.plot(
+            w["timestamp"], w["keltner_lower"],
+            linewidth=0.9, color="#4caf50", linestyle=":", label="Keltner Lower"
+        )
         if "baseline" in w.columns:
-            ax.plot(w["timestamp"], w["baseline"], linewidth=0.8, label="Baseline")
+            ax.plot(
+                w["timestamp"], w["baseline"],
+                linewidth=0.9, color="#ffd700", label="Baseline"
+            )
 
     # PBEMA cloud
     if "pb_ema_top" in w.columns and "pb_ema_bot" in w.columns:
-        ax.plot(w["timestamp"], w["pb_ema_top"], linewidth=0.9, label="PBEMA Top")
-        ax.plot(w["timestamp"], w["pb_ema_bot"], linewidth=0.9, label="PBEMA Bottom")
+        pb_color = "#42a5f5"
+        ax.plot(w["timestamp"], w["pb_ema_top"], linewidth=1.0, color=pb_color, label="PBEMA Top")
+        ax.plot(w["timestamp"], w["pb_ema_bot"], linewidth=1.0, color=pb_color, label="PBEMA Bottom")
         ax.fill_between(
             w["timestamp"],
             w["pb_ema_bot"],
             w["pb_ema_top"],
-            alpha=0.15,
+            alpha=0.18,
+            color=pb_color,
             label="PBEMA Cloud",
         )
 
