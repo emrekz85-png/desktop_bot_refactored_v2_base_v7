@@ -40,8 +40,6 @@ CSV_FILE = "trades.csv"
 CONFIG_FILE = "config.json"
 # Backtestler için maks. mum sayısı sınırları
 BACKTEST_CANDLE_LIMITS = {"1m": 4000, "5m": 4000, "15m": 4000, "1h": 4000}
-# Günlük rapor ve uzun soluklu taramalar için genişletilmiş limit
-DAILY_REPORT_CANDLE_LIMITS = {"1m": 15000, "5m": 15000, "15m": 15000, "1h": 15000}
 BEST_CONFIGS_FILE = "best_configs.json"
 BEST_CONFIG_CACHE = {}
 
@@ -2287,8 +2285,8 @@ class MainWindow(QMainWindow):
         bt_cfg.addWidget(QLabel(", ".join(TIMEFRAMES)))
         bt_cfg.addWidget(QLabel("Mum Sayısı:"));
         self.backtest_candles = QSpinBox();
-        self.backtest_candles.setRange(500, 4000);
-        self.backtest_candles.setValue(4000);
+        self.backtest_candles.setRange(500, 6000);
+        self.backtest_candles.setValue(3000);
         bt_cfg.addWidget(self.backtest_candles)
         self.btn_run_backtest = QPushButton("🧪 Backtest Çalıştır");
         self.btn_run_backtest.clicked.connect(self.start_backtest);
