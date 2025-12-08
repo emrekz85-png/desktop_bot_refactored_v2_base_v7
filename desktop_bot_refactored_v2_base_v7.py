@@ -15,6 +15,10 @@ import traceback
 import tempfile
 import shutil
 from typing import Tuple, Optional
+import matplotlib
+
+# Matplotlib çizimlerini arka planda üretmek için GUI gerektirmeyen backend
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 # PyQt5 Modülleri (QSpinBox EKLENDİ)
@@ -3466,6 +3470,8 @@ def plot_trade(
     df_trades: pd.DataFrame,
     trade_id: int,
     window: int = 40,
+    save_dir: Optional[str] = "replay_charts",
+    show: bool = False,
 ):
     """
     Tek bir trade'i (id) fiyat grafiği üzerinde gösterir.
@@ -3476,6 +3482,10 @@ def plot_trade(
     - PBEMA cloud (top / bottom + fill)
     - Entry / TP / SL çizgileri
     - RR kutuları (risk / reward alanları, TradingView RR Tool benzeri)
+
+    Kaydetme/izleme:
+    - save_dir: Grafiklerin diske kaydedileceği klasör (None verilirse kaydedilmez)
+    - show    : True ise ek olarak plt.show() ile görüntü açılır (varsayılan False)
     """
 
     trades_for_id = df_trades[df_trades["id"] == trade_id].copy()
@@ -3614,7 +3624,19 @@ def plot_trade(
     plt.xticks(rotation=45)
     ax.legend(loc="best")
     plt.tight_layout()
-    plt.show()
+
+    saved_path = None
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+        filename = f"trade_{trade_id}_{symbol}_{timeframe}.png"
+        saved_path = os.path.join(save_dir, filename)
+        fig.savefig(saved_path)
+        print(f"[PLOT] Kaydedildi: {saved_path}")
+
+    if show:
+        plt.show()
+
+    plt.close(fig)
 
 
 
@@ -3623,6 +3645,8 @@ def replay_backtest_trades(
     trades_csv: str = "backtest_trades.csv",
     max_trades: Optional[int] = None,
     window: int = 60,
+    save_dir: Optional[str] = "replay_charts",
+    show: bool = False,
 ):
     """
     Backtest sonrası üretilen trade'leri grafik üzerinde sırayla gösterir.
@@ -3630,6 +3654,8 @@ def replay_backtest_trades(
     - trades_csv: run_portfolio_backtest'in yazdığı trade CSV
     - max_trades: en fazla kaç trade çizilecek
     - window    : her trade etrafında kaç mumluk pencere gösterilecek
+    - save_dir  : grafiklerin kaydedileceği klasör (None verilirse kaydetmez)
+    - show      : True ise matplotlib penceresi açılır (default False, GUI block riskine karşı)
     """
 
     if not os.path.exists(trades_csv):
@@ -3678,7 +3704,14 @@ def replay_backtest_trades(
         df_prices = pd.read_csv(prices_path)
 
         print(f"[REPLAY] Çiziliyor: id={trade_id}, {symbol} {timeframe}")
-        plot_trade(df_prices, df_trades, trade_id=trade_id, window=window)
+        plot_trade(
+            df_prices,
+            df_trades,
+            trade_id=trade_id,
+            window=window,
+            save_dir=save_dir,
+            show=show,
+        )
 
 
 if __name__ == "__main__":
