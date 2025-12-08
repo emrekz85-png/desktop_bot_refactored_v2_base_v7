@@ -801,13 +801,20 @@ class TradeManager:
                         for trade in self.history:
                             self.total_pnl += float(trade['pnl'])
 
+                        open_pnl = 0.0
                         for trade in self.open_trades:
                             m = float(trade.get('margin', float(trade['size']) / TRADING_CONFIG["leverage"]))
                             self.locked_margin += m
+                            open_pnl += float(trade.get('pnl', 0.0))
 
+                        # Kullanılabilir bakiye = başlangıç + kapalı işlemlerden net PnL - kilitli marj
                         self.wallet_balance = TRADING_CONFIG["initial_balance"] + self.total_pnl - self.locked_margin
+                        total_equity = self.wallet_balance + self.locked_margin + open_pnl
                         print(
-                            f"📂 Veriler Yüklendi. Kasa: ${self.wallet_balance:.2f} | Kilitli: ${self.locked_margin:.2f}")
+                            "📂 Veriler Yüklendi. "
+                            f"Toplam Varlık (Equity): ${total_equity:.2f} | "
+                            f"Kullanılabilir Bakiye: ${self.wallet_balance:.2f} | "
+                            f"Kilitli Marj: ${self.locked_margin:.2f}")
 
                 except Exception as e:
                     print(f"YÜKLEME HATASI: {e}")
