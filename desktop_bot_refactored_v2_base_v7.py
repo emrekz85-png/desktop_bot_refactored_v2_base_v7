@@ -48,6 +48,7 @@ BACKTEST_CANDLE_LIMITS = {"1m": 4000, "5m": 4000, "15m": 4000, "1h": 4000}
 DAILY_REPORT_CANDLE_LIMITS = {"1m": 15000, "5m": 15000, "15m": 15000, "1h": 15000}
 BEST_CONFIGS_FILE = "best_configs.json"
 BEST_CONFIG_CACHE = {}
+BACKTEST_META_FILE = "backtest_meta.json"
 
 # --- 💰 EKONOMİK MODEL (Tüm Modüller Burayı Kullanacak) ---
 #  uyarınca tek bir konfigürasyon yapısı:
@@ -2134,6 +2135,7 @@ class MainWindow(QMainWindow):
         self.data_cache = {sym: {tf: (None, None) for tf in TIMEFRAMES} for sym in SYMBOLS}
         self.current_symbol = SYMBOLS[0]
         self.backtest_worker = None
+        self.backtest_meta = None
 
         central = QWidget();
         self.setCentralWidget(central);
@@ -2471,6 +2473,10 @@ class MainWindow(QMainWindow):
 
         self.logs.append(">>> Sistem Başlatıldı. v30.6 (Auto Report)")
 
+        # Backtest geçmişini göster
+        self.load_backtest_meta()
+        self.show_saved_backtest_summary()
+
     def on_load_finished(self, ok, tf):
         if ok: self.views_ready[tf] = True
 
@@ -2731,7 +2737,19 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Devam Ediyor", "Backtest zaten çalışıyor...")
             return
 
+        # Önceki sonucu koru ve göster
+        self.load_backtest_meta()
+        previous_lines = self.format_backtest_summary_lines()
+
         self.backtest_logs.clear()
+        if previous_lines:
+            self.backtest_logs.append("🗂️ Önceki sonuç:")
+            for line in previous_lines:
+                self.backtest_logs.append(line)
+            self.backtest_logs.append("-" * 40)
+        else:
+            self.backtest_logs.append("ℹ️ Önceki backtest kaydı bulunamadı.")
+
         self.backtest_logs.append("🧪 Backtest başlatıldı. Lütfen bekleyin...")
         candles = self.backtest_candles.value()
 
@@ -2747,11 +2765,81 @@ class MainWindow(QMainWindow):
     def on_backtest_finished(self, result: dict):
         self.btn_run_backtest.setEnabled(True)
         best_configs = result.get("best_configs", {}) if isinstance(result, dict) else {}
+        summary_rows = result.get("summary", []) if isinstance(result, dict) else []
+
+        if summary_rows:
+            finished_at = datetime.utcnow().isoformat() + "Z"
+            meta = {
+                "finished_at": finished_at,
+                "summary": summary_rows,
+                "summary_csv": result.get("summary_csv"),
+            }
+            self.save_backtest_meta(meta)
+            self.backtest_logs.append("📊 Özet tablo kaydedildi:")
+            for line in self.format_backtest_summary_lines(meta):
+                self.backtest_logs.append(line)
+        else:
+            self.backtest_logs.append("⚠️ Backtest sonucu bulunamadı.")
+
         if best_configs:
             save_best_configs(best_configs)
             self.backtest_logs.append("✅ En iyi ayarlar canlı trade'e aktarıldı.")
+
+    def save_backtest_meta(self, meta: dict):
+        try:
+            with open(BACKTEST_META_FILE, "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+            self.backtest_meta = meta
+        except Exception as e:
+            self.backtest_logs.append(f"⚠️ Meta kayıt hatası: {e}")
+
+    def load_backtest_meta(self):
+        try:
+            if os.path.exists(BACKTEST_META_FILE):
+                with open(BACKTEST_META_FILE, "r", encoding="utf-8") as f:
+                    self.backtest_meta = json.load(f)
+            else:
+                self.backtest_meta = None
+        except Exception as e:
+            self.backtest_meta = None
+            if hasattr(self, "backtest_logs"):
+                self.backtest_logs.append(f"⚠️ Meta okuma hatası: {e}")
+
+    def format_backtest_summary_lines(self, meta: Optional[dict] = None):
+        meta = meta or self.backtest_meta
+        if not meta or not meta.get("summary"):
+            return []
+
+        finished_at = meta.get("finished_at")
+        try:
+            finished_dt = dateutil.parser.isoparse(finished_at)
+            finished_str = finished_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+        except Exception:
+            finished_str = finished_at or "-"
+
+        lines = [f"📅 Tamamlanma: {finished_str}", "📈 Özet Tablo:"]
+        for row in meta.get("summary", []):
+            lines.append(
+                f"- {row.get('symbol', '?')}-{row.get('timeframe', '?')}: "
+                f"Trades={row.get('trades', 0)}, WR={float(row.get('win_rate_pct', 0)):.1f}%, "
+                f"NetPnL={float(row.get('net_pnl', 0)):.2f}"
+            )
+        return lines
+
+    def show_saved_backtest_summary(self):
+        if not hasattr(self, "backtest_logs"):
+            return
+
+        self.backtest_logs.clear()
+        lines = self.format_backtest_summary_lines()
+        if lines:
+            self.backtest_logs.append("🗂️ Son Backtest Özeti:")
+            for line in lines:
+                self.backtest_logs.append(line)
         else:
-            self.backtest_logs.append("⚠️ Backtest sonucu bulunamadı.")
+            self.backtest_logs.append(
+                "ℹ️ Backtest geçmişi henüz yok. İlk backtest tamamlandığında özet burada görünecek."
+            )
 
     # --- OPTIMIZATION STARTUP (FIXED) ---
         # --- GÜNCELLENMİŞ RUN OPTIMIZATION ---
