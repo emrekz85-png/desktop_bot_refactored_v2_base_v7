@@ -755,6 +755,30 @@ class TradeManager:
 
             return just_closed_trades
 
+    def update_live_pnl_with_price(self, symbol: str, latest_price: float):
+        """Update open trade PnL values using the most recent price tick.
+
+        This is a lightweight calculation that keeps the UI-sensitive PnL column
+        in sync with faster price updates without triggering trade lifecycle
+        changes or disk writes. It intentionally avoids modifying SL/TP logic.
+        """
+        with self.lock:
+            for i, trade in enumerate(self.open_trades):
+                if trade.get("symbol") != symbol:
+                    continue
+
+                entry = float(trade.get("entry", 0))
+                size = float(trade.get("size", 0))
+                if entry <= 0 or size == 0:
+                    continue
+
+                if trade.get("type") == "LONG":
+                    pnl_percent = (latest_price - entry) / entry
+                else:
+                    pnl_percent = (entry - latest_price) / entry
+
+                self.open_trades[i]["pnl"] = pnl_percent * size
+
     def save_trades(self):
         with self.lock:
             try:
@@ -1572,9 +1596,10 @@ class LiveBotWorker(QThread):
                     latest_prices = TradingEngine.get_latest_prices(SYMBOLS)
                     for sym, price in latest_prices.items():
                         self.price_signal.emit(sym, price)
+                        trade_manager.update_live_pnl_with_price(sym, price)
                 except Exception as e:
                     print(f"[LIVE] Fiyat güncelleme hatası: {e}")
-                next_price_time = now + 1.0
+                next_price_time = now + 0.5
 
             if now >= next_candle_time:
                 try:
