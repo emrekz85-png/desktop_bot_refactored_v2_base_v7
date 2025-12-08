@@ -183,6 +183,34 @@ DEFAULT_STRATEGY_CONFIG = {
     "adx_min": 10.0,
 }
 
+PARTIAL_STOP_PROTECTION_TFS = {"5m", "15m", "1h"}
+
+
+def _apply_partial_stop_protection(trade: dict, tf: str, progress: float, t_type: str) -> bool:
+    """Raise SL to partial fill price after deeper TP progress on higher timeframes."""
+
+    if tf not in PARTIAL_STOP_PROTECTION_TFS:
+        return False
+
+    if not trade.get("partial_taken") or progress < 0.85:
+        return False
+
+    p_price = trade.get("partial_price")
+    if p_price is None:
+        return False
+
+    p_price = float(p_price)
+    current_sl = float(trade.get("sl", p_price))
+
+    if t_type == "LONG" and p_price > current_sl:
+        trade["sl"] = p_price
+        return True
+    if t_type == "SHORT" and p_price < current_sl:
+        trade["sl"] = p_price
+        return True
+
+    return False
+
 
 def _generate_candidate_configs():
     """Create a compact grid of configs to search for higher trade density."""
@@ -680,20 +708,8 @@ class TradeManager:
                                 trades_updated = True
 
                 # ---------- SL / TP KONTROLÜ ----------
-                if (
-                    tf in {"5m", "15m", "1h"}
-                    and self.open_trades[i].get("partial_taken")
-                    and progress >= 0.85
-                ):
-                    p_price = self.open_trades[i].get("partial_price")
-                    if p_price is not None:
-                        current_sl = float(self.open_trades[i]["sl"])
-                        if t_type == "LONG" and p_price > current_sl:
-                            self.open_trades[i]["sl"] = p_price
-                            trades_updated = True
-                        elif t_type == "SHORT" and p_price < current_sl:
-                            self.open_trades[i]["sl"] = p_price
-                            trades_updated = True
+                if _apply_partial_stop_protection(self.open_trades[i], tf, progress, t_type):
+                    trades_updated = True
 
                 sl = float(self.open_trades[i]["sl"])
 
@@ -3472,18 +3488,7 @@ class SimTradeManager:
                             self.open_trades[i]["sl"] = new_sl
                             self.open_trades[i]["trailing_active"] = True
 
-            if (
-                tf in {"5m", "15m", "1h"}
-                and self.open_trades[i].get("partial_taken")
-                and progress >= 0.85
-            ):
-                p_price = self.open_trades[i].get("partial_price")
-                if p_price is not None:
-                    current_sl = float(self.open_trades[i]["sl"])
-                    if t_type == "LONG" and p_price > current_sl:
-                        self.open_trades[i]["sl"] = p_price
-                    elif t_type == "SHORT" and p_price < current_sl:
-                        self.open_trades[i]["sl"] = p_price
+            _apply_partial_stop_protection(self.open_trades[i], tf, progress, t_type)
 
             sl = float(self.open_trades[i]["sl"])
 
