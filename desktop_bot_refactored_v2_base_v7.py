@@ -1782,7 +1782,11 @@ class LiveBotWorker(QThread):
                     try:
                         stream_snapshot = self.ws_stream.get_latest_bulk()
                         for sym in SYMBOLS:
-                            df_price = stream_snapshot.get((sym, "1m")) or stream_snapshot.get((sym, TIMEFRAMES[0]))
+                            df_price = stream_snapshot.get((sym, "1m"))
+
+                            if (df_price is None or df_price.empty) and TIMEFRAMES:
+                                df_price = stream_snapshot.get((sym, TIMEFRAMES[0]))
+
                             if df_price is not None and not df_price.empty:
                                 price = float(df_price.iloc[-1]['close'])
                                 self.price_signal.emit(sym, price)
