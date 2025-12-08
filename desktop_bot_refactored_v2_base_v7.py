@@ -186,6 +186,42 @@ DEFAULT_STRATEGY_CONFIG = {
 PARTIAL_STOP_PROTECTION_TFS = {"5m", "15m", "1h"}
 
 
+def _apply_1m_profit_lock(
+    trade: dict, tf: str, t_type: str, entry: float, tp: float, progress: float
+) -> bool:
+    """Shift SL into profit on 1m trades once price is very close to TP.
+
+    When the price reaches 85% of the distance to TP, move SL to a level that
+    locks 40% of the entry-to-TP distance as profit. Applies to both live and
+    backtest flows.
+    """
+
+    if tf != "1m" or progress < 0.85:
+        return False
+
+    total_dist = abs(tp - entry)
+    if total_dist <= 0:
+        return False
+
+    current_sl = float(trade.get("sl", entry))
+    lock_distance = total_dist * 0.40
+
+    if t_type == "LONG":
+        target_sl = entry + lock_distance
+        if target_sl > current_sl:
+            trade["sl"] = target_sl
+            trade["breakeven"] = True
+            return True
+    else:
+        target_sl = entry - lock_distance
+        if target_sl < current_sl:
+            trade["sl"] = target_sl
+            trade["breakeven"] = True
+            return True
+
+    return False
+
+
 def _apply_partial_stop_protection(trade: dict, tf: str, progress: float, t_type: str) -> bool:
     """Raise SL to partial fill price after deeper TP progress on higher timeframes."""
 
@@ -683,6 +719,10 @@ class TradeManager:
                         self.open_trades[i]["sl"] = entry
                         self.open_trades[i]["breakeven"] = True
                         trades_updated = True
+
+                # 1m için fiyat TP'ye çok yaklaşınca SL'i kâra çek
+                if _apply_1m_profit_lock(self.open_trades[i], tf, t_type, entry, dyn_tp, progress):
+                    trades_updated = True
 
                 # ---------- TRAILING SL ----------
                 if in_profit and use_trailing:
@@ -3468,6 +3508,8 @@ class SimTradeManager:
                 elif (not trade.get("breakeven")) and progress >= 0.40:
                     self.open_trades[i]["sl"] = entry
                     self.open_trades[i]["breakeven"] = True
+
+            _apply_1m_profit_lock(self.open_trades[i], tf, t_type, entry, dyn_tp, progress)
 
             if in_profit and use_trailing:
                 if (not trade.get("breakeven")) and progress >= 0.40:
