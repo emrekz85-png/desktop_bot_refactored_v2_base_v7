@@ -2085,6 +2085,25 @@ class BacktestWorker(QThread):
         self.symbols = symbols
         self.timeframes = timeframes
         self.candles = candles
+        self._last_log_time = 0.0
+        self._pending_log = None
+
+    def _throttled_log(self, text: str):
+        """Reduce log spam so UI can stay responsive during heavy backtests."""
+        now = time.time()
+        if (now - self._last_log_time) >= 0.4:
+            self.log_signal.emit(text)
+            self._last_log_time = now
+            self._pending_log = None
+        else:
+            # Keep the latest message to emit on the next window
+            self._pending_log = text
+
+    def _flush_pending_log(self):
+        if self._pending_log:
+            self.log_signal.emit(self._pending_log)
+            self._pending_log = None
+            self._last_log_time = time.time()
 
     def run(self):
         result = {}
@@ -2094,10 +2113,12 @@ class BacktestWorker(QThread):
                 symbols=self.symbols,
                 timeframes=self.timeframes,
                 candles=self.candles,
-                progress_callback=self.log_signal.emit,
+                progress_callback=self._throttled_log,
                 draw_trades=True,
                 max_draw_trades=30,
             ) or {}
+            # Ensure the last status arrives even if throttled
+            self._flush_pending_log()
         except Exception as e:
             self.log_signal.emit(f"\n[BACKTEST][GUI] Hata: {e}\n{traceback.format_exc()}\n")
         finally:
