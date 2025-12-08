@@ -1562,6 +1562,99 @@ class LiveBotWorker(QThread):
                             closed = df.iloc[-2]
                             forming = df.iloc[-1]
                             curr_price = float(closed['close'])
+                        closed_ts_utc = closed['timestamp']
+                        forming_ts_utc = forming['timestamp']
+                        istanbul_time = closed_ts_utc + timedelta(hours=3)
+                        ts_str = istanbul_time.strftime("%Y-%m-%d %H:%M")
+                        # Backtest ile uyumlu fill: sinyal mumu kapandıktan sonraki mumun OPEN fiyatı
+                        next_open_price = float(forming['open'])
+                        next_open_ts_str = (forming_ts_utc + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
+                        # Fiyatı Arayüze Gönder (Sadece 1m mumlarında veya her döngüde bir kere)
+                        if tf == "1m":
+                            self.price_signal.emit(sym, curr_price)
+
+                        # --- Trade Manager Güncellemesi ---
+
+                        closed_trades = trade_manager.update_trades(
+                            sym, tf,
+                            candle_high=float(closed['high']),
+                            candle_low=float(closed['low']),
+                            candle_close=float(closed['close']),
+                            candle_time_utc=closed_ts_utc,
+                            pb_top=float(closed.get('pb_ema_top', closed['close'])),
+                            pb_bot=float(closed.get('pb_ema_bot', closed['close']))
+                        )
+                        if closed_trades:
+                            for ct in closed_trades:
+                                if ct['timeframe'] == tf:
+                                    reason = ct['status']
+                                    pnl = float(ct['pnl'])
+                                    pnl_str = f"+${pnl:.2f}" if pnl > 0 else f"-${abs(pnl):.2f}"
+                                    icon = "✅" if "WIN" in reason else "🛑"
+                                    close_log = f"🏁 {ct['symbol']} KAPANDI ({tf}): {reason} | {pnl_str} | Setup: {ct['setup']}"
+                                    self.update_ui_signal.emit(sym, tf, "{}", f"⚠️ {close_log}")
+
+                                    # Telegram (Asenkron - Beklemeden Gönder)
+                                    tg_msg = (f"{icon} KAPANDI: {ct['symbol']}\nTF: {tf}\nSetup: {ct['setup']}\n"
+                                              f"Sonuç: {reason}\nNet PnL: {pnl_str}")
+                                    TradingEngine.send_telegram(self.tg_token, self.tg_chat_id, tg_msg)
+
+                        # --- İndikatör ve Sinyal Hesabı ---
+
+                        df_ind = TradingEngine.calculate_indicators(df.copy())
+                        df_closed = df_ind.iloc[:-1].copy()  # oluşan mumu çıkar
+                        config = load_optimized_config(sym, tf)
+                        rr, rsi, slope = config['rr'], config['rsi'], config['slope']
+                        use_at = config['at_active']
+                        at_status_log = "AT:ON" if use_at else "AT:OFF"
+
+                        s_type, s_entry, s_tp, s_sl, s_reason = TradingEngine.check_signal_diagnostic(
+                            df_closed,
+                            index=-1,
+                            min_rr=rr,
+                            rsi_limit=rsi,
+                            slope_thresh=slope,
+                            use_alphatrend=use_at,
+                            hold_n=config.get("hold_n"),
+                            min_hold_frac=config.get("min_hold_frac"),
+                            pb_touch_tolerance=config.get("pb_touch_tolerance"),
+                            body_tolerance=config.get("body_tolerance"),
+                            cloud_keltner_gap_min=config.get("cloud_keltner_gap_min"),
+                            tp_min_dist_ratio=config.get("tp_min_dist_ratio"),
+                            tp_max_dist_ratio=config.get("tp_max_dist_ratio"),
+                            adx_min=config.get("adx_min"),
+                        )
+
+        while self.is_running:
+            now = time.time()
+
+            if now >= next_price_time:
+                try:
+                    latest_prices = TradingEngine.get_latest_prices(SYMBOLS)
+                    for sym, price in latest_prices.items():
+                        self.price_signal.emit(sym, price)
+                except Exception as e:
+                    print(f"[LIVE] Fiyat güncelleme hatası: {e}")
+                next_price_time = now + 1.0
+
+            if now >= next_candle_time:
+                try:
+                    # 1. TÜM VERİLERİ AYNI ANDA ÇEK (HIZ DEVRİMİ BURADA 🚀)
+                    # Eskiden 7 saniye sürüyordu, şimdi 0.5 saniye sürecek.
+                    bulk_data = TradingEngine.get_all_candles_parallel(SYMBOLS, TIMEFRAMES)
+
+                    # 2. Gelen verileri işle (Bu kısım işlemci hızında akar, milisaniyeler sürer)
+                    for (sym, tf), df in bulk_data.items():
+                        if df.empty: continue
+
+                        try:
+
+                            if len(df) < 3:
+                                continue
+                            # Binance kline: son satır çoğunlukla oluşan (henüz kapanmamış) mumdur.
+                            closed = df.iloc[-2]
+                            forming = df.iloc[-1]
+                            curr_price = float(closed['close'])
                             closed_ts_utc = closed['timestamp']
                             forming_ts_utc = forming['timestamp']
                             istanbul_time = closed_ts_utc + timedelta(hours=3)
@@ -1696,6 +1789,12 @@ class LiveBotWorker(QThread):
                                 json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                  active_trades if self.show_rr else [])
                                 self.update_ui_signal.emit(sym, tf, json_data, log_msg)
+
+                        except Exception as e:
+                            print(f"Loop Processing Error ({sym}-{tf}): {e}")
+                            with open("error_log.txt", "a") as f:
+                                f.write(f"\n[{datetime.now()}] LOOP HATA: {str(e)}\n")
+                                f.write(traceback.format_exc())
 
                         except Exception as e:
                             print(f"Loop Processing Error ({sym}-{tf}): {e}")
