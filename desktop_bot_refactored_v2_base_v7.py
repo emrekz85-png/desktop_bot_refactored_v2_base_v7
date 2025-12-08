@@ -53,6 +53,8 @@ DAILY_REPORT_CANDLE_LIMITS = {"1m": 15000, "5m": 15000, "15m": 15000, "1h": 1500
 BEST_CONFIGS_FILE = "best_configs.json"
 BEST_CONFIG_CACHE = {}
 BACKTEST_META_FILE = "backtest_meta.json"
+# Çökme veya kapanma durumlarında otomatik yeniden başlatma gecikmesi (saniye)
+AUTO_RESTART_DELAY_SECONDS = 5
 
 # --- 💰 EKONOMİK MODEL (Tüm Modüller Burayı Kullanacak) ---
 #  uyarınca tek bir konfigürasyon yapısı:
@@ -4167,11 +4169,46 @@ def replay_backtest_trades(
         )
 
 
-if __name__ == "__main__":
+def _launch_application_once() -> int:
+    """Uygulamayı tek seferlik başlatır ve çıkış kodunu döner."""
+
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
-    sys.exit(app.exec_())
+    exit_code = app.exec_()
+
+    # Event loop kapandıktan sonra uygulamayı tamamen temizle
+    try:
+        app.quit()
+    except Exception:
+        # Qt bazı platformlarda tekrar tekrar quit çağrısına izin vermeyebilir
+        pass
+
+    return exit_code
+
+
+def run_with_auto_restart(restart_delay: int = AUTO_RESTART_DELAY_SECONDS) -> None:
+    """Çökme veya kapanma sonrası uygulamayı otomatik yeniden başlatır."""
+
+    restart_counter = 0
+    while True:
+        restart_counter += 1
+        try:
+            exit_code = _launch_application_once()
+            print(
+                f"[RESTART] Uygulama döngüsü {restart_counter} sona erdi (exit={exit_code})."
+            )
+        except Exception as exc:  # En dış seviye güvenlik ağı
+            print(f"[RESTART] Uygulama hatası: {exc}\n{traceback.format_exc()}")
+
+        print(
+            f"[RESTART] {restart_delay} saniye sonra yeniden başlatılıyor..."
+        )
+        time.sleep(restart_delay)
+
+
+if __name__ == "__main__":
+    run_with_auto_restart()
 
 
 
