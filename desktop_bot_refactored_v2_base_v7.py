@@ -32,7 +32,7 @@ import plotly.utils
 # ==========================================
 # ⚙️ GENEL AYARLAR VE SABİTLER (MERKEZİ YÖNETİM)
 # ==========================================
-SYMBOLS = ["BTCUSDT"]
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 TIMEFRAMES = ["1m", "5m", "15m", "1h"]
 candles = 50000
 REFRESH_RATE = 3
@@ -2193,6 +2193,20 @@ class MainWindow(QMainWindow):
 
         asset_group.setLayout(asset_layout)
         hist_layout.addWidget(asset_group)
+
+        # Portföy tablosu (canlı işlemlerle senkron)
+        portfolio_group = QGroupBox("Portföy Durumu")
+        port_layout = QVBoxLayout()
+        self.portfolio_table = QTableWidget()
+        self.portfolio_table.setColumnCount(9)
+        self.portfolio_table.setHorizontalHeaderLabels([
+            "Sembol", "TF", "Yön", "Giriş", "TP", "SL", "Kilitli Marj", "Poz. Büyüklüğü", "Anlık PnL"
+        ])
+        self.portfolio_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        port_layout.addWidget(self.portfolio_table)
+        portfolio_group.setLayout(port_layout)
+        hist_layout.addWidget(portfolio_group)
+
         # Tabloyu oluştur
         self.pnl_table = self.create_pnl_table()
 
@@ -2324,6 +2338,9 @@ class MainWindow(QMainWindow):
         opt_layout.addWidget(self.opt_logs)
         self.main_tabs.addTab(opt_widget, "🔧 Optimizasyon")
 
+        # Açılışta canlı takip sekmesini öne çıkar
+        self.main_tabs.setCurrentWidget(live_widget)
+
         # BAŞLATMA
         self.current_params = {}
         self.live_worker = LiveBotWorker(self.current_params, self.tg_token, self.tg_chat_id, self.show_rr_tools)
@@ -2384,10 +2401,12 @@ class MainWindow(QMainWindow):
 
     def refresh_trade_table_from_manager(self):
         try:
+            open_trades = list(trade_manager.open_trades)
             # --- 1. GÜNCEL KASA VERİLERİNİ ÇEK ---
             wallet_bal = trade_manager.wallet_balance  # Kullanılabilir
             locked = trade_manager.locked_margin  # İşlemdeki
-            total_equity = wallet_bal + locked  # Toplam Varlık
+            open_pnl = sum(float(t.get("pnl", 0)) for t in open_trades)
+            total_equity = wallet_bal + locked + open_pnl  # Toplam Varlık + açık pozisyon PnL'i
             total_pnl = trade_manager.total_pnl  # Toplam Net Kâr (Komisyon düşülmüş)
 
             # Günlük PnL Hesapla (Bugün kapanan işlemler)
@@ -2419,7 +2438,6 @@ class MainWindow(QMainWindow):
                     self.lbl_daily_pnl_val.setStyleSheet("color: white; font-size: 16px; font-weight: bold;")
 
             # --- 3. AÇIK İŞLEMLER TABLOSU ---
-            open_trades = list(trade_manager.open_trades)
             open_trades.sort(key=lambda x: x['id'], reverse=True)
             self.open_trades_table.setRowCount(len(open_trades))
             cols_open = ["timestamp", "symbol", "timeframe", "type", "setup", "entry", "tp", "sl", "size", "pnl",
@@ -2454,6 +2472,9 @@ class MainWindow(QMainWindow):
                         item.setForeground(QColor("#00ff00") if val == "LONG" else QColor("#ff0000"))
                         item.setFont(QFont("Arial", 10, QFont.Bold))
                     self.open_trades_table.setItem(row_idx, col_idx, item)
+
+            # Portföy tablosunu güncelle
+            self.update_portfolio_table(open_trades)
 
             # --- 4. GEÇMİŞ İŞLEMLER TABLOSU (BE GÜNCELLEMESİ EKLENDİ) ---
             hist_trades = list(trade_manager.history)
@@ -2506,6 +2527,45 @@ class MainWindow(QMainWindow):
             with open("error_log.txt", "a") as f:
                 f.write(f"\n[{datetime.now()}] HATA: {str(e)}\n")
                 f.write(traceback.format_exc())  # Hatanın hangi satırda olduğunu yazar
+
+    def update_portfolio_table(self, open_trades):
+        if not hasattr(self, "portfolio_table"):
+            return
+
+        self.portfolio_table.setRowCount(len(open_trades))
+        cols = ["symbol", "timeframe", "type", "entry", "tp", "sl", "margin", "size", "pnl"]
+
+        for row_idx, trade in enumerate(open_trades):
+            for col_idx, key in enumerate(cols):
+                val = trade.get(key, "")
+
+                if key in {"entry", "tp", "sl"}:
+                    display = f"{float(val):.4f}" if val != "" else "-"
+                elif key == "margin":
+                    display = f"${float(val):,.2f}"
+                elif key == "size":
+                    display = f"${float(val):,.2f}"
+                elif key == "pnl":
+                    pnl_val = float(val)
+                    display = f"${pnl_val:,.2f}"
+                else:
+                    display = str(val)
+
+                item = QTableWidgetItem(display)
+
+                if key == "type":
+                    item.setForeground(QColor("#00ff00") if val == "LONG" else QColor("#ff5555"))
+                    item.setFont(QFont("Arial", 10, QFont.Bold))
+                elif key == "pnl":
+                    pnl_val = float(val)
+                    if pnl_val > 0:
+                        item.setForeground(QColor("#00ff00"))
+                    elif pnl_val < 0:
+                        item.setForeground(QColor("#ff5555"))
+                elif key == "margin":
+                    item.setForeground(QColor("#00ccff"))
+
+                self.portfolio_table.setItem(row_idx, col_idx, item)
 
     def save_config(self):
         self.tg_token = self.txt_token.text().strip();
@@ -3520,25 +3580,10 @@ def replay_backtest_trades(
 
 
 if __name__ == "__main__":
-    OUT_TRADES = "backtest_trades.csv"
-    OUT_SUMMARY = "backtest_summary.csv"
-
-    SYMBOLS = ["BTCUSDT"]
-    TIMEFRAMES = ["1m", "5m", "15m", "1h"]  # <-- EKLEDİK
-
-    run_portfolio_backtest(
-        symbols=SYMBOLS,
-        timeframes=TIMEFRAMES,
-        candles=4000,   # 1m/5m/15m/1h için sınır yeterli
-        out_trades_csv=OUT_TRADES,
-        out_summary_csv=OUT_SUMMARY,
-    )
-
-    replay_backtest_trades(
-        trades_csv=OUT_TRADES,
-        max_trades=10,
-        window=100,
-    )
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec_())
 
 
 
