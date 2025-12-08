@@ -535,7 +535,7 @@ class TradeManager:
                 "tp": float(signal_data["tp"]), "sl": float(signal_data["sl"]),
                 "size": trade_size, "margin": margin_to_use,
                 "status": "OPEN", "pnl": 0.0,
-                "breakeven": False, "trailing_active": False, "partial_taken": False,
+                "breakeven": False, "trailing_active": False, "partial_taken": False, "partial_price": None,
                 "has_cash": True, "close_time": "", "close_price": ""
             }
 
@@ -619,12 +619,13 @@ class TradeManager:
 
                 # ---------- PARTIAL TP + BREAKEVEN ----------
                 if in_profit and use_partial:
-                    if (not trade.get("partial_taken")) and progress >= 0.50:
+                    if (not self.open_trades[i].get("partial_taken")) and progress >= 0.50:
                         partial_size = size / 2.0
                         partial_pnl = pnl_percent_fav * partial_size
                         commission = partial_size * TRADING_CONFIG["total_fee"]
                         net_partial_pnl = partial_pnl - commission
                         margin_release = initial_margin / 2.0
+                        partial_price = float(fav_price)
 
                         self.wallet_balance += margin_release + net_partial_pnl
                         self.locked_margin -= margin_release
@@ -635,7 +636,7 @@ class TradeManager:
                         partial_record["pnl"] = net_partial_pnl
                         partial_record["status"] = "PARTIAL TP (50%)"
                         partial_record["close_time"] = (candle_time_utc + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
-                        partial_record["close_price"] = float(fav_price)
+                        partial_record["close_price"] = partial_price
                         partial_record["pb_ema_top"] = pb_top
                         partial_record["pb_ema_bot"] = pb_bot
                         self.history.append(partial_record)
@@ -643,6 +644,7 @@ class TradeManager:
                         # Açık trade'i güncelle: yarı pozisyon kaldı, margin yarıya indi
                         self.open_trades[i]["size"] = partial_size
                         self.open_trades[i]["margin"] = margin_release
+                        self.open_trades[i]["partial_price"] = partial_price
                         self.open_trades[i]["partial_taken"] = True
                         # Breakeven'e çek
                         self.open_trades[i]["sl"] = entry
@@ -678,6 +680,21 @@ class TradeManager:
                                 trades_updated = True
 
                 # ---------- SL / TP KONTROLÜ ----------
+                if (
+                    tf in {"5m", "15m", "1h"}
+                    and self.open_trades[i].get("partial_taken")
+                    and progress >= 0.85
+                ):
+                    p_price = self.open_trades[i].get("partial_price")
+                    if p_price is not None:
+                        current_sl = float(self.open_trades[i]["sl"])
+                        if t_type == "LONG" and p_price > current_sl:
+                            self.open_trades[i]["sl"] = p_price
+                            trades_updated = True
+                        elif t_type == "SHORT" and p_price < current_sl:
+                            self.open_trades[i]["sl"] = p_price
+                            trades_updated = True
+
                 sl = float(self.open_trades[i]["sl"])
 
                 if t_type == "LONG":
@@ -3310,6 +3327,7 @@ class SimTradeManager:
             "breakeven": False,
             "trailing_active": False,
             "partial_taken": False,
+            "partial_price": None,
             "has_cash": True,
             "close_time": "",
             "close_price": "",
@@ -3427,6 +3445,7 @@ class SimTradeManager:
                     self.open_trades[i]["size"] = partial_size
                     self.open_trades[i]["margin"] = margin_release
                     self.open_trades[i]["partial_taken"] = True
+                    self.open_trades[i]["partial_price"] = float(partial_fill)
                     self.open_trades[i]["sl"] = entry
                     self.open_trades[i]["breakeven"] = True
 
@@ -3452,6 +3471,19 @@ class SimTradeManager:
                         if new_sl < current_sl:
                             self.open_trades[i]["sl"] = new_sl
                             self.open_trades[i]["trailing_active"] = True
+
+            if (
+                tf in {"5m", "15m", "1h"}
+                and self.open_trades[i].get("partial_taken")
+                and progress >= 0.85
+            ):
+                p_price = self.open_trades[i].get("partial_price")
+                if p_price is not None:
+                    current_sl = float(self.open_trades[i]["sl"])
+                    if t_type == "LONG" and p_price > current_sl:
+                        self.open_trades[i]["sl"] = p_price
+                    elif t_type == "SHORT" and p_price < current_sl:
+                        self.open_trades[i]["sl"] = p_price
 
             sl = float(self.open_trades[i]["sl"])
 
