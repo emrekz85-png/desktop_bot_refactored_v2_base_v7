@@ -1625,77 +1625,176 @@ class LiveBotWorker(QThread):
                             adx_min=config.get("adx_min"),
                         )
 
-                        setup_tag = "Unknown"
-                        if "ACCEPTED" in s_reason:
-                            start = s_reason.find("(") + 1
-                            end = s_reason.find(")")
-                            if start > 0 and end > 0: setup_tag = s_reason[start:end]
+        while self.is_running:
+            now = time.time()
 
-                        active_trades = [t for t in trade_manager.open_trades if
-                                         t['timeframe'] == tf and t['symbol'] == sym]
+            if now >= next_price_time:
+                try:
+                    latest_prices = TradingEngine.get_latest_prices(SYMBOLS)
+                    for sym, price in latest_prices.items():
+                        self.price_signal.emit(sym, price)
+                except Exception as e:
+                    print(f"[LIVE] Fiyat güncelleme hatası: {e}")
+                next_price_time = now + 1.0
 
-                        # PnL Gösterimi
-                        live_pnl_str = ""
-                        if active_trades:
-                            t = active_trades[0]
-                            current_pnl = float(t.get('pnl', 0))
-                            sign = "+" if current_pnl >= 0 else "-"
-                            partial_info = " (Part.Taken)" if t.get("partial_taken") else ""
-                            live_pnl_str = f" | PnL: {sign}${abs(current_pnl):.2f}{partial_info}"
+            if now >= next_candle_time:
+                try:
+                    # 1. TÜM VERİLERİ AYNI ANDA ÇEK (HIZ DEVRİMİ BURADA 🚀)
+                    # Eskiden 7 saniye sürüyordu, şimdi 0.5 saniye sürecek.
+                    bulk_data = TradingEngine.get_all_candles_parallel(SYMBOLS, TIMEFRAMES)
 
-                        # Sinyal Yönetimi
-                        if s_type and "ACCEPTED" in s_reason:
-                            has_open = False
-                            for t in trade_manager.open_trades:
-                                if t['symbol'] == sym and t['timeframe'] == tf: has_open = True; break
+                    # 2. Gelen verileri işle (Bu kısım işlemci hızında akar, milisaniyeler sürer)
+                    for (sym, tf), df in bulk_data.items():
+                        if df.empty: continue
 
-                            if has_open:
-                                log_msg = f"{tf} | {curr_price} | ⚠️ Pozisyon Var{live_pnl_str}"
-                                json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
-                                                                                 active_trades if self.show_rr else [])
-                                self.update_ui_signal.emit(sym, tf, json_data, log_msg)
+                        try:
 
-                            elif self.last_signals[sym][tf] != closed_ts_utc:
-                                if trade_manager.check_cooldown(sym, tf):
-                                    log_msg = f"{tf} | {curr_price} | ❄️ SOĞUMA SÜRECİNDE"
+                            if len(df) < 3:
+                                continue
+                            # Binance kline: son satır çoğunlukla oluşan (henüz kapanmamış) mumdur.
+                            closed = df.iloc[-2]
+                            forming = df.iloc[-1]
+                            curr_price = float(closed['close'])
+                            closed_ts_utc = closed['timestamp']
+                            forming_ts_utc = forming['timestamp']
+                            istanbul_time = closed_ts_utc + timedelta(hours=3)
+                            ts_str = istanbul_time.strftime("%Y-%m-%d %H:%M")
+                            # Backtest ile uyumlu fill: sinyal mumu kapandıktan sonraki mumun OPEN fiyatı
+                            next_open_price = float(forming['open'])
+                            next_open_ts_str = (forming_ts_utc + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
+                            # Fiyatı Arayüze Gönder (Sadece 1m mumlarında veya her döngüde bir kere)
+                            if tf == "1m":
+                                self.price_signal.emit(sym, curr_price)
+
+                            # --- Trade Manager Güncellemesi ---
+
+                            closed_trades = trade_manager.update_trades(
+                                sym, tf,
+                                candle_high=float(closed['high']),
+                                candle_low=float(closed['low']),
+                                candle_close=float(closed['close']),
+                                candle_time_utc=closed_ts_utc,
+                                pb_top=float(closed.get('pb_ema_top', closed['close'])),
+                                pb_bot=float(closed.get('pb_ema_bot', closed['close']))
+                            )
+                            if closed_trades:
+                                for ct in closed_trades:
+                                    if ct['timeframe'] == tf:
+                                        reason = ct['status']
+                                        pnl = float(ct['pnl'])
+                                        pnl_str = f"+${pnl:.2f}" if pnl > 0 else f"-${abs(pnl):.2f}"
+                                        icon = "✅" if "WIN" in reason else "🛑"
+                                        close_log = f"🏁 {ct['symbol']} KAPANDI ({tf}): {reason} | {pnl_str} | Setup: {ct['setup']}"
+                                        self.update_ui_signal.emit(sym, tf, "{}", f"⚠️ {close_log}")
+
+                                        # Telegram (Asenkron - Beklemeden Gönder)
+                                        tg_msg = (f"{icon} KAPANDI: {ct['symbol']}\nTF: {tf}\nSetup: {ct['setup']}\n"
+                                                  f"Sonuç: {reason}\nNet PnL: {pnl_str}")
+                                        TradingEngine.send_telegram(self.tg_token, self.tg_chat_id, tg_msg)
+
+                            # --- İndikatör ve Sinyal Hesabı ---
+
+                            df_ind = TradingEngine.calculate_indicators(df.copy())
+                            df_closed = df_ind.iloc[:-1].copy()  # oluşan mumu çıkar
+                            config = load_optimized_config(sym, tf)
+                            rr, rsi, slope = config['rr'], config['rsi'], config['slope']
+                            use_at = config['at_active']
+                            at_status_log = "AT:ON" if use_at else "AT:OFF"
+
+                            s_type, s_entry, s_tp, s_sl, s_reason = TradingEngine.check_signal_diagnostic(
+                                df_closed,
+                                index=-1,
+                                min_rr=rr,
+                                rsi_limit=rsi,
+                                slope_thresh=slope,
+                                use_alphatrend=use_at,
+                                hold_n=config.get("hold_n"),
+                                min_hold_frac=config.get("min_hold_frac"),
+                                pb_touch_tolerance=config.get("pb_touch_tolerance"),
+                                body_tolerance=config.get("body_tolerance"),
+                                cloud_keltner_gap_min=config.get("cloud_keltner_gap_min"),
+                                tp_min_dist_ratio=config.get("tp_min_dist_ratio"),
+                                tp_max_dist_ratio=config.get("tp_max_dist_ratio"),
+                                adx_min=config.get("adx_min"),
+                            )
+
+                            setup_tag = "Unknown"
+                            if "ACCEPTED" in s_reason:
+                                start = s_reason.find("(") + 1
+                                end = s_reason.find(")")
+                                if start > 0 and end > 0: setup_tag = s_reason[start:end]
+
+                            active_trades = [t for t in trade_manager.open_trades if
+                                             t['timeframe'] == tf and t['symbol'] == sym]
+
+                            # PnL Gösterimi
+                            live_pnl_str = ""
+                            if active_trades:
+                                t = active_trades[0]
+                                current_pnl = float(t.get('pnl', 0))
+                                sign = "+" if current_pnl >= 0 else "-"
+                                partial_info = " (Part.Taken)" if t.get("partial_taken") else ""
+                                live_pnl_str = f" | PnL: {sign}${abs(current_pnl):.2f}{partial_info}"
+
+                            # Sinyal Yönetimi
+                            if s_type and "ACCEPTED" in s_reason:
+                                has_open = False
+                                for t in trade_manager.open_trades:
+                                    if t['symbol'] == sym and t['timeframe'] == tf: has_open = True; break
+
+                                if has_open:
+                                    log_msg = f"{tf} | {curr_price} | ⚠️ Pozisyon Var{live_pnl_str}"
                                     json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                      active_trades if self.show_rr else [])
                                     self.update_ui_signal.emit(sym, tf, json_data, log_msg)
+
+                                elif self.last_signals[sym][tf] != closed_ts_utc:
+                                    if trade_manager.check_cooldown(sym, tf):
+                                        log_msg = f"{tf} | {curr_price} | ❄️ SOĞUMA SÜRECİNDE"
+                                        json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
+                                                                                         active_trades if self.show_rr else [])
+                                        self.update_ui_signal.emit(sym, tf, json_data, log_msg)
+                                    else:
+                                        # YENİ İŞLEM AÇ
+                                        trade_data = {
+                                            "symbol": sym, "timestamp": next_open_ts_str, "open_time_utc": forming_ts_utc,
+                                            "timeframe": tf, "type": s_type,
+                                            "entry": next_open_price, "tp": s_tp, "sl": s_sl, "setup": setup_tag
+                                        }
+                                        trade_manager.open_trade(trade_data)
+                                        self.trade_signal.emit(trade_data)
+
+                                        # Telegram (Asenkron)
+                                        msg = (f"🚀 SİNYAL: {s_type}\nSembol: {sym}\nTF: {tf}\nSetup: {setup_tag}\n"
+                                               f"Fiyat: {next_open_price:.4f}\nTP: {s_tp:.4f}")
+                                        TradingEngine.send_telegram(self.tg_token, self.tg_chat_id, msg)
+
+                                        self.last_signals[sym][tf] = closed_ts_utc
+                                        log_msg = f"{tf} | {curr_price} | 🔥 {s_type} ({setup_tag})"
+                                        json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
+                                                                                         active_trades if self.show_rr else [])
+                                        self.update_ui_signal.emit(sym, tf, json_data, log_msg)
                                 else:
-                                    # YENİ İŞLEM AÇ
-                                    trade_data = {
-                                        "symbol": sym, "timestamp": next_open_ts_str, "open_time_utc": forming_ts_utc,
-                                        "timeframe": tf, "type": s_type,
-                                        "entry": next_open_price, "tp": s_tp, "sl": s_sl, "setup": setup_tag
-                                    }
-                                    trade_manager.open_trade(trade_data)
-                                    self.trade_signal.emit(trade_data)
-
-                                    # Telegram (Asenkron)
-                                    msg = (f"🚀 SİNYAL: {s_type}\nSembol: {sym}\nTF: {tf}\nSetup: {setup_tag}\n"
-                                           f"Fiyat: {next_open_price:.4f}\nTP: {s_tp:.4f}")
-                                    TradingEngine.send_telegram(self.tg_token, self.tg_chat_id, msg)
-
-                                    self.last_signals[sym][tf] = closed_ts_utc
-                                    log_msg = f"{tf} | {curr_price} | 🔥 {s_type} ({setup_tag})"
+                                    log_msg = f"{tf} | {curr_price} | ⏳ İşlemde...{live_pnl_str}"
                                     json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                      active_trades if self.show_rr else [])
                                     self.update_ui_signal.emit(sym, tf, json_data, log_msg)
                             else:
-                                log_msg = f"{tf} | {curr_price} | ⏳ İşlemde...{live_pnl_str}"
+                                # Sinyal Yoksa Logla
+                                if s_reason and "REJECT" in s_reason:
+                                    log_msg = f"{tf} | {curr_price} | ⚠️ {s_reason}{live_pnl_str}"
+                                else:
+                                    log_msg = f"{tf} | {curr_price} | {at_status_log}{live_pnl_str}"
+
                                 json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                  active_trades if self.show_rr else [])
                                 self.update_ui_signal.emit(sym, tf, json_data, log_msg)
-                        else:
-                            # Sinyal Yoksa Logla
-                            if s_reason and "REJECT" in s_reason:
-                                log_msg = f"{tf} | {curr_price} | ⚠️ {s_reason}{live_pnl_str}"
-                            else:
-                                log_msg = f"{tf} | {curr_price} | {at_status_log}{live_pnl_str}"
 
-                            json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
-                                                                             active_trades if self.show_rr else [])
-                            self.update_ui_signal.emit(sym, tf, json_data, log_msg)
+                        except Exception as e:
+                            print(f"Loop Processing Error ({sym}-{tf}): {e}")
+                            with open("error_log.txt", "a") as f:
+                                f.write(f"\n[{datetime.now()}] LOOP HATA: {str(e)}\n")
+                                f.write(traceback.format_exc())
 
                         except Exception as e:
                             print(f"Loop Processing Error ({sym}-{tf}): {e}")
