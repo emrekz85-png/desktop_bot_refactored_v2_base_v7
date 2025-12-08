@@ -3,7 +3,11 @@ import os
 import time
 import json
 import io
+import socket
+import ssl
+import base64
 import contextlib
+import threading
 import pandas as pd
 import pandas_ta as ta
 import numpy as np
@@ -1566,6 +1570,161 @@ class TradingEngine:
             return "{}"
 
 
+# --- REAL-TIME DATA STREAMER (Binance Futures WebSocket) ---
+class BinanceWebSocketKlineStream(threading.Thread):
+    def __init__(self, symbols, timeframes, max_candles=1000):
+        super().__init__(daemon=True)
+        self.symbols = symbols
+        self.timeframes = timeframes
+        self.max_candles = max_candles
+        self._running = False
+        self._socket = None
+        self._lock = threading.Lock()
+        self._host = "fstream.binance.com"
+        self._url_path = self._build_stream_path()
+        self._data = {(s, tf): TradingEngine.get_data(s, tf, limit=max_candles) for s in symbols for tf in timeframes}
+
+    def _build_stream_path(self):
+        streams = [f"{s.lower()}@kline_{tf}" for s in self.symbols for tf in self.timeframes]
+        stream_query = "/stream?streams=" + "/".join(streams)
+        return stream_query
+
+    def _recv_exact(self, length):
+        data = b""
+        while len(data) < length:
+            chunk = self._socket.recv(length - len(data))
+            if not chunk:
+                raise ConnectionError("WebSocket bağlantısı kapandı")
+            data += chunk
+        return data
+
+    def _read_frame(self):
+        header = self._recv_exact(2)
+        b1, b2 = header[0], header[1]
+        opcode = b1 & 0x0F
+        masked = b2 & 0x80
+        length = b2 & 0x7F
+
+        if length == 126:
+            length = int.from_bytes(self._recv_exact(2), "big")
+        elif length == 127:
+            length = int.from_bytes(self._recv_exact(8), "big")
+
+        mask = self._recv_exact(4) if masked else None
+        payload = self._recv_exact(length) if length else b""
+
+        if mask:
+            payload = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+
+        return opcode, payload
+
+    def _send_pong(self, payload=b""):
+        if not self._socket:
+            return
+        frame_head = bytes([0x8A, len(payload)])
+        self._socket.sendall(frame_head + payload)
+
+    def _close_socket(self):
+        try:
+            if self._socket:
+                self._socket.close()
+        except Exception:
+            pass
+        self._socket = None
+
+    def stop(self):
+        self._running = False
+        self._close_socket()
+
+    def _perform_handshake(self):
+        port = 443
+        raw_sock = socket.create_connection((self._host, port), timeout=10)
+        context = ssl.create_default_context()
+        self._socket = context.wrap_socket(raw_sock, server_hostname=self._host)
+
+        key = base64.b64encode(os.urandom(16)).decode()
+        request_lines = [
+            f"GET {self._url_path} HTTP/1.1",
+            f"Host: {self._host}",
+            "Upgrade: websocket",
+            "Connection: Upgrade",
+            f"Sec-WebSocket-Key: {key}",
+            "Sec-WebSocket-Version: 13",
+            "Origin: https://fstream.binance.com",
+            "\r\n",
+        ]
+        self._socket.sendall("\r\n".join(request_lines).encode())
+
+        response = b""
+        while b"\r\n\r\n" not in response:
+            chunk = self._socket.recv(1024)
+            if not chunk:
+                break
+            response += chunk
+
+        if b"101" not in response:
+            raise ConnectionError(f"WebSocket el sıkışma hatası: {response[:200]}")
+
+    def _update_dataframe(self, symbol, interval, kline):
+        ts = pd.to_datetime(kline.get("t"), unit="ms", utc=True)
+        new_row = {
+            "timestamp": ts,
+            "open": float(kline.get("o", 0)),
+            "high": float(kline.get("h", 0)),
+            "low": float(kline.get("l", 0)),
+            "close": float(kline.get("c", 0)),
+            "volume": float(kline.get("v", 0)),
+        }
+
+        key = (symbol, interval)
+        df = self._data.get(key, pd.DataFrame(columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']))
+
+        if not df.empty and df.iloc[-1]['timestamp'] == ts:
+            df.iloc[-1] = list(new_row.values())
+        else:
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
+        if len(df) > self.max_candles:
+            df = df.iloc[-self.max_candles:].reset_index(drop=True)
+
+        self._data[key] = df
+
+    def _handle_message(self, payload):
+        try:
+            obj = json.loads(payload)
+            kline = obj.get("data", {}).get("k", {})
+            symbol = kline.get("s")
+            interval = kline.get("i")
+            if not symbol or not interval:
+                return
+            with self._lock:
+                self._update_dataframe(symbol, interval, kline)
+        except Exception:
+            pass
+
+    def get_latest_bulk(self):
+        with self._lock:
+            return {(s, tf): df.copy() for (s, tf), df in self._data.items() if not df.empty}
+
+    def run(self):
+        self._running = True
+        while self._running:
+            try:
+                self._perform_handshake()
+                while self._running:
+                    opcode, payload = self._read_frame()
+                    if opcode == 0x1:  # text
+                        self._handle_message(payload.decode())
+                    elif opcode == 0x8:  # close
+                        break
+                    elif opcode == 0x9:  # ping
+                        self._send_pong(payload)
+            except Exception as e:
+                print(f"[WS] Yeniden bağlanılıyor: {e}")
+                time.sleep(2)
+            finally:
+                self._close_socket()
+
 # --- WORKERS ---
 class LiveBotWorker(QThread):
     update_ui_signal = pyqtSignal(str, str, str, str)
@@ -1579,6 +1738,7 @@ class LiveBotWorker(QThread):
         self.tg_chat_id = tg_chat_id;
         self.show_rr = show_rr
         self.last_signals = {sym: {tf: None for tf in TIMEFRAMES} for sym in SYMBOLS}
+        self.ws_stream = BinanceWebSocketKlineStream(SYMBOLS, TIMEFRAMES, max_candles=1200)
 
     def update_settings(self, symbol, tf, rr, rsi, slope):
         if symbol in SYMBOL_PARAMS:
@@ -1601,191 +1761,214 @@ class LiveBotWorker(QThread):
         self.tg_token = t;
         self.tg_chat_id = c
 
+    def stop(self):
+        self.is_running = False
+        self.ws_stream.stop()
+
     def run(self):
         # Telegram mesajlarını asenkron yapmak için bu import gerekli
         import threading
 
+        self.ws_stream.start()
         next_price_time = 0
         next_candle_time = 0
-        while self.is_running:
-            now = time.time()
+        try:
+            while self.is_running:
+                now = time.time()
 
-            if now >= next_price_time:
-                try:
-                    latest_prices = TradingEngine.get_latest_prices(SYMBOLS)
-                    for sym, price in latest_prices.items():
-                        self.price_signal.emit(sym, price)
-                        trade_manager.update_live_pnl_with_price(sym, price)
-                except Exception as e:
-                    print(f"[LIVE] Fiyat güncelleme hatası: {e}")
-                next_price_time = now + 0.5
+                stream_snapshot = None
 
-            if now >= next_candle_time:
-                try:
-                    # 1. TÜM VERİLERİ AYNI ANDA ÇEK (HIZ DEVRİMİ BURADA 🚀)
-                    # Eskiden 7 saniye sürüyordu, şimdi 0.5 saniye sürecek.
-                    bulk_data = TradingEngine.get_all_candles_parallel(SYMBOLS, TIMEFRAMES)
+                if now >= next_price_time:
+                    try:
+                        stream_snapshot = self.ws_stream.get_latest_bulk()
+                        for sym in SYMBOLS:
+                            df_price = stream_snapshot.get((sym, "1m")) or stream_snapshot.get((sym, TIMEFRAMES[0]))
+                            if df_price is not None and not df_price.empty:
+                                price = float(df_price.iloc[-1]['close'])
+                                self.price_signal.emit(sym, price)
+                                trade_manager.update_live_pnl_with_price(sym, price)
+                        if not stream_snapshot:
+                            latest_prices = TradingEngine.get_latest_prices(SYMBOLS)
+                            for sym, price in latest_prices.items():
+                                self.price_signal.emit(sym, price)
+                                trade_manager.update_live_pnl_with_price(sym, price)
+                    except Exception as e:
+                        print(f"[LIVE] Fiyat güncelleme hatası: {e}")
+                    next_price_time = now + 0.5
 
-                    # 2. Gelen verileri işle (Bu kısım işlemci hızında akar, milisaniyeler sürer)
-                    for (sym, tf), df in bulk_data.items():
-                        if df.empty: continue
+                if now >= next_candle_time:
+                    try:
+                        # 1. TÜM VERİLERİ WEBSOCKET'TEN AKTİF OLARAK TOPLA
+                        if stream_snapshot is None:
+                            stream_snapshot = self.ws_stream.get_latest_bulk()
+                        bulk_data = stream_snapshot
 
-                        try:
+                        # WebSocket verisi henüz hazır değilse eski REST çekimine düş
+                        if not bulk_data:
+                            bulk_data = TradingEngine.get_all_candles_parallel(SYMBOLS, TIMEFRAMES)
 
-                            if len(df) < 3:
-                                continue
-                            # Binance kline: son satır çoğunlukla oluşan (henüz kapanmamış) mumdur.
-                            closed = df.iloc[-2]
-                            forming = df.iloc[-1]
-                            curr_price = float(closed['close'])
-                            closed_ts_utc = closed['timestamp']
-                            forming_ts_utc = forming['timestamp']
-                            istanbul_time = closed_ts_utc + timedelta(hours=3)
-                            ts_str = istanbul_time.strftime("%Y-%m-%d %H:%M")
-                            # Backtest ile uyumlu fill: sinyal mumu kapandıktan sonraki mumun OPEN fiyatı
-                            next_open_price = float(forming['open'])
-                            next_open_ts_str = (forming_ts_utc + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
-                            # Fiyatı Arayüze Gönder (Sadece 1m mumlarında veya her döngüde bir kere)
-                            if tf == "1m":
-                                self.price_signal.emit(sym, curr_price)
+                        # 2. Gelen verileri işle (Bu kısım işlemci hızında akar, milisaniyeler sürer)
+                        for (sym, tf), df in bulk_data.items():
+                            if df.empty: continue
 
-                            # --- Trade Manager Güncellemesi ---
+                            try:
 
-                            closed_trades = trade_manager.update_trades(
-                                sym, tf,
-                                candle_high=float(closed['high']),
-                                candle_low=float(closed['low']),
-                                candle_close=float(closed['close']),
-                                candle_time_utc=closed_ts_utc,
-                                pb_top=float(closed.get('pb_ema_top', closed['close'])),
-                                pb_bot=float(closed.get('pb_ema_bot', closed['close']))
-                            )
-                            if closed_trades:
-                                for ct in closed_trades:
-                                    if ct['timeframe'] == tf:
-                                        reason = ct['status']
-                                        pnl = float(ct['pnl'])
-                                        pnl_str = f"+${pnl:.2f}" if pnl > 0 else f"-${abs(pnl):.2f}"
-                                        icon = "✅" if "WIN" in reason else "🛑"
-                                        close_log = f"🏁 {ct['symbol']} KAPANDI ({tf}): {reason} | {pnl_str} | Setup: {ct['setup']}"
-                                        self.update_ui_signal.emit(sym, tf, "{}", f"⚠️ {close_log}")
+                                if len(df) < 3:
+                                    continue
+                                # Binance kline: son satır çoğunlukla oluşan (henüz kapanmamış) mumdur.
+                                closed = df.iloc[-2]
+                                forming = df.iloc[-1]
+                                curr_price = float(closed['close'])
+                                closed_ts_utc = closed['timestamp']
+                                forming_ts_utc = forming['timestamp']
+                                istanbul_time = closed_ts_utc + timedelta(hours=3)
+                                ts_str = istanbul_time.strftime("%Y-%m-%d %H:%M")
+                                # Backtest ile uyumlu fill: sinyal mumu kapandıktan sonraki mumun OPEN fiyatı
+                                next_open_price = float(forming['open'])
+                                next_open_ts_str = (forming_ts_utc + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
+                                # Fiyatı Arayüze Gönder (Sadece 1m mumlarında veya her döngüde bir kere)
+                                if tf == "1m":
+                                    self.price_signal.emit(sym, curr_price)
 
-                                        # Telegram (Asenkron - Beklemeden Gönder)
-                                        tg_msg = (f"{icon} KAPANDI: {ct['symbol']}\nTF: {tf}\nSetup: {ct['setup']}\n"
-                                                  f"Sonuç: {reason}\nNet PnL: {pnl_str}")
-                                        TradingEngine.send_telegram(self.tg_token, self.tg_chat_id, tg_msg)
+                                # --- Trade Manager Güncellemesi ---
 
-                            # --- İndikatör ve Sinyal Hesabı ---
+                                closed_trades = trade_manager.update_trades(
+                                    sym, tf,
+                                    candle_high=float(closed['high']),
+                                    candle_low=float(closed['low']),
+                                    candle_close=float(closed['close']),
+                                    candle_time_utc=closed_ts_utc,
+                                    pb_top=float(closed.get('pb_ema_top', closed['close'])),
+                                    pb_bot=float(closed.get('pb_ema_bot', closed['close']))
+                                )
+                                if closed_trades:
+                                    for ct in closed_trades:
+                                        if ct['timeframe'] == tf:
+                                            reason = ct['status']
+                                            pnl = float(ct['pnl'])
+                                            pnl_str = f"+${pnl:.2f}" if pnl > 0 else f"-${abs(pnl):.2f}"
+                                            icon = "✅" if "WIN" in reason else "🛑"
+                                            close_log = f"🏁 {ct['symbol']} KAPANDI ({tf}): {reason} | {pnl_str} | Setup: {ct['setup']}"
+                                            self.update_ui_signal.emit(sym, tf, "{}", f"⚠️ {close_log}")
 
-                            df_ind = TradingEngine.calculate_indicators(df.copy())
-                            df_closed = df_ind.iloc[:-1].copy()  # oluşan mumu çıkar
-                            config = load_optimized_config(sym, tf)
-                            rr, rsi, slope = config['rr'], config['rsi'], config['slope']
-                            use_at = config['at_active']
-                            at_status_log = "AT:ON" if use_at else "AT:OFF"
+                                            # Telegram (Asenkron - Beklemeden Gönder)
+                                            tg_msg = (f"{icon} KAPANDI: {ct['symbol']}\nTF: {tf}\nSetup: {ct['setup']}\n"
+                                                      f"Sonuç: {reason}\nNet PnL: {pnl_str}")
+                                            TradingEngine.send_telegram(self.tg_token, self.tg_chat_id, tg_msg)
 
-                            s_type, s_entry, s_tp, s_sl, s_reason = TradingEngine.check_signal_diagnostic(
-                                df_closed,
-                                index=-1,
-                                min_rr=rr,
-                                rsi_limit=rsi,
-                                slope_thresh=slope,
-                                use_alphatrend=use_at,
-                                hold_n=config.get("hold_n"),
-                                min_hold_frac=config.get("min_hold_frac"),
-                                pb_touch_tolerance=config.get("pb_touch_tolerance"),
-                                body_tolerance=config.get("body_tolerance"),
-                                cloud_keltner_gap_min=config.get("cloud_keltner_gap_min"),
-                                tp_min_dist_ratio=config.get("tp_min_dist_ratio"),
-                                tp_max_dist_ratio=config.get("tp_max_dist_ratio"),
-                                adx_min=config.get("adx_min"),
-                            )
+                                # --- İndikatör ve Sinyal Hesabı ---
 
-                            setup_tag = "Unknown"
-                            if "ACCEPTED" in s_reason:
-                                start = s_reason.find("(") + 1
-                                end = s_reason.find(")")
-                                if start > 0 and end > 0: setup_tag = s_reason[start:end]
+                                df_ind = TradingEngine.calculate_indicators(df.copy())
+                                df_closed = df_ind.iloc[:-1].copy()  # oluşan mumu çıkar
+                                config = load_optimized_config(sym, tf)
+                                rr, rsi, slope = config['rr'], config['rsi'], config['slope']
+                                use_at = config['at_active']
+                                at_status_log = "AT:ON" if use_at else "AT:OFF"
 
-                            active_trades = [t for t in trade_manager.open_trades if
-                                             t['timeframe'] == tf and t['symbol'] == sym]
+                                s_type, s_entry, s_tp, s_sl, s_reason = TradingEngine.check_signal_diagnostic(
+                                    df_closed,
+                                    index=-1,
+                                    min_rr=rr,
+                                    rsi_limit=rsi,
+                                    slope_thresh=slope,
+                                    use_alphatrend=use_at,
+                                    hold_n=config.get("hold_n"),
+                                    min_hold_frac=config.get("min_hold_frac"),
+                                    pb_touch_tolerance=config.get("pb_touch_tolerance"),
+                                    body_tolerance=config.get("body_tolerance"),
+                                    cloud_keltner_gap_min=config.get("cloud_keltner_gap_min"),
+                                    tp_min_dist_ratio=config.get("tp_min_dist_ratio"),
+                                    tp_max_dist_ratio=config.get("tp_max_dist_ratio"),
+                                    adx_min=config.get("adx_min"),
+                                )
 
-                            # PnL Gösterimi
-                            live_pnl_str = ""
-                            if active_trades:
-                                t = active_trades[0]
-                                current_pnl = float(t.get('pnl', 0))
-                                sign = "+" if current_pnl >= 0 else "-"
-                                partial_info = " (Part.Taken)" if t.get("partial_taken") else ""
-                                live_pnl_str = f" | PnL: {sign}${abs(current_pnl):.2f}{partial_info}"
+                                setup_tag = "Unknown"
+                                if "ACCEPTED" in s_reason:
+                                    start = s_reason.find("(") + 1
+                                    end = s_reason.find(")")
+                                    if start > 0 and end > 0: setup_tag = s_reason[start:end]
 
-                            # Sinyal Yönetimi
-                            if s_type and "ACCEPTED" in s_reason:
-                                has_open = False
-                                for t in trade_manager.open_trades:
-                                    if t['symbol'] == sym and t['timeframe'] == tf: has_open = True; break
+                                active_trades = [t for t in trade_manager.open_trades if
+                                                 t['timeframe'] == tf and t['symbol'] == sym]
 
-                                if has_open:
-                                    log_msg = f"{tf} | {curr_price} | ⚠️ Pozisyon Var{live_pnl_str}"
-                                    json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
-                                                                                     active_trades if self.show_rr else [])
-                                    self.update_ui_signal.emit(sym, tf, json_data, log_msg)
+                                # PnL Gösterimi
+                                live_pnl_str = ""
+                                if active_trades:
+                                    t = active_trades[0]
+                                    current_pnl = float(t.get('pnl', 0))
+                                    sign = "+" if current_pnl >= 0 else "-"
+                                    partial_info = " (Part.Taken)" if t.get("partial_taken") else ""
+                                    live_pnl_str = f" | PnL: {sign}${abs(current_pnl):.2f}{partial_info}"
 
-                                elif self.last_signals[sym][tf] != closed_ts_utc:
-                                    if trade_manager.check_cooldown(sym, tf, forming_ts_utc):
-                                        log_msg = f"{tf} | {curr_price} | ❄️ SOĞUMA SÜRECİNDE"
+                                # Sinyal Yönetimi
+                                if s_type and "ACCEPTED" in s_reason:
+                                    has_open = False
+                                    for t in trade_manager.open_trades:
+                                        if t['symbol'] == sym and t['timeframe'] == tf: has_open = True; break
+
+                                    if has_open:
+                                        log_msg = f"{tf} | {curr_price} | ⚠️ Pozisyon Var{live_pnl_str}"
                                         json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                          active_trades if self.show_rr else [])
                                         self.update_ui_signal.emit(sym, tf, json_data, log_msg)
+
+                                    elif self.last_signals[sym][tf] != closed_ts_utc:
+                                        if trade_manager.check_cooldown(sym, tf, forming_ts_utc):
+                                            log_msg = f"{tf} | {curr_price} | ❄️ SOĞUMA SÜRECİNDE"
+                                            json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
+                                                                                             active_trades if self.show_rr else [])
+                                            self.update_ui_signal.emit(sym, tf, json_data, log_msg)
+                                        else:
+                                            # YENİ İŞLEM AÇ
+                                            trade_data = {
+                                                "symbol": sym, "timestamp": next_open_ts_str, "open_time_utc": forming_ts_utc,
+                                                "timeframe": tf, "type": s_type,
+                                                "entry": next_open_price, "tp": s_tp, "sl": s_sl, "setup": setup_tag
+                                            }
+                                            trade_manager.open_trade(trade_data)
+                                            self.trade_signal.emit(trade_data)
+
+                                            # Telegram (Asenkron)
+                                            msg = (f"🚀 SİNYAL: {s_type}\nSembol: {sym}\nTF: {tf}\nSetup: {setup_tag}\n"
+                                                   f"Fiyat: {next_open_price:.4f}\nTP: {s_tp:.4f}")
+                                            TradingEngine.send_telegram(self.tg_token, self.tg_chat_id, msg)
+
+                                            self.last_signals[sym][tf] = closed_ts_utc
+                                            log_msg = f"{tf} | {curr_price} | 🔥 {s_type} ({setup_tag})"
+                                            json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
+                                                                                             active_trades if self.show_rr else [])
+                                            self.update_ui_signal.emit(sym, tf, json_data, log_msg)
                                     else:
-                                        # YENİ İŞLEM AÇ
-                                        trade_data = {
-                                            "symbol": sym, "timestamp": next_open_ts_str, "open_time_utc": forming_ts_utc,
-                                            "timeframe": tf, "type": s_type,
-                                            "entry": next_open_price, "tp": s_tp, "sl": s_sl, "setup": setup_tag
-                                        }
-                                        trade_manager.open_trade(trade_data)
-                                        self.trade_signal.emit(trade_data)
-
-                                        # Telegram (Asenkron)
-                                        msg = (f"🚀 SİNYAL: {s_type}\nSembol: {sym}\nTF: {tf}\nSetup: {setup_tag}\n"
-                                               f"Fiyat: {next_open_price:.4f}\nTP: {s_tp:.4f}")
-                                        TradingEngine.send_telegram(self.tg_token, self.tg_chat_id, msg)
-
-                                        self.last_signals[sym][tf] = closed_ts_utc
-                                        log_msg = f"{tf} | {curr_price} | 🔥 {s_type} ({setup_tag})"
+                                        log_msg = f"{tf} | {curr_price} | ⏳ İşlemde...{live_pnl_str}"
                                         json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                          active_trades if self.show_rr else [])
                                         self.update_ui_signal.emit(sym, tf, json_data, log_msg)
                                 else:
-                                    log_msg = f"{tf} | {curr_price} | ⏳ İşlemde...{live_pnl_str}"
+                                    # Sinyal Yoksa Logla
+                                    if s_reason and "REJECT" in s_reason:
+                                        log_msg = f"{tf} | {curr_price} | ⚠️ {s_reason}{live_pnl_str}"
+                                    else:
+                                        log_msg = f"{tf} | {curr_price} | {at_status_log}{live_pnl_str}"
+
                                     json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                      active_trades if self.show_rr else [])
                                     self.update_ui_signal.emit(sym, tf, json_data, log_msg)
-                            else:
-                                # Sinyal Yoksa Logla
-                                if s_reason and "REJECT" in s_reason:
-                                    log_msg = f"{tf} | {curr_price} | ⚠️ {s_reason}{live_pnl_str}"
-                                else:
-                                    log_msg = f"{tf} | {curr_price} | {at_status_log}{live_pnl_str}"
 
-                                json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
-                                                                                 active_trades if self.show_rr else [])
-                                self.update_ui_signal.emit(sym, tf, json_data, log_msg)
+                            except Exception as e:
+                                print(f"Loop Processing Error ({sym}-{tf}): {e}")
+                                with open("error_log.txt", "a") as f:
+                                    f.write(f"\n[{datetime.now()}] LOOP HATA: {str(e)}\n")
+                                    f.write(traceback.format_exc())
 
-                        except Exception as e:
-                            print(f"Loop Processing Error ({sym}-{tf}): {e}")
-                            with open("error_log.txt", "a") as f:
-                                f.write(f"\n[{datetime.now()}] LOOP HATA: {str(e)}\n")
-                                f.write(traceback.format_exc())
+                    except Exception as e:
+                        print(f"Main Loop Error: {e}")
+                        time.sleep(1)  # Hata olursa 1 sn bekle, işlemciyi yakma
 
-                except Exception as e:
-                    print(f"Main Loop Error: {e}")
-                    time.sleep(1)  # Hata olursa 1 sn bekle, işlemciyi yakma
+                    next_candle_time = now + REFRESH_RATE
 
-                next_candle_time = now + REFRESH_RATE
-
-            time.sleep(0.1)
+                time.sleep(0.1)
+        finally:
+            self.ws_stream.stop()
 
 
 # --- OPTIMIZER WORKER (v35.0 - MATHEMATICALLY CORRECT R-CALC) ---
