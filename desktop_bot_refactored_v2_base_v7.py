@@ -449,13 +449,16 @@ class TradeManager:
         self.load_trades()
         print("✅ TRADE MANAGER BAŞLATILDI: Veriler Yüklendi 📂")
 
-    def check_cooldown(self, symbol, timeframe, now_utc):
+    def check_cooldown(self, symbol, timeframe, now_utc=None):
         """
         İşlem sonrası cooldown kontrolü.
         - now_utc pandas.Timestamp da olabilir, datetime da olabilir.
         - Hepsini offset-naive (tzinfo=None) datetime'a çevirip karşılaştırıyoruz.
         """
         k = (symbol, timeframe)
+
+        if now_utc is None:
+            now_utc = datetime.utcnow()
 
         # now_utc'yi normalize et
         if isinstance(now_utc, pd.Timestamp):
@@ -1657,7 +1660,7 @@ class LiveBotWorker(QThread):
                                     self.update_ui_signal.emit(sym, tf, json_data, log_msg)
 
                                 elif self.last_signals[sym][tf] != closed_ts_utc:
-                                    if trade_manager.check_cooldown(sym, tf):
+                                    if trade_manager.check_cooldown(sym, tf, forming_ts_utc):
                                         log_msg = f"{tf} | {curr_price} | ❄️ SOĞUMA SÜRECİNDE"
                                         json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                          active_trades if self.show_rr else [])
