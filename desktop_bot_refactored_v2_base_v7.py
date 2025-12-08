@@ -2,6 +2,8 @@ import sys
 import os
 import time
 import json
+import io
+import contextlib
 import pandas as pd
 import pandas_ta as ta
 import numpy as np
@@ -38,6 +40,8 @@ CSV_FILE = "trades.csv"
 CONFIG_FILE = "config.json"
 # Backtestler için maks. mum sayısı sınırları
 BACKTEST_CANDLE_LIMITS = {"1m": 4000, "5m": 4000, "15m": 4000, "1h": 4000}
+BEST_CONFIGS_FILE = "best_configs.json"
+BEST_CONFIG_CACHE = {}
 
 # --- 💰 EKONOMİK MODEL (Tüm Modüller Burayı Kullanacak) ---
 #  uyarınca tek bir konfigürasyon yapısı:
@@ -336,7 +340,28 @@ def _optimize_backtest_configs(streams: dict, requested_pairs: list):
 
 
 def load_optimized_config(symbol, timeframe):
-    """Return optimized config for given symbol/timeframe with safe defaults."""
+    """Return optimized config for given symbol/timeframe with safe defaults.
+
+    Öncelik sırası:
+    1. GUI'den veya CLI'den yapılan backtest sonucunda kaydedilen en iyi ayarlar
+    2. SYMBOL_PARAMS içinde tanımlı manuel ayarlar
+    3. Güvenli varsayılanlar
+    """
+
+    def _load_best_configs():
+        global BEST_CONFIG_CACHE
+        if BEST_CONFIG_CACHE:
+            return BEST_CONFIG_CACHE
+        if os.path.exists(BEST_CONFIGS_FILE):
+            try:
+                with open(BEST_CONFIGS_FILE, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                # Beklenen format: {"SYMBOL": {"tf": {...}}}
+                if isinstance(raw, dict):
+                    BEST_CONFIG_CACHE = raw
+            except Exception:
+                BEST_CONFIG_CACHE = {}
+        return BEST_CONFIG_CACHE
 
     defaults = {
         "rr": 3.0,
@@ -347,8 +372,14 @@ def load_optimized_config(symbol, timeframe):
         "use_dynamic_pbema_tp": True,
     }
 
+    best_cfgs = _load_best_configs()
     symbol_cfg = SYMBOL_PARAMS.get(symbol, {})
     tf_cfg = symbol_cfg.get(timeframe, {}) if isinstance(symbol_cfg, dict) else {}
+
+    if isinstance(best_cfgs, dict):
+        sym_dict = best_cfgs.get(symbol, {}) if isinstance(best_cfgs.get(symbol), dict) else {}
+        if isinstance(sym_dict, dict) and timeframe in sym_dict:
+            tf_cfg = {**tf_cfg, **sym_dict.get(timeframe, {})}
 
     merged = {**defaults, **tf_cfg}
 
@@ -357,6 +388,29 @@ def load_optimized_config(symbol, timeframe):
         merged.setdefault(k, v)
 
     return merged
+
+
+def save_best_configs(best_configs: dict):
+    """Persist best backtest configs to disk and cache for live bot usage."""
+
+    global BEST_CONFIG_CACHE
+    cleaned = {}
+    for (key, cfg) in best_configs.items():
+        # key can be tuple (sym, tf) or nested dict
+        if isinstance(key, tuple) and len(key) == 2:
+            sym, tf = key
+            cleaned.setdefault(sym, {})
+            cleaned[sym][tf] = {k: v for k, v in cfg.items() if not str(k).startswith("_")}
+        elif isinstance(cfg, dict):
+            # already nested
+            cleaned[key] = cfg
+
+    BEST_CONFIG_CACHE = cleaned
+    try:
+        with open(BEST_CONFIGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(cleaned, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 
 
@@ -1910,6 +1964,33 @@ class AutoBacktestWorker(QThread):
             print(f"Rapor hatası: {e}")
 
 
+class BacktestWorker(QThread):
+    log_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal(dict)
+
+    def __init__(self, symbols, timeframes, candles):
+        super().__init__()
+        self.symbols = symbols
+        self.timeframes = timeframes
+        self.candles = candles
+
+    def run(self):
+        buf = io.StringIO()
+        result = {}
+        try:
+            with contextlib.redirect_stdout(buf):
+                result = run_portfolio_backtest(
+                    symbols=self.symbols,
+                    timeframes=self.timeframes,
+                    candles=self.candles,
+                ) or {}
+        except Exception as e:
+            buf.write(f"\n[BACKTEST][GUI] Hata: {e}\n{traceback.format_exc()}\n")
+        finally:
+            self.log_signal.emit(buf.getvalue())
+            self.finished_signal.emit(result if isinstance(result, dict) else {})
+
+
 # --- GUI (ANA PENCERE) ---
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -1940,6 +2021,7 @@ class MainWindow(QMainWindow):
         self.show_rr_tools = True
         self.data_cache = {sym: {tf: (None, None) for tf in TIMEFRAMES} for sym in SYMBOLS}
         self.current_symbol = SYMBOLS[0]
+        self.backtest_worker = None
 
         central = QWidget();
         self.setCentralWidget(central);
@@ -2142,7 +2224,30 @@ class MainWindow(QMainWindow):
         hist_layout.addWidget(hist_group)
         self.main_tabs.addTab(history_widget, "📜 Geçmiş & Varlık")
 
-        # 4. SEKME: Optimizasyon (Temizlendi & Otomatikleştirildi)
+        # 4. SEKME: Backtest
+        backtest_widget = QWidget();
+        backtest_layout = QVBoxLayout(backtest_widget)
+        bt_cfg = QHBoxLayout()
+        bt_cfg.addWidget(QLabel("Semboller:"));
+        bt_cfg.addWidget(QLabel(", ".join(SYMBOLS)))
+        bt_cfg.addWidget(QLabel("TF:"));
+        bt_cfg.addWidget(QLabel(", ".join(TIMEFRAMES)))
+        bt_cfg.addWidget(QLabel("Mum Sayısı:"));
+        self.backtest_candles = QSpinBox();
+        self.backtest_candles.setRange(500, 6000);
+        self.backtest_candles.setValue(3000);
+        bt_cfg.addWidget(self.backtest_candles)
+        self.btn_run_backtest = QPushButton("🧪 Backtest Çalıştır");
+        self.btn_run_backtest.clicked.connect(self.start_backtest);
+        bt_cfg.addWidget(self.btn_run_backtest)
+        backtest_layout.addLayout(bt_cfg)
+
+        self.backtest_logs = QTextEdit();
+        self.backtest_logs.setReadOnly(True);
+        backtest_layout.addWidget(self.backtest_logs)
+        self.main_tabs.addTab(backtest_widget, "🧪 Backtest")
+
+        # 5. SEKME: Optimizasyon (Temizlendi & Otomatikleştirildi)
         opt_widget = QWidget();
         opt_layout = QVBoxLayout(opt_widget)
         grid_group = QGroupBox("Parametre Aralıkları");
@@ -2153,11 +2258,6 @@ class MainWindow(QMainWindow):
         btn_test_report.clicked.connect(self.force_daily_report)
         opt_layout.addWidget(btn_test_report)
         # ----------------------------------------
-
-        self.opt_logs = QTextEdit();
-        self.opt_logs.setReadOnly(True);
-        opt_layout.addWidget(self.opt_logs)
-        self.main_tabs.addTab(opt_widget, "🔧 Optimizasyon")
 
         # RR Ayarları
         grid_layout.addWidget(QLabel("RR:"));
@@ -2213,8 +2313,6 @@ class MainWindow(QMainWindow):
         self.chk_monte_carlo.setStyleSheet("color: #ff9900; font-weight: bold;")
         candles_layout.addWidget(self.chk_monte_carlo)
         # ----------------------------
-
-        self.btn_run_opt = QPushButton("🚀 TAM TARAMA BAŞLAT");
 
         self.btn_run_opt = QPushButton("🚀 TAM TARAMA BAŞLAT");
         self.btn_run_opt.clicked.connect(self.run_optimization);
@@ -2455,6 +2553,33 @@ class MainWindow(QMainWindow):
     def reset_balances(self):
         if QMessageBox.question(self, 'Onay', "Sıfırla?",
                                 QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes: trade_manager.reset_balances(); self.refresh_trade_table_from_manager()
+
+    def start_backtest(self):
+        if getattr(self, "backtest_worker", None) and self.backtest_worker.isRunning():
+            QMessageBox.information(self, "Devam Ediyor", "Backtest zaten çalışıyor...")
+            return
+
+        self.backtest_logs.clear()
+        self.backtest_logs.append("🧪 Backtest başlatıldı. Lütfen bekleyin...")
+        candles = self.backtest_candles.value()
+
+        self.backtest_worker = BacktestWorker(SYMBOLS, TIMEFRAMES, candles)
+        self.backtest_worker.log_signal.connect(self.append_backtest_log)
+        self.backtest_worker.finished_signal.connect(self.on_backtest_finished)
+        self.btn_run_backtest.setEnabled(False)
+        self.backtest_worker.start()
+
+    def append_backtest_log(self, text):
+        self.backtest_logs.append(text)
+
+    def on_backtest_finished(self, result: dict):
+        self.btn_run_backtest.setEnabled(True)
+        best_configs = result.get("best_configs", {}) if isinstance(result, dict) else {}
+        if best_configs:
+            save_best_configs(best_configs)
+            self.backtest_logs.append("✅ En iyi ayarlar canlı trade'e aktarıldı.")
+        else:
+            self.backtest_logs.append("⚠️ Backtest sonucu bulunamadı.")
 
     # --- OPTIMIZATION STARTUP (FIXED) ---
         # --- GÜNCELLENMİŞ RUN OPTIMIZATION ---
@@ -3162,6 +3287,17 @@ def run_portfolio_backtest(
     total_trades = trades_df["id"].nunique() if not trades_df.empty and "id" in trades_df.columns else 0
     if total_trades < 5:
         print("[BACKTEST] Çok az trade bulundu. Daha fazla sonuç için RR/RSI/Slope limitlerini biraz gevşetmeyi düşünebilirsin.")
+
+    # Sonuçları GUI/LIVE ile paylaşmak için kaydet
+    save_best_configs(best_configs)
+    result = {
+        "summary": summary_rows,
+        "best_configs": best_configs,
+        "trades_csv": out_trades_csv,
+        "summary_csv": out_summary_csv,
+    }
+
+    return result
 
 def plot_trade(
     df_prices: pd.DataFrame,
