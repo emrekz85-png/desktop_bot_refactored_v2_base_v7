@@ -1997,6 +1997,7 @@ class AutoBacktestWorker(QThread):
                 out_trades_csv="daily_report_trades.csv",
                 out_summary_csv="daily_report_summary.csv",
                 limit_map=DAILY_REPORT_CANDLE_LIMITS,
+                draw_trades=False,
             ) or {}
 
             summary_rows = result.get("summary", []) if isinstance(result, dict) else []
@@ -2066,6 +2067,8 @@ class BacktestWorker(QThread):
                 timeframes=self.timeframes,
                 candles=self.candles,
                 progress_callback=self.log_signal.emit,
+                draw_trades=True,
+                max_draw_trades=30,
             ) or {}
         except Exception as e:
             self.log_signal.emit(f"\n[BACKTEST][GUI] Hata: {e}\n{traceback.format_exc()}\n")
@@ -3167,6 +3170,8 @@ def run_portfolio_backtest(
     out_summary_csv: str = "backtest_summary.csv",
     limit_map: Optional[dict] = None,
     progress_callback=None,
+    draw_trades: bool = True,
+    max_draw_trades: Optional[int] = None,
 ):
     def log(msg: str):
         print(msg)
@@ -3447,6 +3452,12 @@ def run_portfolio_backtest(
         "trades_csv": out_trades_csv,
         "summary_csv": out_summary_csv,
     }
+
+    if draw_trades:
+        try:
+            replay_backtest_trades(trades_csv=out_trades_csv, max_trades=max_draw_trades)
+        except Exception as e:
+            log(f"[BACKTEST] Trade çiziminde hata: {e}")
 
     return result
 
