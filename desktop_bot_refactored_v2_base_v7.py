@@ -868,6 +868,9 @@ trade_manager = TradeManager()
 
 # --- TRADING ENGINE (ROBUST API & RETRY MECHANISM) ---
 class TradingEngine:
+    # Ağ çökmelerinde tekrar tekrar DNS denemelerini önlemek için kısa süreli kilit
+    _network_cooldown_until = 0
+
     @staticmethod
     def send_telegram(token, chat_id, message):
         if not token or not chat_id: return
@@ -887,6 +890,14 @@ class TradingEngine:
     @staticmethod
     def http_get_with_retry(url, params, max_retries=3, timeout=10):
         """Hata durumunda bekleyip tekrar deneyen güvenli istek fonksiyonu"""
+
+        # DNS çözememe gibi hatalar tekrar denense de çözülmeyecekse boşuna istek atma
+        now = time.time()
+        if now < TradingEngine._network_cooldown_until:
+            cooldown_left = int(TradingEngine._network_cooldown_until - now)
+            print(f"BAĞLANTI HATASI: Ağ erişimi yok. {cooldown_left}s sonra yeniden denenecek.")
+            return None
+
         delay = 1
         for attempt in range(max_retries):
             try:
@@ -901,9 +912,17 @@ class TradingEngine:
                     continue
 
                 # Diğer hatalarda (404 vb) direkt döndür
+                TradingEngine._network_cooldown_until = 0
                 return res
             except requests.exceptions.RequestException as e:
+                is_dns_error = isinstance(e, requests.exceptions.ConnectionError) and "NameResolutionError" in str(e)
                 print(f"BAĞLANTI HATASI (Deneme {attempt + 1}/{max_retries}): {e}")
+
+                # DNS çözememe (getaddrinfo) durumunda 5 dakikalığına istekleri durdur
+                if is_dns_error:
+                    TradingEngine._network_cooldown_until = time.time() + 300
+                    break
+
                 time.sleep(delay)
                 delay *= 2
 
