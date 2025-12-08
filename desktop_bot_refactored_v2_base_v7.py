@@ -286,8 +286,13 @@ def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) 
     return tm.total_pnl, unique_trades
 
 
-def _optimize_backtest_configs(streams: dict, requested_pairs: list):
+def _optimize_backtest_configs(streams: dict, requested_pairs: list, progress_callback=None):
     """Brute-force search to find the best config (by net pnl) per symbol/timeframe."""
+
+    def log(msg: str):
+        print(msg)
+        if progress_callback:
+            progress_callback(msg)
 
     candidates = _generate_candidate_configs()
     total_jobs = len([1 for pair in requested_pairs if pair in streams]) * len(candidates)
@@ -298,7 +303,7 @@ def _optimize_backtest_configs(streams: dict, requested_pairs: list):
     completed = 0
     next_progress = 5
 
-    print(f"[OPT] {len(candidates)} farklı ayar taranacak (her zaman dilimi için).")
+    log(f"[OPT] {len(candidates)} farklı ayar taranacak (her zaman dilimi için).")
 
     for sym, tf in requested_pairs:
         if (sym, tf) not in streams:
@@ -314,7 +319,7 @@ def _optimize_backtest_configs(streams: dict, requested_pairs: list):
             completed += 1
             progress = (completed / total_jobs) * 100
             if progress >= next_progress:
-                print(f"[OPT] %{progress:.1f} tamamlandı...")
+                log(f"[OPT] %{progress:.1f} tamamlandı...")
                 next_progress += 5
 
             if trades == 0:
@@ -327,15 +332,15 @@ def _optimize_backtest_configs(streams: dict, requested_pairs: list):
 
         if best_cfg:
             best_by_pair[(sym, tf)] = {**best_cfg, "_net_pnl": best_pnl, "_trades": best_trades}
-            print(
+            log(
                 f"[OPT][{sym}-{tf}] En iyi ayar: RR={best_cfg['rr']}, RSI={best_cfg['rsi']}, "
                 f"Slope={best_cfg['slope']}, AT={'Açık' if best_cfg['at_active'] else 'Kapalı'} | "
                 f"Net PnL={best_pnl:.2f}, Trades={best_trades}"
             )
         else:
-            print(f"[OPT][{sym}-{tf}] Uygun ayar bulunamadı (yetersiz trade)")
+            log(f"[OPT][{sym}-{tf}] Uygun ayar bulunamadı (yetersiz trade)")
 
-    print("[OPT] Tarama tamamlandı. Bulunan ayarlar backtest'e uygulanacak.")
+    log("[OPT] Tarama tamamlandı. Bulunan ayarlar backtest'e uygulanacak.")
     return best_by_pair
 
 
@@ -914,6 +919,26 @@ class TradingEngine:
                 except Exception as e:
                     print(f"Paralel Veri Hatası: {e}")
         return results
+
+    @staticmethod
+    def get_latest_prices(symbols):
+        """Lightweight ticker fetcher to refresh UI prices without heavy kline calls."""
+
+        prices = {}
+        url = "https://fapi.binance.com/fapi/v1/ticker/price"
+
+        for sym in symbols:
+            try:
+                res = TradingEngine.http_get_with_retry(url, {"symbol": sym}, max_retries=2)
+                if res is None:
+                    continue
+                data = res.json()
+                if isinstance(data, dict) and "price" in data:
+                    prices[sym] = float(data["price"])
+            except Exception as e:
+                print(f"[PRICE] {sym} fiyatı alınamadı: {e}")
+
+        return prices
 
     @staticmethod
     def get_historical_data_pagination(symbol, interval, total_candles=5000):
@@ -1504,24 +1529,39 @@ class LiveBotWorker(QThread):
         # Telegram mesajlarını asenkron yapmak için bu import gerekli
         import threading
 
+        next_price_time = 0
+        next_candle_time = 0
+
         while self.is_running:
-            try:
-                # 1. TÜM VERİLERİ AYNI ANDA ÇEK (HIZ DEVRİMİ BURADA 🚀)
-                # Eskiden 7 saniye sürüyordu, şimdi 0.5 saniye sürecek.
-                bulk_data = TradingEngine.get_all_candles_parallel(SYMBOLS, TIMEFRAMES)
+            now = time.time()
 
-                # 2. Gelen verileri işle (Bu kısım işlemci hızında akar, milisaniyeler sürer)
-                for (sym, tf), df in bulk_data.items():
-                    if df.empty: continue
+            if now >= next_price_time:
+                try:
+                    latest_prices = TradingEngine.get_latest_prices(SYMBOLS)
+                    for sym, price in latest_prices.items():
+                        self.price_signal.emit(sym, price)
+                except Exception as e:
+                    print(f"[LIVE] Fiyat güncelleme hatası: {e}")
+                next_price_time = now + 1.0
 
-                    try:
+            if now >= next_candle_time:
+                try:
+                    # 1. TÜM VERİLERİ AYNI ANDA ÇEK (HIZ DEVRİMİ BURADA 🚀)
+                    # Eskiden 7 saniye sürüyordu, şimdi 0.5 saniye sürecek.
+                    bulk_data = TradingEngine.get_all_candles_parallel(SYMBOLS, TIMEFRAMES)
 
-                        if len(df) < 3:
-                            continue
-                        # Binance kline: son satır çoğunlukla oluşan (henüz kapanmamış) mumdur.
-                        closed = df.iloc[-2]
-                        forming = df.iloc[-1]
-                        curr_price = float(closed['close'])
+                    # 2. Gelen verileri işle (Bu kısım işlemci hızında akar, milisaniyeler sürer)
+                    for (sym, tf), df in bulk_data.items():
+                        if df.empty: continue
+
+                        try:
+
+                            if len(df) < 3:
+                                continue
+                            # Binance kline: son satır çoğunlukla oluşan (henüz kapanmamış) mumdur.
+                            closed = df.iloc[-2]
+                            forming = df.iloc[-1]
+                            curr_price = float(closed['close'])
                         closed_ts_utc = closed['timestamp']
                         forming_ts_utc = forming['timestamp']
                         istanbul_time = closed_ts_utc + timedelta(hours=3)
@@ -1657,17 +1697,19 @@ class LiveBotWorker(QThread):
                                                                              active_trades if self.show_rr else [])
                             self.update_ui_signal.emit(sym, tf, json_data, log_msg)
 
-                    except Exception as e:
-                        print(f"Loop Processing Error ({sym}-{tf}): {e}")
-                        with open("error_log.txt", "a") as f:
-                            f.write(f"\n[{datetime.now()}] LOOP HATA: {str(e)}\n")
-                            f.write(traceback.format_exc())
+                        except Exception as e:
+                            print(f"Loop Processing Error ({sym}-{tf}): {e}")
+                            with open("error_log.txt", "a") as f:
+                                f.write(f"\n[{datetime.now()}] LOOP HATA: {str(e)}\n")
+                                f.write(traceback.format_exc())
 
-            except Exception as e:
-                print(f"Main Loop Error: {e}")
-                time.sleep(1)  # Hata olursa 1 sn bekle, işlemciyi yakma
+                except Exception as e:
+                    print(f"Main Loop Error: {e}")
+                    time.sleep(1)  # Hata olursa 1 sn bekle, işlemciyi yakma
 
-            time.sleep(REFRESH_RATE)
+                next_candle_time = now + REFRESH_RATE
+
+            time.sleep(0.1)
 
 
 # --- OPTIMIZER WORKER (v35.0 - MATHEMATICALLY CORRECT R-CALC) ---
@@ -2012,19 +2054,18 @@ class BacktestWorker(QThread):
         self.candles = candles
 
     def run(self):
-        buf = io.StringIO()
         result = {}
+
         try:
-            with contextlib.redirect_stdout(buf):
-                result = run_portfolio_backtest(
-                    symbols=self.symbols,
-                    timeframes=self.timeframes,
-                    candles=self.candles,
-                ) or {}
+            result = run_portfolio_backtest(
+                symbols=self.symbols,
+                timeframes=self.timeframes,
+                candles=self.candles,
+                progress_callback=self.log_signal.emit,
+            ) or {}
         except Exception as e:
-            buf.write(f"\n[BACKTEST][GUI] Hata: {e}\n{traceback.format_exc()}\n")
+            self.log_signal.emit(f"\n[BACKTEST][GUI] Hata: {e}\n{traceback.format_exc()}\n")
         finally:
-            self.log_signal.emit(buf.getvalue())
             self.finished_signal.emit(result if isinstance(result, dict) else {})
 
 
@@ -3121,7 +3162,13 @@ def run_portfolio_backtest(
     out_trades_csv: str = "backtest_trades.csv",
     out_summary_csv: str = "backtest_summary.csv",
     limit_map: Optional[dict] = None,
+    progress_callback=None,
 ):
+    def log(msg: str):
+        print(msg)
+        if progress_callback:
+            progress_callback(msg)
+
     accepted_signals_raw = {}
     opened_signals = {}
     # ---- HER ÇALIŞTIRMA ÖNCESİ CSV TEMİZLE ----
@@ -3153,12 +3200,12 @@ def run_portfolio_backtest(
                 tf_candle_limit = candles
 
             if tf not in tf_limit_log and tf_candle_limit != candles:
-                print(f"[BACKTEST] {tf} mum geçmişi {tf_candle_limit} ile sınırlandı.")
+                log(f"[BACKTEST] {tf} mum geçmişi {tf_candle_limit} ile sınırlandı.")
                 tf_limit_log.add(tf)
 
             df = TradingEngine.get_historical_data_pagination(sym, tf, total_candles=tf_candle_limit)
             if df is None or df.empty or len(df) < 400:
-                print(f"[BACKTEST] {sym}-{tf} datası bulunamadı veya yetersiz (len={0 if df is None else len(df)})")
+                log(f"[BACKTEST] {sym}-{tf} datası bulunamadı veya yetersiz (len={0 if df is None else len(df)})")
                 continue
 
             df = TradingEngine.calculate_indicators(df)
@@ -3170,11 +3217,11 @@ def run_portfolio_backtest(
             streams[(sym, tf)] = df.reset_index(drop=True)
 
     if not streams:
-        print("Backtest için veri yok (internet / Binance erişimi?)")
+        log("Backtest için veri yok (internet / Binance erişimi?)")
         return
 
     # --- 1) Her sembol/zaman dilimi için en iyi ayarı tara ---
-    best_configs = _optimize_backtest_configs(streams, requested_pairs)
+    best_configs = _optimize_backtest_configs(streams, requested_pairs, progress_callback=progress_callback)
 
     # Çoklu stream için zaman bazlı event kuyruğu
     heap = []
@@ -3227,7 +3274,7 @@ def run_portfolio_backtest(
             if (sym, tf) in best_configs:
                 meta = best_configs[(sym, tf)]
                 extra = f" | OPT NetPnL={meta['_net_pnl']:.2f} Trades={meta['_trades']}"
-            print(f"[BACKTEST][CFG] {sym}-{tf} -> {cfg_info}{extra}")
+            log(f"[BACKTEST][CFG] {sym}-{tf} -> {cfg_info}{extra}")
             logged_cfg_pairs.add((sym, tf))
         rr, rsi, slope = config["rr"], config["rsi"], config["slope"]
         use_at = config.get("at_active", False)
@@ -3300,19 +3347,19 @@ def run_portfolio_backtest(
         if total_events > 0:
             progress = (processed_events / total_events) * 100
             if progress >= next_progress:
-                print(f"[BACKTEST] %{progress:.1f} tamamlandı...")
+                log(f"[BACKTEST] %{progress:.1f} tamamlandı...")
                 next_progress += 10
-    print(f"[DEBUG] Toplam kapatılmış trade sayısı: {len(tm.history)}")
+    log(f"[DEBUG] Toplam kapatılmış trade sayısı: {len(tm.history)}")
     if tm.history:
-        print("[DEBUG] İlk trade örneği:", tm.history[0])
+        log(f"[DEBUG] İlk trade örneği: {tm.history[0]}")
     if accepted_signals_raw:
-        print("[DEBUG] Kabul edilen (ham) sinyal sayıları:")
+        log("[DEBUG] Kabul edilen (ham) sinyal sayıları:")
         for (sym, tf), cnt in sorted(accepted_signals_raw.items()):
-            print(f"  - {sym}-{tf}: {cnt}")
+            log(f"  - {sym}-{tf}: {cnt}")
     if opened_signals:
-        print("[DEBUG] Açılışa dönüşen sinyal sayıları (backtest tablo ile hizalı):")
+        log("[DEBUG] Açılışa dönüşen sinyal sayıları (backtest tablo ile hizalı):")
         for (sym, tf), cnt in sorted(opened_signals.items()):
-            print(f"  - {sym}-{tf}: {cnt}")
+            log(f"  - {sym}-{tf}: {cnt}")
 
     # Tüm history'den DataFrame oluştur ve CSV / özet yaz
     trades_df = pd.DataFrame(tm.history)
@@ -3369,24 +3416,24 @@ def run_portfolio_backtest(
     if not summary_df.empty:
         summary_df.to_csv(out_summary_csv, index=False)
 
-    print("Backtest bitti.")
+    log("Backtest bitti.")
     if not summary_df.empty:
-        print(summary_df.to_string(index=False))
+        log(summary_df.to_string(index=False))
 
     if best_configs:
-        print("\n[OPT] En iyi ayar özeti (Net PnL'e göre):")
+        log("\n[OPT] En iyi ayar özeti (Net PnL'e göre):")
         for (sym, tf), cfg in sorted(best_configs.items()):
-            print(
+            log(
                 f"  - {sym}-{tf}: RR={cfg['rr']}, RSI={cfg['rsi']}, Slope={cfg['slope']}, "
                 f"AT={'Açık' if cfg['at_active'] else 'Kapalı'}, Trailing={cfg.get('use_trailing', False)} | "
                 f"NetPnL={cfg['_net_pnl']:.2f}, Trades={cfg['_trades']}"
             )
 
-    print(f"Final Wallet (sim): ${tm.wallet_balance:.2f} | Total PnL: ${tm.total_pnl:.2f}")
+    log(f"Final Wallet (sim): ${tm.wallet_balance:.2f} | Total PnL: ${tm.total_pnl:.2f}")
 
     total_trades = trades_df["id"].nunique() if not trades_df.empty and "id" in trades_df.columns else 0
     if total_trades < 5:
-        print("[BACKTEST] Çok az trade bulundu. Daha fazla sonuç için RR/RSI/Slope limitlerini biraz gevşetmeyi düşünebilirsin.")
+        log("[BACKTEST] Çok az trade bulundu. Daha fazla sonuç için RR/RSI/Slope limitlerini biraz gevşetmeyi düşünebilirsin.")
 
     # Sonuçları GUI/LIVE ile paylaşmak için kaydet
     save_best_configs(best_configs)
