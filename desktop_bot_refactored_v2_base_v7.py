@@ -3948,6 +3948,87 @@ def plot_trade(
         print(f"[PLOT] Trade not found: {trade_id}")
         return
 
+    def _status_key(status_text: str) -> str:
+        s = (status_text or "").upper()
+        if "PARTIAL" in s:
+            return "PARTIAL"
+        if "BOTH" in s:
+            return "STOP_BOTH"
+        if "WIN" in s or "TP" in s:
+            return "WIN"
+        if s == "BE" or "BREAKEVEN" in s:
+            return "BE"
+        if "STOP" in s:
+            return "STOP"
+        return "OTHER"
+
+    status_palette = {
+        "WIN": {"color": "#00c853", "marker": "^", "label": "Take Profit"},
+        "STOP": {"color": "#ef5350", "marker": "v", "label": "Stop"},
+        "STOP_BOTH": {"color": "#ff9800", "marker": "v", "label": "SL/TP (Same Candle)"},
+        "BE": {"color": "#90a4ae", "marker": "X", "label": "Breakeven"},
+        "PARTIAL": {"color": "#00bcd4", "marker": "D", "label": "Partial"},
+        "OTHER": {"color": "#ab47bc", "marker": "o", "label": "Exit"},
+    }
+
+    rr_colors = {
+        "WIN": {"profit": "#1de9b6", "loss": "#ef5350"},
+        "STOP": {"profit": "#81c784", "loss": "#ef5350"},
+        "STOP_BOTH": {"profit": "#ffb74d", "loss": "#ff7043"},
+        "BE": {"profit": "#90a4ae", "loss": "#ef5350"},
+        "PARTIAL": {"profit": "#00bcd4", "loss": "#ef5350"},
+        "OTHER": {"profit": "#64b5f6", "loss": "#ef5350"},
+    }
+
+    def _parse_event_time(row) -> Optional[pd.Timestamp]:
+        close_time_val = row.get("close_time")
+        if close_time_val:
+            try:
+                ts = pd.to_datetime(close_time_val)
+                if ts.tzinfo is None:
+                    ts = (ts - pd.Timedelta(hours=3)).tz_localize("UTC")
+                else:
+                    ts = ts.tz_convert("UTC")
+                return ts
+            except Exception:
+                pass
+
+        for fallback_field in ("open_time_utc", "timestamp"):
+            if fallback_field in row:
+                try:
+                    ts = pd.to_datetime(row.get(fallback_field), utc=True)
+                    return ts
+                except Exception:
+                    continue
+        return None
+
+    event_points = []
+    for _, ev in trades_for_id.iterrows():
+        status_val = str(ev.get("status", "")).strip()
+        if not status_val or status_val.upper() == "OPEN":
+            continue
+
+        event_ts = _parse_event_time(ev)
+        price_val = ev.get("close_price", np.nan)
+        status_key = _status_key(status_val)
+
+        if (pd.isna(price_val) or price_val == ""):
+            if status_key in {"WIN", "PARTIAL"}:
+                price_val = ev.get("tp", np.nan)
+            elif status_key in {"STOP", "STOP_BOTH", "BE"}:
+                price_val = ev.get("sl", np.nan)
+            else:
+                price_val = ev.get("entry", np.nan)
+
+        event_points.append(
+            {
+                "time": event_ts,
+                "price": float(price_val) if not pd.isna(price_val) else None,
+                "status": status_val,
+                "key": status_key,
+            }
+        )
+
     def _safe_dt_col(df: pd.DataFrame, col: str):
         if col in df.columns:
             return pd.to_datetime(df[col], utc=True, errors="coerce")
@@ -4003,6 +4084,9 @@ def plot_trade(
     sl = float(tr["sl"])
     ttype = str(tr.get("type", "UNKNOWN")).upper()
     status = str(tr.get("status", "UNKNOWN"))
+    status_key_final = _status_key(status)
+    status_labels = [p["status"] for p in event_points] or [status]
+    status_text = " / ".join(dict.fromkeys(status_labels))
     symbol = str(tr.get("symbol", ""))
     timeframe = str(tr.get("timeframe", ""))
 
@@ -4067,23 +4151,63 @@ def plot_trade(
         xs = [box_x0, box_x1, box_x1, box_x0]
         ax.fill(xs, ys, alpha=alpha, color=color, linewidth=0)
 
+    palette_colors = rr_colors.get(status_key_final, rr_colors["OTHER"])
     if ttype == "LONG":
         # Reward kutusu: entry -> TP
         y_prof0, y_prof1 = sorted((entry, tp))
         # Risk kutusu: SL -> entry
         y_loss0, y_loss1 = sorted((sl, entry))
-        draw_rr_box(y_prof0, y_prof1, "green", alpha=0.25)
-        draw_rr_box(y_loss0, y_loss1, "red", alpha=0.25)
+        draw_rr_box(y_prof0, y_prof1, palette_colors["profit"], alpha=0.25)
+        draw_rr_box(y_loss0, y_loss1, palette_colors["loss"], alpha=0.25)
     elif ttype == "SHORT":
         # Reward kutusu: TP -> entry
         y_prof0, y_prof1 = sorted((tp, entry))
         # Risk kutusu: entry -> SL
         y_loss0, y_loss1 = sorted((entry, sl))
-        draw_rr_box(y_prof0, y_prof1, "green", alpha=0.25)
-        draw_rr_box(y_loss0, y_loss1, "red", alpha=0.25)
+        draw_rr_box(y_prof0, y_prof1, palette_colors["profit"], alpha=0.25)
+        draw_rr_box(y_loss0, y_loss1, palette_colors["loss"], alpha=0.25)
+
+    # Çıkış / partial / breakeven noktalarını vurgula
+    legend_labels = set()
+    for ev in event_points:
+        if ev["time"] is None:
+            continue
+
+        style = status_palette.get(ev["key"], status_palette["OTHER"])
+        marker_label = style["label"] if style["label"] not in legend_labels else None
+        legend_labels.add(style["label"])
+
+        ax.axvline(ev["time"], linestyle="--", linewidth=0.8, color=style["color"], alpha=0.6)
+        ax.scatter(
+            ev["time"],
+            ev["price"] if ev["price"] is not None else entry,
+            s=85,
+            marker=style["marker"],
+            color=style["color"],
+            zorder=6,
+            label=marker_label,
+        )
+
+        label_text = ev["status"]
+        if ev.get("price") is not None:
+            try:
+                label_text = f"{ev['status']}\n@ {ev['price']:.2f}"
+            except Exception:
+                label_text = ev["status"]
+
+        ax.annotate(
+            label_text,
+            xy=(ev["time"], ev["price"] if ev["price"] is not None else entry),
+            xytext=(0, 12),
+            textcoords="offset points",
+            ha="center",
+            fontsize=9,
+            color=style["color"],
+            bbox=dict(boxstyle="round,pad=0.25", fc="#0f0f0f", ec=style["color"], alpha=0.45),
+        )
 
     # Başlık, grid, legend
-    ax.set_title(f"{symbol} {timeframe} | Trade ID {trade_id} — {ttype} ({status})")
+    ax.set_title(f"{symbol} {timeframe} | Trade ID {trade_id} — {ttype} ({status_text})")
     ax.set_xlabel("Zaman")
     ax.set_ylabel("Fiyat")
     ax.grid(True)
