@@ -62,6 +62,8 @@ TRADING_CONFIG = {
     "initial_balance": 2000.0,
     "leverage": 10,
     "usable_balance_pct": 0.20,  # Bakiyenin %20'si
+    "risk_per_trade_pct": 0.01,  # Her işlemde %1 risk
+    "max_portfolio_risk_pct": 0.03,  # Toplam portföy riski %3
     "slippage_rate": 0.0005,     # %0.05 Kayma Payı
     "funding_rate_8h": 0.0001,   # %0.01 Fonlama (8 saatlik)
     "maker_fee": 0.0002,         # %0.02 Limit Emir Komisyonu
@@ -519,6 +521,8 @@ class TradeManager:
 
         # --- MERKEZİ AYARLARDAN OKUMA ---
         self.slippage_pct = TRADING_CONFIG["slippage_rate"]
+        self.risk_per_trade_pct = TRADING_CONFIG.get("risk_per_trade_pct", 0.01)
+        self.max_portfolio_risk_pct = TRADING_CONFIG.get("max_portfolio_risk_pct", 0.03)
         # -----------------------------
 
         self.load_trades()
@@ -563,6 +567,23 @@ class TradeManager:
         del self.cooldowns[k]
         return False
 
+    def _calculate_portfolio_risk_pct(self, wallet_balance: float) -> float:
+        if wallet_balance <= 0:
+            return 0.0
+
+        total_open_risk = 0.0
+        for trade in self.open_trades:
+            entry_price = float(trade.get("entry", 0.0))
+            sl_price = float(trade.get("sl", entry_price))
+            size = abs(float(trade.get("size", 0.0)))
+            if entry_price <= 0 or size <= 0:
+                continue
+            sl_fraction = abs(entry_price - sl_price) / entry_price
+            open_risk_amount = sl_fraction * size * entry_price
+            total_open_risk += open_risk_amount
+
+        return total_open_risk / wallet_balance
+
     def open_trade(self, signal_data):
         with self.lock:
             tf = signal_data["timeframe"]
@@ -589,26 +610,76 @@ class TradeManager:
             else:
                 real_entry = raw_entry * (1 - self.slippage_pct)
 
-            # GLOBAL AYARLARDAN MARJİN HESABI
-            margin_to_use = self.wallet_balance * TRADING_CONFIG["usable_balance_pct"]
-            trade_size = margin_to_use * TRADING_CONFIG["leverage"]
+            sl_price = float(signal_data["sl"])
+
+            current_portfolio_risk_pct = self._calculate_portfolio_risk_pct(self.wallet_balance)
+            if current_portfolio_risk_pct + self.risk_per_trade_pct > self.max_portfolio_risk_pct:
+                print(
+                    f"⚠️ Portföy risk limiti aşılıyor: mevcut %{current_portfolio_risk_pct * 100:.2f}, "
+                    f"yeni işlem riski %{self.risk_per_trade_pct * 100:.2f}, limit %{self.max_portfolio_risk_pct * 100:.2f}"
+                )
+                return
+
+            wallet_balance = self.wallet_balance
+            if wallet_balance <= 0:
+                print("⚠️ Cüzdan bakiyesi 0 veya negatif, işlem açılamadı.")
+                return
+
+            risk_amount = wallet_balance * self.risk_per_trade_pct
+            sl_distance = abs(real_entry - sl_price)
+            if sl_distance <= 0:
+                print("⚠️ Geçersiz SL mesafesi, işlem atlandı.")
+                return
+
+            sl_fraction = sl_distance / real_entry
+            if sl_fraction <= 0:
+                print("⚠️ Geçersiz SL oranı, işlem atlandı.")
+                return
+
+            position_notional = risk_amount / sl_fraction
+            position_size = position_notional / real_entry
+
+            leverage = TRADING_CONFIG["leverage"]
+            required_margin = position_notional / leverage
+
+            if required_margin > wallet_balance:
+                max_notional = wallet_balance * leverage
+                if max_notional <= 0:
+                    print("⚠️ Yetersiz bakiye nedeniyle işlem açılamadı.")
+                    return
+                scale_factor = max_notional / position_notional
+                position_notional = max_notional
+                position_size = position_notional / real_entry
+                required_margin = position_notional / leverage
+                print(
+                    f"⚠️ Gerekli marjin bakiyeyi aşıyor, pozisyon {scale_factor:.2f} oranında düşürüldü."
+                )
 
             new_trade = {
                 "id": int(time.time() * 1000), "symbol": sym, "timestamp": signal_data["timestamp"],
                 "open_time_utc": (signal_data.get("open_time_utc") or datetime.utcnow()).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "timeframe": tf, "type": trade_type, "setup": setup_type,
                 "entry": real_entry,
-                "tp": float(signal_data["tp"]), "sl": float(signal_data["sl"]),
-                "size": trade_size, "margin": margin_to_use,
+                "tp": float(signal_data["tp"]), "sl": sl_price,
+                "size": position_size, "margin": required_margin,
                 "status": "OPEN", "pnl": 0.0,
                 "breakeven": False, "trailing_active": False, "partial_taken": False, "partial_price": None,
                 "has_cash": True, "close_time": "", "close_price": ""
             }
 
-            self.wallet_balance -= margin_to_use
-            self.locked_margin += margin_to_use
+            self.wallet_balance -= required_margin
+            self.locked_margin += required_margin
 
             self.open_trades.append(new_trade)
+            new_portfolio_risk_pct = self._calculate_portfolio_risk_pct(self.wallet_balance)
+
+            print(
+                f"📈 İşlem Açıldı | Entry: {real_entry:.4f}, SL: {sl_price:.4f}, "
+                f"Size: {position_size:.6f}, Notional: ${position_notional:.2f}, "
+                f"Margin: ${required_margin:.2f}, Risk%: {self.risk_per_trade_pct * 100:.2f}%, "
+                f"Risk$: ${risk_amount:.2f}, Portföy Risk%: {new_portfolio_risk_pct * 100:.2f}%"
+            )
+
             self.save_trades()
 
     def update_trades(self, symbol, tf,
@@ -3299,6 +3370,8 @@ class SimTradeManager:
         self.locked_margin = 0.0
         self.total_pnl = 0.0
         self.slippage_pct = TRADING_CONFIG["slippage_rate"]
+        self.risk_per_trade_pct = TRADING_CONFIG.get("risk_per_trade_pct", 0.01)
+        self.max_portfolio_risk_pct = TRADING_CONFIG.get("max_portfolio_risk_pct", 0.03)
         self._id = 1
 
     def check_cooldown(self, symbol, tf, now_utc) -> bool:
@@ -3334,6 +3407,23 @@ class SimTradeManager:
         del self.cooldowns[k]
         return False
 
+    def _calculate_portfolio_risk_pct(self, wallet_balance: float) -> float:
+        if wallet_balance <= 0:
+            return 0.0
+
+        total_open_risk = 0.0
+        for trade in self.open_trades:
+            entry_price = float(trade.get("entry", 0.0))
+            sl_price = float(trade.get("sl", entry_price))
+            size = abs(float(trade.get("size", 0.0)))
+            if entry_price <= 0 or size <= 0:
+                continue
+            sl_fraction = abs(entry_price - sl_price) / entry_price
+            open_risk_amount = sl_fraction * size * entry_price
+            total_open_risk += open_risk_amount
+
+        return total_open_risk / wallet_balance
+
     def _next_id(self):
         tid = self._id
         self._id += 1
@@ -3361,8 +3451,38 @@ class SimTradeManager:
         else:
             real_entry = raw_entry * (1 - self.slippage_pct)
 
-        margin_to_use = self.wallet_balance * TRADING_CONFIG["usable_balance_pct"]
-        trade_size = margin_to_use * TRADING_CONFIG["leverage"]
+        sl_price = float(trade_data["sl"])
+
+        current_portfolio_risk_pct = self._calculate_portfolio_risk_pct(self.wallet_balance)
+        if current_portfolio_risk_pct + self.risk_per_trade_pct > self.max_portfolio_risk_pct:
+            return
+
+        wallet_balance = self.wallet_balance
+        if wallet_balance <= 0:
+            return
+
+        risk_amount = wallet_balance * self.risk_per_trade_pct
+        sl_distance = abs(real_entry - sl_price)
+        if sl_distance <= 0:
+            return
+
+        sl_fraction = sl_distance / real_entry
+        if sl_fraction <= 0:
+            return
+
+        position_notional = risk_amount / sl_fraction
+        position_size = position_notional / real_entry
+
+        leverage = TRADING_CONFIG["leverage"]
+        required_margin = position_notional / leverage
+
+        if required_margin > wallet_balance:
+            max_notional = wallet_balance * leverage
+            if max_notional <= 0:
+                return
+            position_notional = max_notional
+            position_size = position_notional / real_entry
+            required_margin = position_notional / leverage
 
         open_time_val = trade_data.get("open_time_utc") or datetime.utcnow()
         if isinstance(open_time_val, pd.Timestamp):
@@ -3379,9 +3499,9 @@ class SimTradeManager:
             "setup": setup_type,
             "entry": real_entry,
             "tp": float(trade_data["tp"]),
-            "sl": float(trade_data["sl"]),
-            "size": trade_size,
-            "margin": margin_to_use,
+            "sl": sl_price,
+            "size": position_size,
+            "margin": required_margin,
             "status": "OPEN",
             "pnl": 0.0,
             "breakeven": False,
@@ -3393,9 +3513,17 @@ class SimTradeManager:
             "close_price": "",
         }
 
-        self.wallet_balance -= margin_to_use
-        self.locked_margin += margin_to_use
+        self.wallet_balance -= required_margin
+        self.locked_margin += required_margin
         self.open_trades.append(new_trade)
+        new_portfolio_risk_pct = self._calculate_portfolio_risk_pct(self.wallet_balance)
+
+        print(
+            f"[SIM] İşlem Açıldı | Entry: {real_entry:.4f}, SL: {sl_price:.4f}, "
+            f"Size: {position_size:.6f}, Notional: ${position_notional:.2f}, "
+            f"Margin: ${required_margin:.2f}, Risk%: {self.risk_per_trade_pct * 100:.2f}%, "
+            f"Risk$: ${risk_amount:.2f}, Portföy Risk%: {new_portfolio_risk_pct * 100:.2f}%"
+        )
 
     def update_trades(
         self,
