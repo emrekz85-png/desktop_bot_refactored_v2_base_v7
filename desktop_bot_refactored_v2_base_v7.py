@@ -1061,6 +1061,30 @@ class TradeManager:
             self.reset_logs()
 
 
+class PotentialTradeRecorder:
+    def __init__(self, max_entries: int = 500):
+        self.max_entries = max_entries
+        self.lock = threading.Lock()
+        self.entries = []
+
+    def add(self, entry: dict):
+        if not isinstance(entry, dict):
+            return
+        with self.lock:
+            self.entries.append(entry)
+            if len(self.entries) > self.max_entries:
+                self.entries = self.entries[-self.max_entries:]
+
+    def get_all(self):
+        with self.lock:
+            return list(self.entries)
+
+    def clear(self):
+        with self.lock:
+            self.entries.clear()
+
+
+potential_trades = PotentialTradeRecorder()
 trade_manager = TradeManager()
 
 
@@ -1327,7 +1351,8 @@ class TradingEngine:
             tp_min_dist_ratio: float = 0.0015,
             tp_max_dist_ratio: float = 0.03,
             adx_min: float = 12.0,
-    ) -> Tuple[Optional[str], Optional[float], Optional[float], Optional[float], str]:
+            return_debug: bool = False,
+    ) -> Tuple:
         """
         Base Setup için LONG / SHORT sinyali üretir.
 
@@ -1343,8 +1368,31 @@ class TradingEngine:
               * Güçlü downtrend + fiyat PBEMA altında => LONG yasak
         """
 
+        debug_info = {
+            "adx_ok": None,
+            "trend_up_strong": None,
+            "trend_down_strong": None,
+            "holding_long": None,
+            "retest_long": None,
+            "pb_target_long": None,
+            "long_rsi_ok": None,
+            "holding_short": None,
+            "retest_short": None,
+            "pb_target_short": None,
+            "short_rsi_ok": None,
+            "tp_dist_ratio": None,
+            "rr_value": None,
+            "long_rr_ok": None,
+            "short_rr_ok": None,
+        }
+
+        def _ret(s_type, entry, tp, sl, reason):
+            if return_debug:
+                return s_type, entry, tp, sl, reason, debug_info
+            return s_type, entry, tp, sl, reason
+
         if df is None or df.empty:
-            return None, None, None, None, "No Data"
+            return _ret(None, None, None, None, "No Data")
 
         required_cols = [
             "open", "high", "low", "close",
@@ -1354,21 +1402,21 @@ class TradingEngine:
         ]
         for col in required_cols:
             if col not in df.columns:
-                return None, None, None, None, f"Missing {col}"
+                return _ret(None, None, None, None, f"Missing {col}")
 
         try:
             curr = df.iloc[index]
         except Exception:
-            return None, None, None, None, "Index Error"
+            return _ret(None, None, None, None, "Index Error")
 
         for c in required_cols:
             v = curr.get(c)
             if pd.isna(v):
-                return None, None, None, None, f"NaN in {c}"
+                return _ret(None, None, None, None, f"NaN in {c}")
 
         abs_index = index if index >= 0 else (len(df) + index)
         if abs_index < 0 or abs_index >= len(df):
-            return None, None, None, None, "Index Out of Range"
+            return _ret(None, None, None, None, "Index Out of Range")
 
         # --- Parametreler ---
         hold_n = int(max(1, hold_n or 1))
@@ -1381,11 +1429,12 @@ class TradingEngine:
         adx_min = float(adx_min if adx_min is not None else 12.0)
 
         # ADX filtresi
-        if float(curr["adx"]) < adx_min:
-            return None, None, None, None, "ADX Low"
+        debug_info["adx_ok"] = float(curr["adx"]) >= adx_min
+        if not debug_info["adx_ok"]:
+            return _ret(None, None, None, None, "ADX Low")
 
         if abs_index < hold_n + 1:
-            return None, None, None, None, "Warmup"
+            return _ret(None, None, None, None, "Warmup")
 
         slc = slice(abs_index - hold_n, abs_index)
         closes_slice = df["close"].iloc[slc]
@@ -1420,6 +1469,9 @@ class TradingEngine:
                 close < pb_bot
         )
 
+        debug_info["trend_up_strong"] = trend_up_strong
+        debug_info["trend_down_strong"] = trend_down_strong
+
         long_direction_ok = not trend_down_strong
         short_direction_ok = not trend_up_strong
 
@@ -1442,6 +1494,11 @@ class TradingEngine:
         )
 
         is_long = holding_long and retest_long and pb_target_long
+        debug_info.update({
+            "holding_long": holding_long,
+            "retest_long": retest_long,
+            "pb_target_long": pb_target_long,
+        })
 
         # ================= SHORT =================
         holding_short = (closes_slice < upper_slice).mean() >= min_hold_frac
@@ -1462,11 +1519,18 @@ class TradingEngine:
         )
 
         is_short = holding_short and retest_short and pb_target_short
+        debug_info.update({
+            "holding_short": holding_short,
+            "retest_short": retest_short,
+            "pb_target_short": pb_target_short,
+        })
 
         # --- RSI (LONG için üst sınır) ---
         long_rsi_limit = rsi_limit + 10.0
         rsi_val = float(curr["rsi"])
-        if is_long and rsi_val > long_rsi_limit:
+        long_rsi_ok = rsi_val <= long_rsi_limit
+        debug_info["long_rsi_ok"] = long_rsi_ok
+        if is_long and not long_rsi_ok:
             is_long = False
 
         # --- AlphaTrend (opsiyonel) ---
@@ -1478,12 +1542,13 @@ class TradingEngine:
                 is_short = False
 
         # ---------- LONG ----------
+        debug_info["long_candidate"] = is_long
         if is_long:
             swing_n = 20
             start = max(0, abs_index - swing_n)
             swing_low = float(df["low"].iloc[start:abs_index].min())
             if swing_low <= 0:
-                return None, None, None, None, "Invalid Swing Low"
+                return _ret(None, None, None, None, "Invalid Swing Low")
 
             sl_candidate = swing_low * 0.997
             band_sl = lower_band * 0.998
@@ -1493,35 +1558,42 @@ class TradingEngine:
             tp = pb_bot
 
             if tp <= entry:
-                return None, None, None, None, "TP Below Entry"
+                return _ret(None, None, None, None, "TP Below Entry")
             if sl >= entry:
                 sl = min(swing_low * 0.995, entry * 0.997)
 
             risk = entry - sl
             reward = tp - entry
             if risk <= 0 or reward <= 0:
-                return None, None, None, None, "Invalid RR"
+                return _ret(None, None, None, None, "Invalid RR")
 
             rr = reward / risk
             tp_dist_ratio = reward / entry
 
+            debug_info.update({
+                "tp_dist_ratio": tp_dist_ratio,
+                "rr_value": rr,
+                "long_rr_ok": rr >= min_rr,
+            })
+
             if tp_dist_ratio < tp_min_dist_ratio:
-                return None, None, None, None, f"TP Too Close ({tp_dist_ratio:.4f})"
+                return _ret(None, None, None, None, f"TP Too Close ({tp_dist_ratio:.4f})")
             if tp_dist_ratio > tp_max_dist_ratio:
-                return None, None, None, None, f"TP Too Far ({tp_dist_ratio:.4f})"
+                return _ret(None, None, None, None, f"TP Too Far ({tp_dist_ratio:.4f})")
             if rr < min_rr:
-                return None, None, None, None, f"RR Too Low ({rr:.2f})"
+                return _ret(None, None, None, None, f"RR Too Low ({rr:.2f})")
 
             reason = f"ACCEPTED(Base,R:{rr:.2f})"
-            return "LONG", entry, tp, sl, reason
+            return _ret("LONG", entry, tp, sl, reason)
 
         # ---------- SHORT ----------
+        debug_info["short_candidate"] = is_short
         if is_short:
             swing_n = 20
             start = max(0, abs_index - swing_n)
             swing_high = float(df["high"].iloc[start:abs_index].max())
             if swing_high <= 0:
-                return None, None, None, None, "Invalid Swing High"
+                return _ret(None, None, None, None, "Invalid Swing High")
 
             sl_candidate = swing_high * 1.003
             band_sl = upper_band * 1.002
@@ -1531,29 +1603,35 @@ class TradingEngine:
             tp = pb_top
 
             if tp >= entry:
-                return None, None, None, None, "TP Above Entry"
+                return _ret(None, None, None, None, "TP Above Entry")
             if sl <= entry:
                 sl = max(swing_high * 1.005, entry * 1.003)
 
             risk = sl - entry
             reward = entry - tp
             if risk <= 0 or reward <= 0:
-                return None, None, None, None, "Invalid RR"
+                return _ret(None, None, None, None, "Invalid RR")
 
             rr = reward / risk
             tp_dist_ratio = reward / entry
 
+            debug_info.update({
+                "tp_dist_ratio": tp_dist_ratio,
+                "rr_value": rr,
+                "short_rr_ok": rr >= min_rr,
+            })
+
             if tp_dist_ratio < tp_min_dist_ratio:
-                return None, None, None, None, f"TP Too Close ({tp_dist_ratio:.4f})"
+                return _ret(None, None, None, None, f"TP Too Close ({tp_dist_ratio:.4f})")
             if tp_dist_ratio > tp_max_dist_ratio:
-                return None, None, None, None, f"TP Too Far ({tp_dist_ratio:.4f})"
+                return _ret(None, None, None, None, f"TP Too Far ({tp_dist_ratio:.4f})")
             if rr < min_rr:
-                return None, None, None, None, f"RR Too Low ({rr:.2f})"
+                return _ret(None, None, None, None, f"RR Too Low ({rr:.2f})")
 
             reason = f"ACCEPTED(Base,R:{rr:.2f})"
-            return "SHORT", entry, tp, sl, reason
+            return _ret("SHORT", entry, tp, sl, reason)
 
-        return None, None, None, None, "No Signal"
+        return _ret(None, None, None, None, "No Signal")
 
     def debug_plot_backtest_trade(symbol: str,
                                   timeframe: str,
@@ -1945,6 +2023,7 @@ class LiveBotWorker(QThread):
     update_ui_signal = pyqtSignal(str, str, str, str)
     trade_signal = pyqtSignal(dict)
     price_signal = pyqtSignal(str, float)
+    potential_signal = pyqtSignal(dict)
 
     def __init__(self, current_params, tg_token, tg_chat_id, show_rr):
         super().__init__()
@@ -1953,6 +2032,7 @@ class LiveBotWorker(QThread):
         self.tg_chat_id = tg_chat_id;
         self.show_rr = show_rr
         self.last_signals = {sym: {tf: None for tf in TIMEFRAMES} for sym in SYMBOLS}
+        self.last_potential = {sym: {tf: None for tf in TIMEFRAMES} for sym in SYMBOLS}
         self.ws_stream = BinanceWebSocketKlineStream(SYMBOLS, TIMEFRAMES, max_candles=1200)
 
     def update_settings(self, symbol, tf, rr, rsi, slope):
@@ -2084,7 +2164,7 @@ class LiveBotWorker(QThread):
                                 use_at = config['at_active']
                                 at_status_log = "AT:ON" if use_at else "AT:OFF"
 
-                                s_type, s_entry, s_tp, s_sl, s_reason = TradingEngine.check_signal_diagnostic(
+                                s_type, s_entry, s_tp, s_sl, s_reason, s_debug = TradingEngine.check_signal_diagnostic(
                                     df_closed,
                                     index=-1,
                                     min_rr=rr,
@@ -2099,6 +2179,7 @@ class LiveBotWorker(QThread):
                                     tp_min_dist_ratio=config.get("tp_min_dist_ratio"),
                                     tp_max_dist_ratio=config.get("tp_max_dist_ratio"),
                                     adx_min=config.get("adx_min"),
+                                    return_debug=True,
                                 )
 
                                 setup_tag = "Unknown"
@@ -2119,6 +2200,7 @@ class LiveBotWorker(QThread):
                                     partial_info = " (Part.Taken)" if t.get("partial_taken") else ""
                                     live_pnl_str = f" | PnL: {sign}${abs(current_pnl):.2f}{partial_info}"
 
+                                decision = None
                                 # Sinyal Yönetimi
                                 if s_type and "ACCEPTED" in s_reason:
                                     has_open = False
@@ -2126,6 +2208,7 @@ class LiveBotWorker(QThread):
                                         if t['symbol'] == sym and t['timeframe'] == tf: has_open = True; break
 
                                     if has_open:
+                                        decision = "Blocked: Existing trade"
                                         log_msg = f"{tf} | {curr_price} | ⚠️ Pozisyon Var{live_pnl_str}"
                                         json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                          active_trades if self.show_rr else [])
@@ -2133,6 +2216,7 @@ class LiveBotWorker(QThread):
 
                                     elif self.last_signals[sym][tf] != closed_ts_utc:
                                         if trade_manager.check_cooldown(sym, tf, forming_ts_utc):
+                                            decision = "Blocked: Cooldown"
                                             log_msg = f"{tf} | {curr_price} | ❄️ SOĞUMA SÜRECİNDE"
                                             json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                              active_trades if self.show_rr else [])
@@ -2153,17 +2237,20 @@ class LiveBotWorker(QThread):
                                             TradingEngine.send_telegram(self.tg_token, self.tg_chat_id, msg)
 
                                             self.last_signals[sym][tf] = closed_ts_utc
+                                            decision = "Opened Trade"
                                             log_msg = f"{tf} | {curr_price} | 🔥 {s_type} ({setup_tag})"
                                             json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                              active_trades if self.show_rr else [])
                                             self.update_ui_signal.emit(sym, tf, json_data, log_msg)
                                     else:
+                                        decision = "Skipped: Duplicate signal"
                                         log_msg = f"{tf} | {curr_price} | ⏳ İşlemde...{live_pnl_str}"
                                         json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                          active_trades if self.show_rr else [])
                                         self.update_ui_signal.emit(sym, tf, json_data, log_msg)
                                 else:
                                     # Sinyal Yoksa Logla
+                                    decision = f"Rejected: {s_reason}" if s_reason else "Rejected"
                                     if s_reason and "REJECT" in s_reason:
                                         log_msg = f"{tf} | {curr_price} | ⚠️ {s_reason}{live_pnl_str}"
                                     else:
@@ -2172,6 +2259,24 @@ class LiveBotWorker(QThread):
                                     json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                      active_trades if self.show_rr else [])
                                     self.update_ui_signal.emit(sym, tf, json_data, log_msg)
+
+                                if self.last_potential[sym][tf] != closed_ts_utc:
+                                    direction = s_type or ("LONG" if s_debug.get("holding_long") else ("SHORT" if s_debug.get("holding_short") else ""))
+                                    diag_entry = {
+                                        "timestamp": ts_str,
+                                        "symbol": sym,
+                                        "timeframe": tf,
+                                        "type": direction,
+                                        "reason": s_reason,
+                                        "decision": decision or (s_reason or "No Signal"),
+                                        "price": curr_price,
+                                        "next_open": next_open_price,
+                                        "setup": setup_tag,
+                                        "checks": s_debug or {},
+                                    }
+                                    potential_trades.add(diag_entry)
+                                    self.potential_signal.emit(diag_entry)
+                                    self.last_potential[sym][tf] = closed_ts_utc
 
                             except Exception as e:
                                 print(f"Loop Processing Error ({sym}-{tf}): {e}")
@@ -2607,6 +2712,7 @@ class MainWindow(QMainWindow):
         self.current_symbol = SYMBOLS[0]
         self.backtest_worker = None
         self.backtest_meta = None
+        self.potential_entries = []
 
         central = QWidget();
         self.setCentralWidget(central);
@@ -2830,7 +2936,25 @@ class MainWindow(QMainWindow):
         hist_layout.addWidget(hist_group)
         self.main_tabs.addTab(history_widget, "📜 Geçmiş & Varlık")
 
-        # 4. SEKME: Backtest
+        # 4. SEKME: Potansiyel İşlemler (detaylı red/şart takibi)
+        potential_widget = QWidget();
+        pot_layout = QVBoxLayout(potential_widget)
+        pot_group = QGroupBox("Potansiyel İşlemler");
+        pot_inner = QVBoxLayout()
+
+        self.potential_table = QTableWidget();
+        self.potential_table.setColumnCount(14)
+        self.potential_table.setHorizontalHeaderLabels([
+            "Zaman", "Coin", "TF", "Yön", "Karar", "Sebep", "ADX", "Hold", "Retest",
+            "PB/Cloud", "Trend", "RSI", "RR", "TP%",
+        ])
+        self.potential_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        pot_inner.addWidget(self.potential_table)
+        pot_group.setLayout(pot_inner)
+        pot_layout.addWidget(pot_group)
+        self.main_tabs.addTab(potential_widget, "🔍 Potansiyel")
+
+        # 5. SEKME: Backtest
         backtest_widget = QWidget();
         backtest_layout = QVBoxLayout(backtest_widget)
         bt_cfg = QHBoxLayout()
@@ -2860,7 +2984,7 @@ class MainWindow(QMainWindow):
         backtest_layout.addWidget(self.backtest_logs)
         self.main_tabs.addTab(backtest_widget, "🧪 Backtest")
 
-        # 5. SEKME: Optimizasyon (Temizlendi & Otomatikleştirildi)
+        # 6. SEKME: Optimizasyon (Temizlendi & Otomatikleştirildi)
         opt_widget = QWidget();
         opt_layout = QVBoxLayout(opt_widget)
         grid_group = QGroupBox("Parametre Aralıkları");
@@ -2955,6 +3079,7 @@ class MainWindow(QMainWindow):
         self.live_worker = LiveBotWorker(self.current_params, self.tg_token, self.tg_chat_id, self.show_rr_tools)
         self.live_worker.update_ui_signal.connect(self.update_ui)
         self.live_worker.price_signal.connect(self.on_price_update)
+        self.live_worker.potential_signal.connect(self.append_potential_trade)
         self.live_worker.start()
         self.logs.append(">>> Sistem Başlatıldı. v30.4 (PROFIT ENGINE)")
         self.load_tf_settings("1m")
@@ -3005,6 +3130,73 @@ class MainWindow(QMainWindow):
                 fmt = f"<span style='color:white'>{log_msg}</span>"
             self.logs.append(fmt);
             self.logs.verticalScrollBar().setValue(self.logs.verticalScrollBar().maximum())
+
+    def _fmt_bool(self, value):
+        if value is True:
+            return "✅"
+        if value is False:
+            return "❌"
+        return "·"
+
+    def append_potential_trade(self, entry: dict):
+        if not isinstance(entry, dict):
+            return
+        self.potential_entries.append(entry)
+        if len(self.potential_entries) > 400:
+            self.potential_entries = self.potential_entries[-400:]
+        self.refresh_potential_table()
+
+    def refresh_potential_table(self):
+        data = list(reversed(self.potential_entries))
+        self.potential_table.setRowCount(len(data))
+
+        for row_idx, entry in enumerate(data):
+            checks = entry.get("checks", {}) or {}
+            direction = entry.get("type", "") or "-"
+
+            if direction == "LONG":
+                trend_ok = None if checks.get("trend_down_strong") is None else (not checks.get("trend_down_strong"))
+                hold_ok = checks.get("holding_long")
+                retest_ok = checks.get("retest_long")
+                pb_ok = checks.get("pb_target_long")
+                rsi_ok = checks.get("long_rsi_ok")
+                rr_ok = checks.get("long_rr_ok")
+            else:
+                trend_ok = None if checks.get("trend_up_strong") is None else (not checks.get("trend_up_strong"))
+                hold_ok = checks.get("holding_short")
+                retest_ok = checks.get("retest_short")
+                pb_ok = checks.get("pb_target_short")
+                rsi_ok = checks.get("short_rsi_ok")
+                rr_ok = checks.get("short_rr_ok")
+
+            rr_val = checks.get("rr_value")
+            tp_ratio = checks.get("tp_dist_ratio")
+
+            values = [
+                entry.get("timestamp", "-"),
+                entry.get("symbol", "-"),
+                entry.get("timeframe", "-"),
+                direction,
+                entry.get("decision", "-"),
+                entry.get("reason", "-"),
+                self._fmt_bool(checks.get("adx_ok")),
+                self._fmt_bool(hold_ok),
+                self._fmt_bool(retest_ok),
+                self._fmt_bool(pb_ok),
+                self._fmt_bool(trend_ok),
+                self._fmt_bool(rsi_ok),
+                f"{rr_val:.2f}" if isinstance(rr_val, (int, float)) else "-",
+                f"{tp_ratio*100:.2f}%" if isinstance(tp_ratio, (int, float)) else "-",
+            ]
+
+            for col_idx, val in enumerate(values):
+                item = QTableWidgetItem(str(val))
+                if col_idx in {6, 7, 8, 9, 10, 11}:
+                    if val == "✅":
+                        item.setForeground(QColor("#00ff00"))
+                    elif val == "❌":
+                        item.setForeground(QColor("#ff5555"))
+                self.potential_table.setItem(row_idx, col_idx, item)
 
     # --- FİYAT GÜNCELLEME (Ticker) ---
     def on_price_update(self, symbol, price):
