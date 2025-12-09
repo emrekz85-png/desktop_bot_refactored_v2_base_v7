@@ -2172,6 +2172,8 @@ class OptimizerWorker(QThread):
                             outcome = "Open"
                             sim_sl = s_sl_raw
                             sim_tp = s_tp_raw
+                            risk_dist = abs(real_entry_price - s_sl_raw)
+                            partial_realized_r = 0.0
                             has_breakeven = False
                             partial_taken = False
                             curr_size_ratio = 1.0
@@ -2208,7 +2210,8 @@ class OptimizerWorker(QThread):
                                         if not has_breakeven and prog >= 0.40: sim_sl = real_entry_price; has_breakeven = True
                                     else:
                                         if not partial_taken and prog >= 0.50:
-                                            net_r += (0.5 * (rr * 0.5));
+                                            if risk_dist > 0:
+                                                partial_realized_r = (abs(curr_close - real_entry_price) / risk_dist) * 0.5
                                             curr_size_ratio = 0.5;
                                             partial_taken = True;
                                             sim_sl = real_entry_price;
@@ -2242,10 +2245,9 @@ class OptimizerWorker(QThread):
                             if "WIN" in outcome:
                                 reward_dist = abs(sim_tp - real_entry_price) if "TP" in outcome else abs(
                                     sim_sl - real_entry_price)
-                                risk_dist = abs(real_entry_price - s_sl_raw)
 
                                 if risk_dist > 0:
-                                    raw_r = (reward_dist / risk_dist) * curr_size_ratio
+                                    raw_r = partial_realized_r + (reward_dist / risk_dist) * curr_size_ratio
                                     # Kazançtan masrafları düş
                                     net_r += (raw_r - fee_cost_r - funding_cost_r)
                                 wins += 1
@@ -2253,12 +2255,12 @@ class OptimizerWorker(QThread):
                             elif outcome == "LOSS":
                                 loss_r = 1.0 if not partial_taken else 0
                                 # Kayıpta: 1R kayıp + Fee + Funding
-                                net_r += (-loss_r - fee_cost_r - funding_cost_r)
+                                net_r += (partial_realized_r - loss_r - fee_cost_r - funding_cost_r)
                                 losses += 1
 
                             elif outcome == "BE":
                                 # BE olsa bile Fee ödenir!
-                                net_r -= (fee_cost_r + funding_cost_r)
+                                net_r += (partial_realized_r - fee_cost_r - funding_cost_r)
 
                     results_by_tf[tf].append(
                         {"RR": rr, "RSI": rsi, "Slope": slope, "AT": at_active, "Wins": wins, "Losses": losses,
