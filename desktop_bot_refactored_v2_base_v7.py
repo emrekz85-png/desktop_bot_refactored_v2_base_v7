@@ -1702,16 +1702,34 @@ class TradingEngine:
                 time_diff = plot_df['timestamp'].iloc[-1] - plot_df['timestamp'].iloc[-2]
                 past_trades = [t for t in trade_manager.history if
                                t['timeframe'] == interval and t['symbol'] == symbol][-5:]
-                all_trades_to_show = active_trades + past_trades
-                all_trades_to_show.sort(key=lambda x: x['id'])
+
+                def _trade_sort_key(trade: dict) -> float:
+                    tid = trade.get('id')
+                    if isinstance(tid, (int, float)):
+                        tid_val = float(tid)
+                        return tid_val / 1000 if tid_val > 1e12 else tid_val
+                    ts_val = trade.get('timestamp') or trade.get('time') or ''
+                    try:
+                        return dateutil.parser.parse(ts_val).timestamp()
+                    except Exception:
+                        return 0.0
+
+                # Aynı trade'i tekrar eklememek için ID/timestamp bazlı deduplikasyon
+                dedup = {}
+                for tr in active_trades + past_trades:
+                    key = tr.get('id') or tr.get('timestamp') or tr.get('time') or id(tr)
+                    dedup[key] = tr
+
+                all_trades_sorted = sorted(dedup.values(), key=_trade_sort_key)
+                all_trades_to_show = all_trades_sorted[-2:]  # Sadece en güncel 2 trade (açıklar dahil)
 
                 trades_with_visibility = []
                 for i, trade in enumerate(all_trades_to_show):
                     draw_box = True
                     if i < len(all_trades_to_show) - 1:
                         next_trade = all_trades_to_show[i + 1]
-                        time_diff_ms = next_trade['id'] - trade['id']
-                        time_diff_mins = time_diff_ms / 1000 / 60
+                        time_diff_secs = _trade_sort_key(next_trade) - _trade_sort_key(trade)
+                        time_diff_mins = time_diff_secs / 60
                         if time_diff_mins < (interval_mins * 15): draw_box = False
                     trades_with_visibility.append((trade, draw_box))
 
