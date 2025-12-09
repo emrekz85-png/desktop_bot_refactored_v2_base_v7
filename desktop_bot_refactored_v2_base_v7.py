@@ -745,7 +745,11 @@ class TradeManager:
                     self.open_trades[i]["tp"] = dyn_tp
 
                 # Ekranda gösterilecek anlık PnL (kapanışa göre)
-                self.open_trades[i]["pnl"] = pnl_percent_close * size
+                if t_type == "LONG":
+                    live_pnl = (close_price - entry) * size
+                else:
+                    live_pnl = (entry - close_price) * size
+                self.open_trades[i]["pnl"] = live_pnl
 
                 # Hedefe ilerleme oranı (en iyi fiyata göre)
                 total_dist = abs(dyn_tp - entry)
@@ -758,8 +762,14 @@ class TradeManager:
                 if in_profit and use_partial:
                     if (not self.open_trades[i].get("partial_taken")) and progress >= 0.50:
                         partial_size = size / 2.0
-                        partial_pnl = pnl_percent_fav * partial_size
-                        commission = partial_size * TRADING_CONFIG["total_fee"]
+                        if t_type == "LONG":
+                            partial_pnl = (float(fav_price) - entry) * partial_size
+                            partial_notional = abs(partial_size) * float(fav_price)
+                        else:
+                            partial_pnl = (entry - float(fav_price)) * partial_size
+                            partial_notional = abs(partial_size) * float(fav_price)
+
+                        commission = partial_notional * TRADING_CONFIG["total_fee"]
                         net_partial_pnl = partial_pnl - commission
                         margin_release = initial_margin / 2.0
                         partial_price = float(fav_price)
@@ -852,13 +862,13 @@ class TradeManager:
 
                 if t_type == "LONG":
                     exit_fill = float(exit_level) * (1 - self.slippage_pct)
-                    pnl_percent = (exit_fill - entry) / entry
+                    gross_pnl = (exit_fill - entry) * current_size
                 else:
                     exit_fill = float(exit_level) * (1 + self.slippage_pct)
-                    pnl_percent = (entry - exit_fill) / entry
+                    gross_pnl = (entry - exit_fill) * current_size
 
-                gross_pnl = pnl_percent * current_size
-                commission = current_size * TRADING_CONFIG["total_fee"]
+                commission_notional = abs(current_size) * abs(exit_fill)
+                commission = commission_notional * TRADING_CONFIG["total_fee"]
 
                 funding_cost = 0.0
                 try:
@@ -866,7 +876,8 @@ class TradeManager:
                     if open_time_str:
                         open_dt = datetime.strptime(open_time_str, "%Y-%m-%dT%H:%M:%SZ")
                         hours = max(0.0, (candle_time_utc - open_dt).total_seconds() / 3600.0)
-                        funding_cost = abs(current_size) * TRADING_CONFIG["funding_rate_8h"] * (hours / 8.0)
+                        notional_entry = abs(current_size) * entry
+                        funding_cost = notional_entry * TRADING_CONFIG["funding_rate_8h"] * (hours / 8.0)
                 except Exception:
                     funding_cost = 0.0
 
@@ -923,11 +934,11 @@ class TradeManager:
                     continue
 
                 if trade.get("type") == "LONG":
-                    pnl_percent = (latest_price - entry) / entry
+                    gross_pnl = (latest_price - entry) * size
                 else:
-                    pnl_percent = (entry - latest_price) / entry
+                    gross_pnl = (entry - latest_price) * size
 
-                self.open_trades[i]["pnl"] = pnl_percent * size
+                self.open_trades[i]["pnl"] = gross_pnl
 
     def save_trades(self):
         with self.lock:
@@ -3590,7 +3601,11 @@ class SimTradeManager:
                     dyn_tp = tp
                 self.open_trades[i]["tp"] = dyn_tp
 
-            self.open_trades[i]["pnl"] = pnl_percent_close * size
+            if t_type == "LONG":
+                live_pnl = (close_price - entry) * size
+            else:
+                live_pnl = (entry - close_price) * size
+            self.open_trades[i]["pnl"] = live_pnl
 
             total_dist = abs(dyn_tp - entry)
             if total_dist <= 0:
@@ -3609,8 +3624,9 @@ class SimTradeManager:
                         partial_fill = float(fav_price) * (1 + self.slippage_pct)
                         partial_pnl_percent = (entry - partial_fill) / entry
 
-                    partial_pnl = partial_pnl_percent * partial_size
-                    commission = partial_size * TRADING_CONFIG["total_fee"]
+                    partial_pnl = partial_pnl_percent * (entry * partial_size)
+                    partial_notional = abs(partial_size) * abs(partial_fill)
+                    commission = partial_notional * TRADING_CONFIG["total_fee"]
                     net_partial_pnl = partial_pnl - commission
                     margin_release = initial_margin / 2.0
 
@@ -3691,13 +3707,13 @@ class SimTradeManager:
 
             if t_type == "LONG":
                 exit_fill = float(exit_level) * (1 - self.slippage_pct)
-                pnl_percent = (exit_fill - entry) / entry
+                gross_pnl = (exit_fill - entry) * current_size
             else:
                 exit_fill = float(exit_level) * (1 + self.slippage_pct)
-                pnl_percent = (entry - exit_fill) / entry
+                gross_pnl = (entry - exit_fill) * current_size
 
-            gross_pnl = pnl_percent * current_size
-            commission = current_size * TRADING_CONFIG["total_fee"]
+            commission_notional = abs(current_size) * abs(exit_fill)
+            commission = commission_notional * TRADING_CONFIG["total_fee"]
 
             funding_cost = 0.0
             try:
@@ -3705,7 +3721,8 @@ class SimTradeManager:
                 if open_time_str:
                     open_dt = datetime.strptime(open_time_str, "%Y-%m-%dT%H:%M:%SZ")
                     hours = max(0.0, (candle_time_utc - open_dt).total_seconds() / 3600.0)
-                    funding_cost = abs(current_size) * TRADING_CONFIG["funding_rate_8h"] * (hours / 8.0)
+                    notional_entry = abs(current_size) * entry
+                    funding_cost = notional_entry * TRADING_CONFIG["funding_rate_8h"] * (hours / 8.0)
             except Exception:
                 funding_cost = 0.0
 
