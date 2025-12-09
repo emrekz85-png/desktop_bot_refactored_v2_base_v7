@@ -392,11 +392,17 @@ def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) 
     return tm.total_pnl, unique_trades
 
 
-def _optimize_backtest_configs(streams: dict, requested_pairs: list, progress_callback=None):
+def _optimize_backtest_configs(
+    streams: dict,
+    requested_pairs: list,
+    progress_callback=None,
+    log_to_stdout: bool = True,
+):
     """Brute-force search to find the best config (by net pnl) per symbol/timeframe."""
 
     def log(msg: str):
-        print(msg)
+        if log_to_stdout:
+            print(msg)
         if progress_callback:
             progress_callback(msg)
 
@@ -3087,11 +3093,10 @@ class MainWindow(QMainWindow):
         self.table_timer.timeout.connect(self.refresh_trade_table_from_manager);
         self.table_timer.start(1000)
         # --- OTO BACKTEST BAŞLAT ---
-        self.auto_backtest = AutoBacktestWorker()
-        self.auto_backtest.start()
+        self.auto_backtest = None  # Gece otomatik backtest geçici olarak devre dışı
         # ---------------------------
 
-        self.logs.append(">>> Sistem Başlatıldı. v30.6 (Auto Report)")
+        self.logs.append(">>> Sistem Başlatıldı. v30.6 (Auto Report - Otomatik Backtest Kapalı)")
 
         # Backtest geçmişini göster
         self.load_backtest_meta()
@@ -3592,8 +3597,7 @@ class MainWindow(QMainWindow):
         if "Tamamlandı" in msg: self.btn_run_opt.setEnabled(True)
 
     def force_daily_report(self):
-        self.opt_logs.append("🌙 Manuel Rapor İsteği Gönderildi. Arka planda çalışıyor, lütfen bekleyin...")
-        self.auto_backtest.force_run = True
+        self.opt_logs.append("🌙 Otomatik rapor ve gece backtest özelliği şu an kapalı.")
 
     def create_pnl_table(self):
         # Tabloyu oluşturur
@@ -4080,10 +4084,14 @@ def run_portfolio_backtest(
     draw_trades: bool = True,
     max_draw_trades: Optional[int] = None,
 ):
-    def log(msg: str):
-        print(msg)
+    allowed_log_categories = {"progress", "potential", "summary"}
+
+    def log(msg: str, category: str = None):
+        if category not in allowed_log_categories:
+            return
         if progress_callback:
             progress_callback(msg)
+        print(msg)
 
     accepted_signals_raw = {}
     opened_signals = {}
@@ -4102,42 +4110,47 @@ def run_portfolio_backtest(
     """
     import heapq
 
-    streams = {}
     limit_map = limit_map or {}
     requested_pairs = list(itertools.product(symbols, timeframes))
-    tf_limit_log = set()
-    for sym in symbols:
-        for tf in timeframes:
-            active_limit_map = limit_map if limit_map else BACKTEST_CANDLE_LIMITS
-            tf_candle_limit = active_limit_map.get(tf, candles)
-            if tf_candle_limit:
-                tf_candle_limit = min(candles, tf_candle_limit)
-            else:
-                tf_candle_limit = candles
 
-            if tf not in tf_limit_log and tf_candle_limit != candles:
-                log(f"[BACKTEST] {tf} mum geçmişi {tf_candle_limit} ile sınırlandı.")
-                tf_limit_log.add(tf)
+    def build_streams(target_candles: int, write_prices: bool = False):
+        result = {}
+        active_limit_map = limit_map if limit_map else BACKTEST_CANDLE_LIMITS
 
-            df = TradingEngine.get_historical_data_pagination(sym, tf, total_candles=tf_candle_limit)
-            if df is None or df.empty or len(df) < 400:
-                log(f"[BACKTEST] {sym}-{tf} datası bulunamadı veya yetersiz (len={0 if df is None else len(df)})")
-                continue
+        for sym in symbols:
+            for tf in timeframes:
+                tf_candle_limit = active_limit_map.get(tf, target_candles)
+                if tf_candle_limit:
+                    tf_candle_limit = min(target_candles, tf_candle_limit)
+                else:
+                    tf_candle_limit = target_candles
 
-            df = TradingEngine.calculate_indicators(df)
+                df = TradingEngine.get_historical_data_pagination(sym, tf, total_candles=tf_candle_limit)
+                if df is None or df.empty or len(df) < 400:
+                    continue
 
-            # Plot / debug için fiyat datasını CSV olarak kaydediyoruz
-            # Örn: BTCUSDT_5m_prices.csv
-            df.to_csv(f"{sym}_{tf}_prices.csv", index=False)
+                df = TradingEngine.calculate_indicators(df)
 
-            streams[(sym, tf)] = df.reset_index(drop=True)
+                if write_prices:
+                    df.to_csv(f"{sym}_{tf}_prices.csv", index=False)
 
+                result[(sym, tf)] = df.reset_index(drop=True)
+
+        return result
+
+    streams = build_streams(candles, write_prices=True)
     if not streams:
-        log("Backtest için veri yok (internet / Binance erişimi?)")
+        log("Backtest için veri yok (internet / Binance erişimi?)", category="summary")
         return
 
     # --- 1) Her sembol/zaman dilimi için en iyi ayarı tara ---
-    best_configs = _optimize_backtest_configs(streams, requested_pairs, progress_callback=progress_callback)
+    opt_streams = build_streams(target_candles=1500, write_prices=False)
+    best_configs = _optimize_backtest_configs(
+        opt_streams,
+        requested_pairs,
+        progress_callback=progress_callback,
+        log_to_stdout=False,
+    )
 
     # Çoklu stream için zaman bazlı event kuyruğu
     heap = []
@@ -4185,12 +4198,6 @@ def run_portfolio_backtest(
         # Bu sembol/timeframe için optimize edilmiş config
         config = best_configs.get((sym, tf)) or load_optimized_config(sym, tf)
         if (sym, tf) not in logged_cfg_pairs:
-            cfg_info = dict(config)
-            extra = ""
-            if (sym, tf) in best_configs:
-                meta = best_configs[(sym, tf)]
-                extra = f" | OPT NetPnL={meta['_net_pnl']:.2f} Trades={meta['_trades']}"
-            log(f"[BACKTEST][CFG] {sym}-{tf} -> {cfg_info}{extra}")
             logged_cfg_pairs.add((sym, tf))
         rr, rsi, slope = config["rr"], config["rsi"], config["slope"]
         use_at = config.get("at_active", False)
@@ -4221,8 +4228,20 @@ def run_portfolio_backtest(
                 for t in tm.open_trades
             )
 
-            # Cooldown kontrolü
-            if (not has_open) and (not tm.check_cooldown(sym, tf, event_time)):
+            cooldown_active = tm.check_cooldown(sym, tf, event_time)
+            signal_ts_str = (event_time + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
+
+            if has_open:
+                log(
+                    f"[POT][{sym}-{tf}] {s_type} {signal_ts_str} reddedildi: açık pozisyon var.",
+                    category="potential",
+                )
+            elif cooldown_active:
+                log(
+                    f"[POT][{sym}-{tf}] {s_type} {signal_ts_str} reddedildi: cooldown aktif.",
+                    category="potential",
+                )
+            else:
                 next_row = df.iloc[i + 1]
                 entry_open = float(next_row["open"])
                 open_ts = next_row["timestamp"]
@@ -4233,6 +4252,11 @@ def run_portfolio_backtest(
                 s_reason_str = str(s_reason)
                 if "ACCEPTED" in s_reason_str and "(" in s_reason_str and ")" in s_reason_str:
                     setup_tag = s_reason_str[s_reason_str.find("(") + 1 : s_reason_str.find(")")]
+
+                log(
+                    f"[POT][{sym}-{tf}] {s_type} {signal_ts_str} kabul edildi (setup={setup_tag}).",
+                    category="potential",
+                )
 
                 tm.open_trade(
                     {
@@ -4263,28 +4287,12 @@ def run_portfolio_backtest(
         if total_events > 0:
             progress = (processed_events / total_events) * 100
             if progress >= next_progress:
-                log(f"[BACKTEST] %{progress:.1f} tamamlandı...")
+                log(f"[BACKTEST] %{progress:.1f} tamamlandı...", category="progress")
                 next_progress += 10
     total_closed_legs = len(tm.history)
     unique_trades = len({t.get("id") for t in tm.history}) if tm.history else 0
     partial_legs = sum(1 for t in tm.history if "PARTIAL" in str(t.get("status", "")))
     full_exits = total_closed_legs - partial_legs
-
-    log(
-        "[DEBUG] Kapatılan kayıtlar: "
-        f"{total_closed_legs} bacak | {unique_trades} benzersiz trade | "
-        f"{partial_legs} partial, {full_exits} final"
-    )
-    if tm.history:
-        log(f"[DEBUG] İlk trade örneği: {tm.history[0]}")
-    if accepted_signals_raw:
-        log("[DEBUG] Kabul edilen (ham) sinyal sayıları:")
-        for (sym, tf), cnt in sorted(accepted_signals_raw.items()):
-            log(f"  - {sym}-{tf}: {cnt}")
-    if opened_signals:
-        log("[DEBUG] Açılışa dönüşen sinyal sayıları (backtest tablo ile hizalı):")
-        for (sym, tf), cnt in sorted(opened_signals.items()):
-            log(f"  - {sym}-{tf}: {cnt}")
 
     # Tüm history'den DataFrame oluştur ve CSV / özet yaz
     trades_df = pd.DataFrame(tm.history)
@@ -4341,24 +4349,31 @@ def run_portfolio_backtest(
     if not summary_df.empty:
         summary_df.to_csv(out_summary_csv, index=False)
 
-    log("Backtest bitti.")
+    log("Backtest bitti.", category="summary")
     if not summary_df.empty:
-        log(summary_df.to_string(index=False))
+        log(summary_df.to_string(index=False), category="summary")
 
     if best_configs:
-        log("\n[OPT] En iyi ayar özeti (Net PnL'e göre):")
+        log("\n[OPT] En iyi ayar özeti (Net PnL'e göre):", category="summary")
         for (sym, tf), cfg in sorted(best_configs.items()):
             log(
                 f"  - {sym}-{tf}: RR={cfg['rr']}, RSI={cfg['rsi']}, Slope={cfg['slope']}, "
                 f"AT={'Açık' if cfg['at_active'] else 'Kapalı'}, Trailing={cfg.get('use_trailing', False)} | "
-                f"NetPnL={cfg['_net_pnl']:.2f}, Trades={cfg['_trades']}"
+                f"NetPnL={cfg['_net_pnl']:.2f}, Trades={cfg['_trades']}",
+                category="summary",
             )
 
-    log(f"Final Wallet (sim): ${tm.wallet_balance:.2f} | Total PnL: ${tm.total_pnl:.2f}")
+    log(
+        f"Final Wallet (sim): ${tm.wallet_balance:.2f} | Total PnL: ${tm.total_pnl:.2f}",
+        category="summary",
+    )
 
     total_trades = trades_df["id"].nunique() if not trades_df.empty and "id" in trades_df.columns else 0
     if total_trades < 5:
-        log("[BACKTEST] Çok az trade bulundu. Daha fazla sonuç için RR/RSI/Slope limitlerini biraz gevşetmeyi düşünebilirsin.")
+        log(
+            "[BACKTEST] Çok az trade bulundu. Daha fazla sonuç için RR/RSI/Slope limitlerini biraz gevşetmeyi düşünebilirsin.",
+            category="summary",
+        )
 
     # Sonuçları GUI/LIVE ile paylaşmak için kaydet
     save_best_configs(best_configs)
@@ -4373,7 +4388,7 @@ def run_portfolio_backtest(
         try:
             replay_backtest_trades(trades_csv=out_trades_csv, max_trades=max_draw_trades)
         except Exception as e:
-            log(f"[BACKTEST] Trade çiziminde hata: {e}")
+            log(f"[BACKTEST] Trade çiziminde hata: {e}", category="summary")
 
     return result
 
