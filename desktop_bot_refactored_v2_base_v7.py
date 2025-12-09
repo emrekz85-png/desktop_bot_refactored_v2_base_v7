@@ -3806,7 +3806,16 @@ def run_portfolio_backtest(
             if progress >= next_progress:
                 log(f"[BACKTEST] %{progress:.1f} tamamlandı...")
                 next_progress += 10
-    log(f"[DEBUG] Toplam kapatılmış trade sayısı: {len(tm.history)}")
+    total_closed_legs = len(tm.history)
+    unique_trades = len({t.get("id") for t in tm.history}) if tm.history else 0
+    partial_legs = sum(1 for t in tm.history if "PARTIAL" in str(t.get("status", "")))
+    full_exits = total_closed_legs - partial_legs
+
+    log(
+        "[DEBUG] Kapatılan kayıtlar: "
+        f"{total_closed_legs} bacak | {unique_trades} benzersiz trade | "
+        f"{partial_legs} partial, {full_exits} final"
+    )
     if tm.history:
         log(f"[DEBUG] İlk trade örneği: {tm.history[0]}")
     if accepted_signals_raw:
