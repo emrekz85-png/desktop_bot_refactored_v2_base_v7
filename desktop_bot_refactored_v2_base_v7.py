@@ -1703,9 +1703,6 @@ class TradingEngine:
                 past_trades = [t for t in trade_manager.history if
                                t['timeframe'] == interval and t['symbol'] == symbol][-5:]
 
-                candle_start = pd.to_datetime(plot_df['timestamp'].min(), utc=True, errors="coerce")
-                candle_end = pd.to_datetime(plot_df['timestamp'].max(), utc=True, errors="coerce")
-
                 def _trade_sort_key(trade: dict) -> float:
                     tid = trade.get('id')
                     if isinstance(tid, (int, float)):
