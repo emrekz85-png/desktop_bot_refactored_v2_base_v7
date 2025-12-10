@@ -1619,9 +1619,11 @@ class TradingEngine:
         - Keltner bandı ile PBEMA TP hedefi arasında minimum mesafe
         - TP çok yakın / çok uzak değil
         - RR >= min_rr   (RR = reward / risk)
-        - ***Trend filtresi (hafif):***
-              * Güçlü uptrend + fiyat PBEMA üstünde => SHORT yasak
-              * Güçlü downtrend + fiyat PBEMA altında => LONG yasak
+
+        Not: Bu kurgu trend-takip eden değil, PBEMA bulutunu mıknatıs gibi
+        kullanan mean reversion yaklaşımıdır. Fiyat PBEMA bulutunun üstündeyse
+        yalnızca SHORT, altındaysa yalnızca LONG senaryosu aranır; Keltner
+        dokunuşları bu yön filtresiyle tetikleyici olur.
         """
 
         debug_info = {
@@ -1706,30 +1708,19 @@ class TradingEngine:
         pb_top = float(curr["pb_ema_top"])
         pb_bot = float(curr["pb_ema_bot"])
 
-        # --- Hafif trend filtresi (yalnızca aşırı ters işlemleri keser) ---
+        # --- Mean reversion: yön kısıtı PBEMA konumuna göre ---
         slope_top = float(curr.get("slope_top", 0.0) or 0.0)
         slope_bot = float(curr.get("slope_bot", 0.0) or 0.0)
         slope_thresh = slope_thresh or 0.0
 
-        # güçlü yukarı trend ve fiyat PBEMA bulutunun ÜSTÜNDE ise => short yasak
-        trend_up_strong = (
-                slope_top > slope_thresh and
-                pb_top >= pb_bot and
-                close > pb_top
-        )
+        # Slope bilgisi yalnızca debug amaçlı tutuluyor.
+        debug_info["trend_up_strong"] = slope_top > slope_thresh and pb_top >= pb_bot and close > pb_top
+        debug_info["trend_down_strong"] = slope_bot < -slope_thresh and pb_bot <= pb_top and close < pb_bot
 
-        # güçlü aşağı trend ve fiyat PBEMA bulutunun ALTINDA ise => long yasak
-        trend_down_strong = (
-                slope_bot < -slope_thresh and
-                pb_bot <= pb_top and
-                close < pb_bot
-        )
-
-        debug_info["trend_up_strong"] = trend_up_strong
-        debug_info["trend_down_strong"] = trend_down_strong
-
-        long_direction_ok = not trend_down_strong
-        short_direction_ok = not trend_up_strong
+        above_cloud = close >= pb_top * (1 + touch_tol)
+        below_cloud = close <= pb_bot * (1 - touch_tol)
+        long_direction_ok = below_cloud
+        short_direction_ok = above_cloud
 
         # ================= LONG =================
         holding_long = (closes_slice > lower_slice).mean() >= min_hold_frac
@@ -1742,10 +1733,8 @@ class TradingEngine:
 
         keltner_pb_gap_long = (pb_bot - lower_band) / lower_band if lower_band != 0 else 0.0
 
-        within_cloud_long = pb_bot <= close <= pb_top * (1 + touch_tol)
         pb_target_long = (
                 long_direction_ok and
-                ((close <= pb_bot * (1 + touch_tol)) or within_cloud_long) and
                 (keltner_pb_gap_long >= cloud_keltner_gap_min)
         )
 
@@ -1767,10 +1756,8 @@ class TradingEngine:
 
         keltner_pb_gap_short = (upper_band - pb_top) / upper_band if upper_band != 0 else 0.0
 
-        within_cloud_short = pb_bot * (1 - touch_tol) <= close <= pb_top
         pb_target_short = (
                 short_direction_ok and
-                ((close >= pb_top * (1 - touch_tol)) or within_cloud_short) and
                 (keltner_pb_gap_short >= cloud_keltner_gap_min)
         )
 
