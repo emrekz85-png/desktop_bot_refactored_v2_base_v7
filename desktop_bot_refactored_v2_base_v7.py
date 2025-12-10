@@ -3959,8 +3959,6 @@ def _tf_to_timedelta(tf: str) -> timedelta:
         return timedelta(minutes=int(tf[:-1]))
     if tf.endswith("h"):
         return timedelta(hours=int(tf[:-1]))
-    if tf.endswith("d"):
-        return timedelta(days=int(tf[:-1]))
     raise ValueError(f"Unsupported timeframe: {tf}")
 
 class SimTradeManager:
