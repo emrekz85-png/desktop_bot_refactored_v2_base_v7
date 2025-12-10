@@ -1534,6 +1534,7 @@ class TradingEngine:
         # --- RSI (LONG için üst sınır) ---
         long_rsi_limit = rsi_limit + 10.0
         rsi_val = float(curr["rsi"])
+        debug_info["rsi_value"] = rsi_val
         long_rsi_ok = rsi_val <= long_rsi_limit
         debug_info["long_rsi_ok"] = long_rsi_ok
         if is_long and not long_rsi_ok:
@@ -2207,6 +2208,7 @@ class LiveBotWorker(QThread):
                                     live_pnl_str = f" | PnL: {sign}${abs(current_pnl):.2f}{partial_info}"
 
                                 decision = None
+                                reject_reason = ""
                                 # Sinyal Yönetimi
                                 if s_type and "ACCEPTED" in s_reason:
                                     has_open = False
@@ -2214,7 +2216,8 @@ class LiveBotWorker(QThread):
                                         if t['symbol'] == sym and t['timeframe'] == tf: has_open = True; break
 
                                     if has_open:
-                                        decision = "Blocked: Existing trade"
+                                        decision = "Rejected"
+                                        reject_reason = "Open Position"
                                         log_msg = f"{tf} | {curr_price} | ⚠️ Pozisyon Var{live_pnl_str}"
                                         json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                          active_trades if self.show_rr else [])
@@ -2222,7 +2225,8 @@ class LiveBotWorker(QThread):
 
                                     elif self.last_signals[sym][tf] != closed_ts_utc:
                                         if trade_manager.check_cooldown(sym, tf, forming_ts_utc):
-                                            decision = "Blocked: Cooldown"
+                                            decision = "Rejected"
+                                            reject_reason = "Cooldown"
                                             log_msg = f"{tf} | {curr_price} | ❄️ SOĞUMA SÜRECİNDE"
                                             json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                              active_trades if self.show_rr else [])
@@ -2243,13 +2247,14 @@ class LiveBotWorker(QThread):
                                             TradingEngine.send_telegram(self.tg_token, self.tg_chat_id, msg)
 
                                             self.last_signals[sym][tf] = closed_ts_utc
-                                            decision = "Opened Trade"
+                                            decision = "Accepted"
                                             log_msg = f"{tf} | {curr_price} | 🔥 {s_type} ({setup_tag})"
                                             json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                              active_trades if self.show_rr else [])
                                             self.update_ui_signal.emit(sym, tf, json_data, log_msg)
                                     else:
-                                        decision = "Skipped: Duplicate signal"
+                                        decision = "Rejected"
+                                        reject_reason = "Duplicate Signal"
                                         log_msg = f"{tf} | {curr_price} | ⏳ İşlemde...{live_pnl_str}"
                                         json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                          active_trades if self.show_rr else [])
@@ -2266,19 +2271,35 @@ class LiveBotWorker(QThread):
                                                                                      active_trades if self.show_rr else [])
                                     self.update_ui_signal.emit(sym, tf, json_data, log_msg)
 
-                                if self.last_potential[sym][tf] != closed_ts_utc:
+                                if s_type and "ACCEPTED" in s_reason and self.last_potential[sym][tf] != closed_ts_utc:
                                     direction = s_type or ("LONG" if s_debug.get("holding_long") else ("SHORT" if s_debug.get("holding_short") else ""))
+
+                                    checks = dict(s_debug or {})
+                                    if "rsi_value" not in checks:
+                                        try:
+                                            checks["rsi_value"] = float(df_closed["rsi"].iloc[-1])
+                                        except Exception:
+                                            pass
+
+                                    final_decision = decision or "Rejected"
+                                    if final_decision == "Accepted":
+                                        decision_text = "Accepted"
+                                        reason_text = ""
+                                    else:
+                                        reason_text = reject_reason or (s_reason if s_reason != "No Signal" else "Unknown")
+                                        decision_text = f"Rejected: {reason_text}"
+
                                     diag_entry = {
                                         "timestamp": ts_str,
                                         "symbol": sym,
                                         "timeframe": tf,
                                         "type": direction,
-                                        "reason": s_reason,
-                                        "decision": decision or (s_reason or "No Signal"),
+                                        "reason": reason_text,
+                                        "decision": decision_text,
                                         "price": curr_price,
                                         "next_open": next_open_price,
                                         "setup": setup_tag,
-                                        "checks": s_debug or {},
+                                        "checks": checks,
                                     }
                                     potential_trades.add(diag_entry)
                                     self.potential_signal.emit(diag_entry)
@@ -3137,11 +3158,7 @@ class MainWindow(QMainWindow):
             self.logs.verticalScrollBar().setValue(self.logs.verticalScrollBar().maximum())
 
     def _fmt_bool(self, value):
-        if value is True:
-            return "✅"
-        if value is False:
-            return "❌"
-        return "·"
+        return "✓" if bool(value) else "×"
 
     def append_potential_trade(self, entry: dict):
         if not isinstance(entry, dict):
@@ -3160,22 +3177,19 @@ class MainWindow(QMainWindow):
             direction = entry.get("type", "") or "-"
 
             if direction == "LONG":
-                trend_ok = None if checks.get("trend_down_strong") is None else (not checks.get("trend_down_strong"))
-                hold_ok = checks.get("holding_long")
-                retest_ok = checks.get("retest_long")
-                pb_ok = checks.get("pb_target_long")
-                rsi_ok = checks.get("long_rsi_ok")
-                rr_ok = checks.get("long_rr_ok")
+                trend_ok = not bool(checks.get("trend_down_strong"))
+                hold_ok = bool(checks.get("holding_long"))
+                retest_ok = bool(checks.get("retest_long"))
+                pb_ok = bool(checks.get("pb_target_long"))
             else:
-                trend_ok = None if checks.get("trend_up_strong") is None else (not checks.get("trend_up_strong"))
-                hold_ok = checks.get("holding_short")
-                retest_ok = checks.get("retest_short")
-                pb_ok = checks.get("pb_target_short")
-                rsi_ok = checks.get("short_rsi_ok")
-                rr_ok = checks.get("short_rr_ok")
+                trend_ok = not bool(checks.get("trend_up_strong"))
+                hold_ok = bool(checks.get("holding_short"))
+                retest_ok = bool(checks.get("retest_short"))
+                pb_ok = bool(checks.get("pb_target_short"))
 
             rr_val = checks.get("rr_value")
             tp_ratio = checks.get("tp_dist_ratio")
+            rsi_val = checks.get("rsi_value")
 
             values = [
                 entry.get("timestamp", "-"),
@@ -3189,19 +3203,29 @@ class MainWindow(QMainWindow):
                 self._fmt_bool(retest_ok),
                 self._fmt_bool(pb_ok),
                 self._fmt_bool(trend_ok),
-                self._fmt_bool(rsi_ok),
+                f"{float(rsi_val):.2f}" if isinstance(rsi_val, (int, float)) else "-",
                 f"{rr_val:.2f}" if isinstance(rr_val, (int, float)) else "-",
                 f"{tp_ratio*100:.2f}%" if isinstance(tp_ratio, (int, float)) else "-",
             ]
 
             for col_idx, val in enumerate(values):
                 item = QTableWidgetItem(str(val))
-                if col_idx in {6, 7, 8, 9, 10, 11}:
-                    if val == "✅":
+                if col_idx in {6, 7, 8, 9, 10}:
+                    if val == "✓":
                         item.setForeground(QColor("#00ff00"))
-                    elif val == "❌":
+                    elif val == "×":
                         item.setForeground(QColor("#ff5555"))
+                if col_idx == 4 and str(entry.get("decision", "")).startswith("Accepted"):
+                    item.setForeground(QColor("#00c853"))
                 self.potential_table.setItem(row_idx, col_idx, item)
+
+            # Accepted satırlarını görsel olarak ayır
+            if str(entry.get("decision", "")).startswith("Accepted"):
+                for col in range(len(values)):
+                    existing_item = self.potential_table.item(row_idx, col)
+                    if existing_item:
+                        existing_item.setBackground(QColor(0, 60, 30))
+                        existing_item.setForeground(QColor("#e8ffe8"))
 
     # --- FİYAT GÜNCELLEME (Ticker) ---
     def on_price_update(self, symbol, price):
