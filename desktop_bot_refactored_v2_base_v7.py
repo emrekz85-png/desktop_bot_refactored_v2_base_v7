@@ -874,8 +874,7 @@ class TradeManager:
                 "notional": position_notional,
                 "status": "OPEN", "pnl": 0.0,
                 "breakeven": False, "trailing_active": False, "partial_taken": False, "partial_price": None,
-                "has_cash": True, "close_time": "", "close_price": "",
-                "closed": False, "final_status": None, "leg_type": "OPEN"
+                "has_cash": True, "close_time": "", "close_price": ""
             }
 
             self.wallet_balance -= required_margin
@@ -914,8 +913,6 @@ class TradeManager:
             just_closed_trades = []
 
             for i, trade in enumerate(self.open_trades):
-                if trade.get("closed"):
-                    continue
                 if trade.get("symbol") != symbol:
                     continue
                 if trade.get("timeframe") != tf:
@@ -1000,9 +997,6 @@ class TradeManager:
                         partial_record["close_price"] = partial_price
                         partial_record["pb_ema_top"] = pb_top
                         partial_record["pb_ema_bot"] = pb_bot
-                        partial_record["leg_type"] = "PARTIAL"
-                        partial_record["closed"] = False
-                        partial_record["final_status"] = None
                         self.history.append(partial_record)
 
                         # Açık trade'i güncelle: yarı pozisyon kaldı, margin yarıya indi
@@ -1074,15 +1068,6 @@ class TradeManager:
                     reason = "STOP"
                     exit_level = sl
 
-                final_exists = any(
-                    h.get("id") == trade.get("id") and h.get("leg_type") == "FINAL"
-                    for h in self.history
-                )
-                if final_exists:
-                    trade["closed"] = True
-                    closed_indices.append(i)
-                    continue
-
                 # ---------- POZİSYONU KAPAT ----------
                 current_size = float(self.open_trades[i]["size"])
                 margin_release = float(self.open_trades[i].get("margin", initial_margin))
@@ -1122,17 +1107,6 @@ class TradeManager:
                 # BE statüsünü ayır
                 if trade.get("breakeven") and abs(final_net_pnl) < 1e-6 and "STOP" in reason:
                     reason = "BE"
-
-                trade["closed"] = True
-                trade["leg_type"] = "FINAL"
-                if "WIN" in reason:
-                    trade["final_status"] = "WIN"
-                elif reason == "BE" or abs(final_net_pnl) < 1e-6:
-                    trade["final_status"] = "BE"
-                elif final_net_pnl > 0:
-                    trade["final_status"] = "PARTIAL_WIN"
-                else:
-                    trade["final_status"] = "LOSS"
 
                 trade["status"] = reason
                 trade["pnl"] = final_net_pnl
@@ -1185,7 +1159,7 @@ class TradeManager:
                     "id", "symbol", "timestamp", "timeframe", "type", "setup", "entry", "tp", "sl", "size",
                     "margin", "notional",
                     "status", "pnl", "breakeven", "trailing_active", "partial_taken", "stop_protection", "has_cash",
-                    "close_time", "close_price", "closed", "final_status", "leg_type"
+                    "close_time", "close_price"
                 ]
 
                 if not self.open_trades and not self.history:
@@ -4059,9 +4033,6 @@ class SimTradeManager:
             "has_cash": True,
             "close_time": "",
             "close_price": "",
-            "closed": False,
-            "final_status": None,
-            "leg_type": "OPEN",
         }
 
         self.wallet_balance -= required_margin
@@ -4102,8 +4073,6 @@ class SimTradeManager:
         just_closed_trades = []
 
         for i, trade in enumerate(self.open_trades):
-            if trade.get("closed"):
-                continue
             if trade.get("symbol") != symbol:
                 continue
             if trade.get("timeframe") != tf:
@@ -4178,7 +4147,6 @@ class SimTradeManager:
 
                     partial_record = trade.copy()
                     partial_record["size"] = partial_size
-                    partial_record["notional"] = partial_notional
                     partial_record["pnl"] = net_partial_pnl
                     partial_record["status"] = "PARTIAL TP (50%)"
                     partial_record["close_time"] = (
@@ -4187,9 +4155,6 @@ class SimTradeManager:
                     partial_record["close_price"] = float(partial_fill)
                     partial_record["pb_ema_top"] = pb_top
                     partial_record["pb_ema_bot"] = pb_bot
-                    partial_record["leg_type"] = "PARTIAL"
-                    partial_record["closed"] = False
-                    partial_record["final_status"] = None
                     self.history.append(partial_record)
 
                     self.open_trades[i]["size"] = partial_size
@@ -4248,15 +4213,6 @@ class SimTradeManager:
                 reason = "STOP"
                 exit_level = sl
 
-            final_exists = any(
-                h.get("id") == trade.get("id") and h.get("leg_type") == "FINAL"
-                for h in self.history
-            )
-            if final_exists:
-                trade["closed"] = True
-                closed_indices.append(i)
-                continue
-
             current_size = float(self.open_trades[i]["size"])
             margin_release = float(self.open_trades[i].get("margin", initial_margin))
 
@@ -4293,17 +4249,6 @@ class SimTradeManager:
 
             if trade.get("breakeven") and abs(final_net_pnl) < 1e-6 and "STOP" in reason:
                 reason = "BE"
-
-            trade["closed"] = True
-            trade["leg_type"] = "FINAL"
-            if "WIN" in reason:
-                trade["final_status"] = "WIN"
-            elif reason == "BE" or abs(final_net_pnl) < 1e-6:
-                trade["final_status"] = "BE"
-            elif final_net_pnl > 0:
-                trade["final_status"] = "PARTIAL_WIN"
-            else:
-                trade["final_status"] = "LOSS"
 
             trade["status"] = reason
             trade["pnl"] = final_net_pnl
