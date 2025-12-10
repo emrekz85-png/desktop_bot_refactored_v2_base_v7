@@ -14,6 +14,7 @@ import numpy as np
 import requests
 import dateutil.parser
 import itertools
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timedelta
 import traceback
 import tempfile
@@ -415,7 +416,11 @@ def _optimize_backtest_configs(
     completed = 0
     next_progress = 5
 
-    log(f"[OPT] {len(candidates)} farklı ayar taranacak (her zaman dilimi için).")
+    max_workers = max(1, (os.cpu_count() or 1) - 1)
+    log(
+        f"[OPT] {len(candidates)} farklı ayar taranacak (her zaman dilimi için). "
+        f"Paralel iş parçacığı: {max_workers}"
+    )
 
     for sym, tf in requested_pairs:
         if (sym, tf) not in streams:
@@ -426,21 +431,28 @@ def _optimize_backtest_configs(
         best_pnl = -float("inf")
         best_trades = 0
 
-        for cfg in candidates:
-            net_pnl, trades = _score_config_for_stream(df, sym, tf, cfg)
-            completed += 1
-            progress = (completed / total_jobs) * 100
-            if progress >= next_progress:
-                log(f"[OPT] %{progress:.1f} tamamlandı...")
-                next_progress += 5
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(_score_config_for_stream, df, sym, tf, cfg): cfg
+                for cfg in candidates
+            }
 
-            if trades == 0:
-                continue
+            for future in as_completed(futures):
+                cfg = futures[future]
+                net_pnl, trades = future.result()
+                completed += 1
+                progress = (completed / total_jobs) * 100
+                if progress >= next_progress:
+                    log(f"[OPT] %{progress:.1f} tamamlandı...")
+                    next_progress += 5
 
-            if net_pnl > best_pnl:
-                best_pnl = net_pnl
-                best_cfg = cfg
-                best_trades = trades
+                if trades == 0:
+                    continue
+
+                if net_pnl > best_pnl:
+                    best_pnl = net_pnl
+                    best_cfg = cfg
+                    best_trades = trades
 
         if best_cfg:
             best_by_pair[(sym, tf)] = {**best_cfg, "_net_pnl": best_pnl, "_trades": best_trades}
