@@ -845,11 +845,9 @@ class TradeManager:
             tf = signal_data["timeframe"]
             sym = signal_data["symbol"]
 
-            if (sym, tf) in self.cooldowns:
-                if datetime.now() < self.cooldowns[(sym, tf)]:
-                    return
-                else:
-                    del self.cooldowns[(sym, tf)]
+            cooldown_ref_time = signal_data.get("open_time_utc") or datetime.utcnow()
+            if self.check_cooldown(sym, tf, cooldown_ref_time):
+                return
 
             setup_type = signal_data.get("setup", "Unknown")
 
