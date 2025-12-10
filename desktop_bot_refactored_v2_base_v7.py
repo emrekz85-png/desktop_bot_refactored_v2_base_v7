@@ -8,6 +8,7 @@ import ssl
 import base64
 import contextlib
 import threading
+from multiprocessing import Pool, cpu_count
 import pandas as pd
 import pandas_ta as ta
 import numpy as np
@@ -71,6 +72,7 @@ DAILY_REPORT_CANDLE_LIMITS = {
 BEST_CONFIGS_FILE = "best_configs.json"
 BEST_CONFIG_CACHE = {}
 BACKTEST_META_FILE = "backtest_meta.json"
+INDICATOR_CACHE = {}
 # Çökme veya kapanma durumlarında otomatik yeniden başlatma gecikmesi (saniye)
 AUTO_RESTART_DELAY_SECONDS = 5
 
@@ -282,10 +284,10 @@ def _apply_partial_stop_protection(trade: dict, tf: str, progress: float, t_type
 def _generate_candidate_configs():
     """Create a compact grid of configs to search for higher trade density."""
 
-    rr_vals = np.arange(1.2, 2.6, 0.3)
-    rsi_vals = np.arange(35, 76, 10)
-    slope_vals = np.arange(0.2, 0.9, 0.2)
-    at_vals = [False, True]
+    rr_vals = [1.2, 1.6, 2.0]
+    rsi_vals = [30, 35, 40, 45]
+    slope_vals = [0.4, 0.6]
+    at_vals = [False]
 
     candidates = []
     for rr, rsi, slope, at_active in itertools.product(rr_vals, rsi_vals, slope_vals, at_vals):
@@ -300,14 +302,48 @@ def _generate_candidate_configs():
             }
         )
 
-    # Birkaç agresif trailing seçeneği ekle
-    trailing_extras = []
-    for base in candidates[:: max(1, len(candidates) // 20)]:  # toplamı şişirmeden örnekle
-        cfg = dict(base)
-        cfg["use_trailing"] = True
-        trailing_extras.append(cfg)
+    return candidates
 
-    return candidates + trailing_extras
+
+def _get_indicator_stream(
+    symbol: str,
+    timeframe: str,
+    target_candles: int,
+    active_limit_map: Optional[dict],
+    write_prices: bool = False,
+):
+    cache_key = (symbol, timeframe)
+    active_limit_map = active_limit_map or {}
+
+    tf_candle_limit = active_limit_map.get(timeframe, target_candles)
+    if tf_candle_limit:
+        tf_candle_limit = min(target_candles, tf_candle_limit)
+    else:
+        tf_candle_limit = target_candles
+
+    cached = INDICATOR_CACHE.get(cache_key)
+    if cached:
+        cached_df = cached.get("df")
+        if cached_df is not None and len(cached_df) >= tf_candle_limit:
+            df_out = cached_df.tail(tf_candle_limit).reset_index(drop=True)
+            if write_prices:
+                df_out.to_csv(f"{symbol}_{timeframe}_prices.csv", index=False)
+            return symbol, timeframe, df_out
+
+    df = TradingEngine.get_historical_data_pagination(symbol, timeframe, total_candles=tf_candle_limit)
+    if df is None or df.empty or len(df) < 400:
+        return symbol, timeframe, None
+
+    df = TradingEngine.calculate_indicators(df)
+    df = df.reset_index(drop=True)
+
+    INDICATOR_CACHE[cache_key] = {"df": df}
+
+    df_out = df.tail(tf_candle_limit).reset_index(drop=True)
+    if write_prices:
+        df_out.to_csv(f"{symbol}_{timeframe}_prices.csv", index=False)
+
+    return symbol, timeframe, df_out
 
 
 def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) -> Tuple[float, int]:
@@ -392,6 +428,119 @@ def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) 
     return tm.total_pnl, unique_trades
 
 
+def _find_best_config_for_pair(args):
+    sym, tf, df, candidates = args
+
+    best_cfg = None
+    best_pnl = -float("inf")
+    best_trades = 0
+
+    for cfg in candidates:
+        net_pnl, trades = _score_config_for_stream(df, sym, tf, cfg)
+        if trades == 0:
+            continue
+        if net_pnl > best_pnl:
+            best_pnl = net_pnl
+            best_cfg = cfg
+            best_trades = trades
+
+    return sym, tf, best_cfg, best_pnl, best_trades
+
+
+def _run_pair_backtest(args):
+    sym, tf, df, config = args
+
+    tm = SimTradeManager(initial_balance=TRADING_CONFIG["initial_balance"])
+    warmup = 250
+    end = len(df) - 2
+
+    if end <= warmup:
+        return {"pair": (sym, tf), "history": [], "summary": None, "events": 0}
+
+    for i in range(warmup, end):
+        row = df.iloc[i]
+        event_time = row["timestamp"] + _tf_to_timedelta(tf)
+
+        tm.update_trades(
+            sym,
+            tf,
+            candle_high=float(row["high"]),
+            candle_low=float(row["low"]),
+            candle_close=float(row["close"]),
+            candle_time_utc=event_time,
+            pb_top=float(row.get("pb_ema_top", row["close"])),
+            pb_bot=float(row.get("pb_ema_bot", row["close"])),
+        )
+
+        s_type, s_entry, s_tp, s_sl, s_reason = TradingEngine.check_signal_diagnostic(
+            df,
+            index=i,
+            min_rr=config.get("rr"),
+            rsi_limit=config.get("rsi"),
+            slope_thresh=config.get("slope"),
+            use_alphatrend=config.get("at_active", False),
+            hold_n=config.get("hold_n"),
+            min_hold_frac=config.get("min_hold_frac"),
+            pb_touch_tolerance=config.get("pb_touch_tolerance"),
+            body_tolerance=config.get("body_tolerance"),
+            cloud_keltner_gap_min=config.get("cloud_keltner_gap_min"),
+            tp_min_dist_ratio=config.get("tp_min_dist_ratio"),
+            tp_max_dist_ratio=config.get("tp_max_dist_ratio"),
+            adx_min=config.get("adx_min"),
+        )
+
+        if not (s_type and "ACCEPTED" in str(s_reason)):
+            continue
+
+        has_open = any(
+            t.get("symbol") == sym and t.get("timeframe") == tf for t in tm.open_trades
+        )
+
+        if has_open or tm.check_cooldown(sym, tf, event_time):
+            continue
+
+        next_row = df.iloc[i + 1]
+        entry_open = float(next_row["open"])
+        open_ts = next_row["timestamp"]
+        ts_str = (open_ts + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
+
+        tm.open_trade(
+            {
+                "symbol": sym,
+                "timeframe": tf,
+                "type": s_type,
+                "setup": str(s_reason),
+                "entry": entry_open,
+                "tp": float(s_tp),
+                "sl": float(s_sl),
+                "timestamp": ts_str,
+                "open_time_utc": open_ts,
+                "use_trailing": config.get("use_trailing", False),
+                "use_dynamic_pbema_tp": config.get("use_dynamic_pbema_tp", False),
+            }
+        )
+
+    history = tm.history
+
+    summary_row = None
+    trades_df = pd.DataFrame(history)
+    if not trades_df.empty:
+        pnl_list = trades_df.groupby(["symbol", "timeframe", "id"])["pnl"].sum().tolist()
+        total = len(pnl_list)
+        wins = sum(1 for x in pnl_list if x > 0)
+        pnl = sum(pnl_list)
+        wr = (wins / total * 100.0) if total else 0.0
+        summary_row = {
+            "symbol": sym,
+            "timeframe": tf,
+            "trades": total,
+            "win_rate_pct": wr,
+            "net_pnl": pnl,
+        }
+
+    return {"pair": (sym, tf), "history": history, "summary": summary_row, "events": max(0, end - warmup)}
+
+
 def _optimize_backtest_configs(
     streams: dict,
     requested_pairs: list,
@@ -417,40 +566,31 @@ def _optimize_backtest_configs(
 
     log(f"[OPT] {len(candidates)} farklı ayar taranacak (her zaman dilimi için).")
 
+    tasks = []
     for sym, tf in requested_pairs:
         if (sym, tf) not in streams:
             continue
+        tasks.append((sym, tf, streams[(sym, tf)], candidates))
 
-        df = streams[(sym, tf)]
-        best_cfg = None
-        best_pnl = -float("inf")
-        best_trades = 0
-
-        for cfg in candidates:
-            net_pnl, trades = _score_config_for_stream(df, sym, tf, cfg)
-            completed += 1
-            progress = (completed / total_jobs) * 100
+    with Pool(processes=cpu_count()) as pool:
+        for sym, tf, best_cfg, best_pnl, best_trades in pool.imap_unordered(
+            _find_best_config_for_pair, tasks
+        ):
+            completed += len(candidates)
+            progress = (completed / total_jobs) * 100 if total_jobs else 100
             if progress >= next_progress:
                 log(f"[OPT] %{progress:.1f} tamamlandı...")
                 next_progress += 5
 
-            if trades == 0:
-                continue
-
-            if net_pnl > best_pnl:
-                best_pnl = net_pnl
-                best_cfg = cfg
-                best_trades = trades
-
-        if best_cfg:
-            best_by_pair[(sym, tf)] = {**best_cfg, "_net_pnl": best_pnl, "_trades": best_trades}
-            log(
-                f"[OPT][{sym}-{tf}] En iyi ayar: RR={best_cfg['rr']}, RSI={best_cfg['rsi']}, "
-                f"Slope={best_cfg['slope']}, AT={'Açık' if best_cfg['at_active'] else 'Kapalı'} | "
-                f"Net PnL={best_pnl:.2f}, Trades={best_trades}"
-            )
-        else:
-            log(f"[OPT][{sym}-{tf}] Uygun ayar bulunamadı (yetersiz trade)")
+            if best_cfg:
+                best_by_pair[(sym, tf)] = {**best_cfg, "_net_pnl": best_pnl, "_trades": best_trades}
+                log(
+                    f"[OPT][{sym}-{tf}] En iyi ayar: RR={best_cfg['rr']}, RSI={best_cfg['rsi']}, "
+                    f"Slope={best_cfg['slope']}, AT={'Açık' if best_cfg['at_active'] else 'Kapalı'} | "
+                    f"Net PnL={best_pnl:.2f}, Trades={best_trades}"
+                )
+            else:
+                log(f"[OPT][{sym}-{tf}] Uygun ayar bulunamadı (yetersiz trade)")
 
     log("[OPT] Tarama tamamlandı. Bulunan ayarlar backtest'e uygulanacak.")
     return best_by_pair
@@ -4103,7 +4243,7 @@ def run_portfolio_backtest(
     draw_trades: bool = True,
     max_draw_trades: Optional[int] = None,
 ):
-    allowed_log_categories = {"progress", "potential", "summary"}
+    allowed_log_categories = {"progress", "summary"}
 
     def log(msg: str, category: str = None):
         if category not in allowed_log_categories:
@@ -4112,8 +4252,6 @@ def run_portfolio_backtest(
             progress_callback(msg)
         print(msg)
 
-    accepted_signals_raw = {}
-    opened_signals = {}
     # ---- HER ÇALIŞTIRMA ÖNCESİ CSV TEMİZLE ----
     if os.path.exists(out_trades_csv):
         os.remove(out_trades_csv)
@@ -4127,8 +4265,6 @@ def run_portfolio_backtest(
     - Trade geçmişini ve özetini CSV'ye yazar
     - Her sembol/timeframe için fiyat datasını da <symbol>_<tf>_prices.csv olarak kaydeder (plot için)
     """
-    import heapq
-
     limit_map = limit_map or {}
     requested_pairs = list(itertools.product(symbols, timeframes))
 
@@ -4138,20 +4274,16 @@ def run_portfolio_backtest(
 
         for sym in symbols:
             for tf in timeframes:
-                tf_candle_limit = active_limit_map.get(tf, target_candles)
-                if tf_candle_limit:
-                    tf_candle_limit = min(target_candles, tf_candle_limit)
-                else:
-                    tf_candle_limit = target_candles
+                _, _, df = _get_indicator_stream(
+                    sym,
+                    tf,
+                    target_candles,
+                    active_limit_map=active_limit_map,
+                    write_prices=write_prices,
+                )
 
-                df = TradingEngine.get_historical_data_pagination(sym, tf, total_candles=tf_candle_limit)
                 if df is None or df.empty or len(df) < 400:
                     continue
-
-                df = TradingEngine.calculate_indicators(df)
-
-                if write_prices:
-                    df.to_csv(f"{sym}_{tf}_prices.csv", index=False)
 
                 result[(sym, tf)] = df.reset_index(drop=True)
 
@@ -4171,150 +4303,30 @@ def run_portfolio_backtest(
         log_to_stdout=False,
     )
 
-    # Çoklu stream için zaman bazlı event kuyruğu
-    heap = []
-    ptr = {}
-    total_events = 0
+    sim_tasks = []
     for (sym, tf), df in streams.items():
-        warmup = 250
-        end = len(df) - 2
-        if end <= warmup:
-            continue
-        ptr[(sym, tf)] = warmup
-        total_events += max(0, end - warmup)
-        heapq.heappush(
-            heap,
-            (df.loc[warmup, "timestamp"] + _tf_to_timedelta(tf), sym, tf),
-        )
-
-    tm = SimTradeManager(initial_balance=TRADING_CONFIG["initial_balance"])
-    logged_cfg_pairs = set()
-    processed_events = 0
-    next_progress = 10
-
-    # Ana backtest döngüsü
-    while heap:
-        event_time, sym, tf = heapq.heappop(heap)
-        df = streams[(sym, tf)]
-        i = ptr[(sym, tf)]
-        if i >= len(df) - 1:
-            continue
-
-        row = df.iloc[i]
-
-        # Açık pozisyonları güncelle (PBEMA ile birlikte)
-        tm.update_trades(
-            sym,
-            tf,
-            candle_high=float(row["high"]),
-            candle_low=float(row["low"]),
-            candle_close=float(row["close"]),
-            candle_time_utc=row["timestamp"] + _tf_to_timedelta(tf),
-            pb_top=float(row.get("pb_ema_top", row["close"])),
-            pb_bot=float(row.get("pb_ema_bot", row["close"])),
-        )
-
-        # Bu sembol/timeframe için optimize edilmiş config
         config = best_configs.get((sym, tf)) or load_optimized_config(sym, tf)
-        if (sym, tf) not in logged_cfg_pairs:
-            logged_cfg_pairs.add((sym, tf))
-        rr, rsi, slope = config["rr"], config["rsi"], config["slope"]
-        use_at = config.get("at_active", False)
+        sim_tasks.append((sym, tf, df, config))
 
-        # Sinyal kontrolü (Base setup mantığı burada)
-        s_type, s_entry, s_tp, s_sl, s_reason = TradingEngine.check_signal_diagnostic(
-            df,
-            index=i,
-            min_rr=rr,
-            rsi_limit=rsi,
-            slope_thresh=slope,
-            use_alphatrend=use_at,
-            hold_n=config.get("hold_n"),
-            min_hold_frac=config.get("min_hold_frac"),
-            pb_touch_tolerance=config.get("pb_touch_tolerance"),
-            body_tolerance=config.get("body_tolerance"),
-            cloud_keltner_gap_min=config.get("cloud_keltner_gap_min"),
-            tp_min_dist_ratio=config.get("tp_min_dist_ratio"),
-            tp_max_dist_ratio=config.get("tp_max_dist_ratio"),
-            adx_min=config.get("adx_min"),
-        )
+    pair_results = []
+    total_pairs = len(sim_tasks)
+    next_progress = 20
 
-        if s_type and "ACCEPTED" in str(s_reason):
-            accepted_signals_raw[(sym, tf)] = accepted_signals_raw.get((sym, tf), 0) + 1
-            # Aynı sembol/timeframe için açık trade var mı?
-            has_open = any(
-                t["symbol"] == sym and t["timeframe"] == tf
-                for t in tm.open_trades
-            )
+    if total_pairs:
+        with Pool(processes=cpu_count()) as pool:
+            for idx, result in enumerate(pool.imap_unordered(_run_pair_backtest, sim_tasks), start=1):
+                pair_results.append(result)
+                progress = (idx / total_pairs) * 100
+                if progress >= next_progress:
+                    log(f"[BACKTEST] %{progress:.1f} tamamlandı...", category="progress")
+                    next_progress += 20
 
-            cooldown_active = tm.check_cooldown(sym, tf, event_time)
-            signal_ts_str = (event_time + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
+    all_history = []
 
-            if has_open:
-                log(
-                    f"[POT][{sym}-{tf}] {s_type} {signal_ts_str} reddedildi: açık pozisyon var.",
-                    category="potential",
-                )
-            elif cooldown_active:
-                log(
-                    f"[POT][{sym}-{tf}] {s_type} {signal_ts_str} reddedildi: cooldown aktif.",
-                    category="potential",
-                )
-            else:
-                next_row = df.iloc[i + 1]
-                entry_open = float(next_row["open"])
-                open_ts = next_row["timestamp"]
-                ts_str = (open_ts + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
+    for res in pair_results:
+        all_history.extend(res.get("history", []))
 
-                # Setup tag (ör: Base), reason string içinden çekiliyor
-                setup_tag = "Unknown"
-                s_reason_str = str(s_reason)
-                if "ACCEPTED" in s_reason_str and "(" in s_reason_str and ")" in s_reason_str:
-                    setup_tag = s_reason_str[s_reason_str.find("(") + 1 : s_reason_str.find(")")]
-
-                log(
-                    f"[POT][{sym}-{tf}] {s_type} {signal_ts_str} kabul edildi (setup={setup_tag}).",
-                    category="potential",
-                )
-
-                tm.open_trade(
-                    {
-                        "symbol": sym,
-                        "timeframe": tf,
-                        "type": s_type,
-                        "entry": entry_open,
-                        "tp": float(s_tp),
-                        "sl": float(s_sl),
-                        "setup": setup_tag,
-                        "timestamp": ts_str,
-                        "open_time_utc": open_ts,
-                    }
-                )
-                opened_signals[(sym, tf)] = opened_signals.get((sym, tf), 0) + 1
-
-        # Sonraki bara ilerle
-        i2 = i + 1
-        ptr[(sym, tf)] = i2
-        if i2 < len(df) - 1:
-            heapq.heappush(
-                heap,
-                (df.loc[i2, "timestamp"] + _tf_to_timedelta(tf), sym, tf),
-            )
-
-        # Progress log
-        processed_events += 1
-        if total_events > 0:
-            progress = (processed_events / total_events) * 100
-            if progress >= next_progress:
-                log(f"[BACKTEST] %{progress:.1f} tamamlandı...", category="progress")
-                next_progress += 10
-    total_closed_legs = len(tm.history)
-    unique_trades = len({t.get("id") for t in tm.history}) if tm.history else 0
-    partial_legs = sum(1 for t in tm.history if "PARTIAL" in str(t.get("status", "")))
-    full_exits = total_closed_legs - partial_legs
-
-    # Tüm history'den DataFrame oluştur ve CSV / özet yaz
-    trades_df = pd.DataFrame(tm.history)
+    trades_df = pd.DataFrame(all_history)
     if not trades_df.empty:
         trades_df.to_csv(out_trades_csv, index=False)
 
@@ -4382,8 +4394,11 @@ def run_portfolio_backtest(
                 category="summary",
             )
 
+    total_pnl = float(trades_df["pnl"].astype(float).sum()) if not trades_df.empty else 0.0
+    sim_wallet = TRADING_CONFIG.get("initial_balance", 0.0) + total_pnl
+
     log(
-        f"Final Wallet (sim): ${tm.wallet_balance:.2f} | Total PnL: ${tm.total_pnl:.2f}",
+        f"Final Wallet (sim): ${sim_wallet:.2f} | Total PnL: ${total_pnl:.2f}",
         category="summary",
     )
 
