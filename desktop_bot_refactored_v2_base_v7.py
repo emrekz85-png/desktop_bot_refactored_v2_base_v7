@@ -524,8 +524,6 @@ def _optimize_backtest_configs(
 def _is_best_config_signature_valid(best_cfgs: dict) -> bool:
     """Ensure cached best configs belong to the current strategy signature."""
 
-    global BEST_CONFIG_WARNING_FLAGS
-
     if not isinstance(best_cfgs, dict):
         return False
 
@@ -533,21 +531,15 @@ def _is_best_config_signature_valid(best_cfgs: dict) -> bool:
     stored_sig = meta.get("strategy_signature")
     if not stored_sig:
         # Eski kayıtlar imzasız olabilir; uyumsuzluk riskini azaltmak için uyarı ver.
-        if not BEST_CONFIG_WARNING_FLAGS["missing_signature"]:
-            print(
-                "[CFG] Uyarı: Kaydedilmiş backtest imzası bulunamadı. En iyi ayarlar göz ardı edilecek."
-            )
-            BEST_CONFIG_WARNING_FLAGS["missing_signature"] = True
+        print("[CFG] Uyarı: Kaydedilmiş backtest imzası bulunamadı. En iyi ayarlar göz ardı edilecek.")
         return False
 
     current_sig = _strategy_signature()
     if stored_sig != current_sig:
-        if not BEST_CONFIG_WARNING_FLAGS["signature_mismatch"]:
-            print(
-                "[CFG] Uyarı: Backtest ayar imzası mevcut stratejiyle eşleşmiyor. "
-                "Canlı trade için varsayılan ayarlar kullanılacak; lütfen backtesti yeniden çalıştırın."
-            )
-            BEST_CONFIG_WARNING_FLAGS["signature_mismatch"] = True
+        print(
+            "[CFG] Uyarı: Backtest ayar imzası mevcut stratejiyle eşleşmiyor. "
+            "Canlı trade için varsayılan ayarlar kullanılacak; lütfen backtesti yeniden çalıştırın."
+        )
         return False
 
     return True
