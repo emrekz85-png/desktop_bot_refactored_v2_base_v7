@@ -4034,6 +4034,14 @@ class SimTradeManager:
         if self.check_cooldown(sym, tf, cooldown_ref_time):
             return
 
+        # Aynı sembol ve timeframe için halihazırda açık bir pozisyon varsa
+        # yeni trade'i reddet (üst katmanda kontrol kaçsa bile güvenlik katmanı).
+        if any(
+            t.get("symbol") == sym and t.get("timeframe") == tf
+            for t in self.open_trades
+        ):
+            return
+
         setup_type = trade_data.get("setup", "Unknown")
 
         if self.wallet_balance < 10:
