@@ -73,6 +73,10 @@ DAILY_REPORT_CANDLE_LIMITS = {
 }
 BEST_CONFIGS_FILE = "best_configs.json"
 BEST_CONFIG_CACHE = {}
+BEST_CONFIG_WARNING_FLAGS = {
+    "missing_signature": False,
+    "signature_mismatch": False,
+}
 BACKTEST_META_FILE = "backtest_meta.json"
 # Çökme veya kapanma durumlarında otomatik yeniden başlatma gecikmesi (saniye)
 AUTO_RESTART_DELAY_SECONDS = 5
@@ -596,7 +600,7 @@ def load_optimized_config(symbol, timeframe):
 def save_best_configs(best_configs: dict):
     """Persist best backtest configs to disk and cache for live bot usage."""
 
-    global BEST_CONFIG_CACHE
+    global BEST_CONFIG_CACHE, BEST_CONFIG_WARNING_FLAGS
     cleaned = {}
     for (key, cfg) in best_configs.items():
         # key can be tuple (sym, tf) or nested dict
@@ -614,6 +618,10 @@ def save_best_configs(best_configs: dict):
     }
 
     BEST_CONFIG_CACHE = cleaned
+    BEST_CONFIG_WARNING_FLAGS = {
+        "missing_signature": False,
+        "signature_mismatch": False,
+    }
     try:
         with open(BEST_CONFIGS_FILE, "w", encoding="utf-8") as f:
             json.dump(cleaned, f, ensure_ascii=False, indent=2)
