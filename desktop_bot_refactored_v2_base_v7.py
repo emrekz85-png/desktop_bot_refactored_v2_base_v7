@@ -1619,9 +1619,10 @@ class TradingEngine:
         - Keltner bandı ile PBEMA TP hedefi arasında minimum mesafe
         - TP çok yakın / çok uzak değil
         - RR >= min_rr   (RR = reward / risk)
-        - ***Trend filtresi (hafif):***
-              * Güçlü uptrend + fiyat PBEMA üstünde => SHORT yasak
-              * Güçlü downtrend + fiyat PBEMA altında => LONG yasak
+
+        Not: Bu kurgu trend-takip eden değil, PBEMA bulutunu mıknatıs gibi
+        kullanan mean reversion yaklaşımıdır; Keltner dokunuşları hem üstten
+        SHORT hem alttan LONG için tetikleyici olabilir.
         """
 
         debug_info = {
@@ -1706,30 +1707,17 @@ class TradingEngine:
         pb_top = float(curr["pb_ema_top"])
         pb_bot = float(curr["pb_ema_bot"])
 
-        # --- Hafif trend filtresi (yalnızca aşırı ters işlemleri keser) ---
+        # --- Mean reversion: yön kısıtı yok ---
         slope_top = float(curr.get("slope_top", 0.0) or 0.0)
         slope_bot = float(curr.get("slope_bot", 0.0) or 0.0)
         slope_thresh = slope_thresh or 0.0
 
-        # güçlü yukarı trend ve fiyat PBEMA bulutunun ÜSTÜNDE ise => short yasak
-        trend_up_strong = (
-                slope_top > slope_thresh and
-                pb_top >= pb_bot and
-                close > pb_top
-        )
+        # Slope bilgisi yalnızca debug amaçlı tutuluyor; yön kısıtı uygulanmıyor.
+        debug_info["trend_up_strong"] = slope_top > slope_thresh and pb_top >= pb_bot and close > pb_top
+        debug_info["trend_down_strong"] = slope_bot < -slope_thresh and pb_bot <= pb_top and close < pb_bot
 
-        # güçlü aşağı trend ve fiyat PBEMA bulutunun ALTINDA ise => long yasak
-        trend_down_strong = (
-                slope_bot < -slope_thresh and
-                pb_bot <= pb_top and
-                close < pb_bot
-        )
-
-        debug_info["trend_up_strong"] = trend_up_strong
-        debug_info["trend_down_strong"] = trend_down_strong
-
-        long_direction_ok = not trend_down_strong
-        short_direction_ok = not trend_up_strong
+        long_direction_ok = True
+        short_direction_ok = True
 
         # ================= LONG =================
         holding_long = (closes_slice > lower_slice).mean() >= min_hold_frac
