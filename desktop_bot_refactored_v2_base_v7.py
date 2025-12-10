@@ -15,6 +15,7 @@ import requests
 import dateutil.parser
 import itertools
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timedelta
 import traceback
 import tempfile
@@ -450,28 +451,57 @@ def _optimize_backtest_configs(
         best_pnl = -float("inf")
         best_trades = 0
 
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(_score_config_for_stream, df, sym, tf, cfg): cfg
-                for cfg in candidates
-            }
+        def handle_result(cfg, net_pnl, trades):
+            nonlocal completed, next_progress, best_cfg, best_pnl, best_trades
 
-            for future in as_completed(futures):
-                cfg = futures[future]
-                net_pnl, trades = future.result()
-                completed += 1
-                progress = (completed / total_jobs) * 100
-                if progress >= next_progress:
-                    log(f"[OPT] %{progress:.1f} tamamlandı...")
-                    next_progress += 5
+            completed += 1
+            progress = (completed / total_jobs) * 100
+            if progress >= next_progress:
+                log(f"[OPT] %{progress:.1f} tamamlandı...")
+                next_progress += 5
 
-                if trades == 0:
+            if trades == 0:
+                return
+
+            if net_pnl > best_pnl:
+                best_pnl = net_pnl
+                best_cfg = cfg
+                best_trades = trades
+
+        try:
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(_score_config_for_stream, df, sym, tf, cfg): cfg
+                    for cfg in candidates
+                }
+
+                for future in as_completed(futures):
+                    cfg = futures[future]
+                    try:
+                        net_pnl, trades = future.result()
+                    except BrokenProcessPool:
+                        # Havuza ait iş parçacığı çöktüyse seri moda düş.
+                        raise
+                    except Exception as exc:
+                        log(f"[OPT][{sym}-{tf}] Skorlama hatası (cfg={cfg}): {exc}")
+                        continue
+
+                    handle_result(cfg, net_pnl, trades)
+
+        except BrokenProcessPool as exc:
+            log(
+                f"[OPT][{sym}-{tf}] Paralel işleme havuzu durdu (neden: {exc}). "
+                "Seri moda düşülüyor."
+            )
+
+            for cfg in candidates:
+                try:
+                    net_pnl, trades = _score_config_for_stream(df, sym, tf, cfg)
+                except Exception as exc:
+                    log(f"[OPT][{sym}-{tf}] Seri skorlama hatası (cfg={cfg}): {exc}")
                     continue
 
-                if net_pnl > best_pnl:
-                    best_pnl = net_pnl
-                    best_cfg = cfg
-                    best_trades = trades
+                handle_result(cfg, net_pnl, trades)
 
         if best_cfg:
             best_by_pair[(sym, tf)] = {**best_cfg, "_net_pnl": best_pnl, "_trades": best_trades}
