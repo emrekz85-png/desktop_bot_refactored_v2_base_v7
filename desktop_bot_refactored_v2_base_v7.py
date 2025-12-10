@@ -1160,7 +1160,14 @@ class TradeManager:
                 # Cooldown sadece gerçek STOP durumunda
                 if "STOP" in reason:
                     wait_minutes = 10 if tf == "1m" else (30 if tf == "5m" else 60)
-                    self.cooldowns[(symbol, tf)] = datetime.utcnow() + timedelta(minutes=wait_minutes)
+
+                    cooldown_base = candle_time_utc
+                    if isinstance(cooldown_base, pd.Timestamp):
+                        cooldown_base = cooldown_base.to_pydatetime()
+                    if getattr(cooldown_base, "tzinfo", None) is not None:
+                        cooldown_base = cooldown_base.replace(tzinfo=None)
+
+                    self.cooldowns[(symbol, tf)] = cooldown_base + timedelta(minutes=wait_minutes)
 
                 # BE statüsünü ayır
                 if trade.get("breakeven") and abs(final_net_pnl) < 1e-6 and "STOP" in reason:
@@ -4025,10 +4032,9 @@ class SimTradeManager:
         tf = trade_data["timeframe"]
         sym = trade_data["symbol"]
 
-        if (sym, tf) in self.cooldowns:
-            if datetime.utcnow() < self.cooldowns[(sym, tf)]:
-                return
-            del self.cooldowns[(sym, tf)]
+        cooldown_ref_time = trade_data.get("open_time_utc") or datetime.utcnow()
+        if self.check_cooldown(sym, tf, cooldown_ref_time):
+            return
 
         setup_type = trade_data.get("setup", "Unknown")
 
@@ -4327,7 +4333,14 @@ class SimTradeManager:
 
             if "STOP" in reason:
                 wait_minutes = 10 if tf == "1m" else (30 if tf == "5m" else 60)
-                self.cooldowns[(symbol, tf)] = datetime.utcnow() + timedelta(minutes=wait_minutes)
+
+                cooldown_base = candle_time_utc
+                if isinstance(cooldown_base, pd.Timestamp):
+                    cooldown_base = cooldown_base.to_pydatetime()
+                if getattr(cooldown_base, "tzinfo", None) is not None:
+                    cooldown_base = cooldown_base.replace(tzinfo=None)
+
+                self.cooldowns[(symbol, tf)] = cooldown_base + timedelta(minutes=wait_minutes)
 
             if trade.get("breakeven") and abs(final_net_pnl) < 1e-6 and "STOP" in reason:
                 reason = "BE"
