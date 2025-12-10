@@ -15,12 +15,14 @@ import requests
 import dateutil.parser
 import itertools
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timedelta
 import traceback
 import tempfile
 import shutil
 from typing import Tuple, Optional
 import matplotlib
+import hashlib
 
 # Matplotlib çizimlerini arka planda üretmek için GUI gerektirmeyen backend
 matplotlib.use("Agg")
@@ -214,6 +216,24 @@ DEFAULT_STRATEGY_CONFIG = {
 }
 
 PARTIAL_STOP_PROTECTION_TFS = {"5m", "15m", "1h"}
+
+
+def _strategy_signature() -> str:
+    """Create a deterministic fingerprint of the current strategy inputs.
+
+    The hash combines the live trading configuration, the default strategy
+    parameters and the symbol-specific overrides so that backtest results are
+    only consumed when they were produced with the exact same settings. This
+    helps keep live trading aligned with the simulated runs.
+    """
+
+    payload = {
+        "trading": TRADING_CONFIG,
+        "strategy": DEFAULT_STRATEGY_CONFIG,
+        "symbol_params": SYMBOL_PARAMS,
+    }
+    serialized = json.dumps(payload, sort_keys=True)
+    return hashlib.sha256(serialized.encode()).hexdigest()
 
 
 def _apply_1m_profit_lock(
@@ -431,28 +451,57 @@ def _optimize_backtest_configs(
         best_pnl = -float("inf")
         best_trades = 0
 
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(_score_config_for_stream, df, sym, tf, cfg): cfg
-                for cfg in candidates
-            }
+        def handle_result(cfg, net_pnl, trades):
+            nonlocal completed, next_progress, best_cfg, best_pnl, best_trades
 
-            for future in as_completed(futures):
-                cfg = futures[future]
-                net_pnl, trades = future.result()
-                completed += 1
-                progress = (completed / total_jobs) * 100
-                if progress >= next_progress:
-                    log(f"[OPT] %{progress:.1f} tamamlandı...")
-                    next_progress += 5
+            completed += 1
+            progress = (completed / total_jobs) * 100
+            if progress >= next_progress:
+                log(f"[OPT] %{progress:.1f} tamamlandı...")
+                next_progress += 5
 
-                if trades == 0:
+            if trades == 0:
+                return
+
+            if net_pnl > best_pnl:
+                best_pnl = net_pnl
+                best_cfg = cfg
+                best_trades = trades
+
+        try:
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                futures = {
+                    executor.submit(_score_config_for_stream, df, sym, tf, cfg): cfg
+                    for cfg in candidates
+                }
+
+                for future in as_completed(futures):
+                    cfg = futures[future]
+                    try:
+                        net_pnl, trades = future.result()
+                    except BrokenProcessPool:
+                        # Havuza ait iş parçacığı çöktüyse seri moda düş.
+                        raise
+                    except Exception as exc:
+                        log(f"[OPT][{sym}-{tf}] Skorlama hatası (cfg={cfg}): {exc}")
+                        continue
+
+                    handle_result(cfg, net_pnl, trades)
+
+        except BrokenProcessPool as exc:
+            log(
+                f"[OPT][{sym}-{tf}] Paralel işleme havuzu durdu (neden: {exc}). "
+                "Seri moda düşülüyor."
+            )
+
+            for cfg in candidates:
+                try:
+                    net_pnl, trades = _score_config_for_stream(df, sym, tf, cfg)
+                except Exception as exc:
+                    log(f"[OPT][{sym}-{tf}] Seri skorlama hatası (cfg={cfg}): {exc}")
                     continue
 
-                if net_pnl > best_pnl:
-                    best_pnl = net_pnl
-                    best_cfg = cfg
-                    best_trades = trades
+                handle_result(cfg, net_pnl, trades)
 
         if best_cfg:
             best_by_pair[(sym, tf)] = {**best_cfg, "_net_pnl": best_pnl, "_trades": best_trades}
@@ -466,6 +515,30 @@ def _optimize_backtest_configs(
 
     log("[OPT] Tarama tamamlandı. Bulunan ayarlar backtest'e uygulanacak.")
     return best_by_pair
+
+
+def _is_best_config_signature_valid(best_cfgs: dict) -> bool:
+    """Ensure cached best configs belong to the current strategy signature."""
+
+    if not isinstance(best_cfgs, dict):
+        return False
+
+    meta = best_cfgs.get("_meta", {}) if isinstance(best_cfgs.get("_meta"), dict) else {}
+    stored_sig = meta.get("strategy_signature")
+    if not stored_sig:
+        # Eski kayıtlar imzasız olabilir; uyumsuzluk riskini azaltmak için uyarı ver.
+        print("[CFG] Uyarı: Kaydedilmiş backtest imzası bulunamadı. En iyi ayarlar göz ardı edilecek.")
+        return False
+
+    current_sig = _strategy_signature()
+    if stored_sig != current_sig:
+        print(
+            "[CFG] Uyarı: Backtest ayar imzası mevcut stratejiyle eşleşmiyor. "
+            "Canlı trade için varsayılan ayarlar kullanılacak; lütfen backtesti yeniden çalıştırın."
+        )
+        return False
+
+    return True
 
 
 def load_optimized_config(symbol, timeframe):
@@ -502,10 +575,11 @@ def load_optimized_config(symbol, timeframe):
     }
 
     best_cfgs = _load_best_configs()
+    signature_ok = _is_best_config_signature_valid(best_cfgs)
     symbol_cfg = SYMBOL_PARAMS.get(symbol, {})
     tf_cfg = symbol_cfg.get(timeframe, {}) if isinstance(symbol_cfg, dict) else {}
 
-    if isinstance(best_cfgs, dict):
+    if isinstance(best_cfgs, dict) and signature_ok:
         sym_dict = best_cfgs.get(symbol, {}) if isinstance(best_cfgs.get(symbol), dict) else {}
         if isinstance(sym_dict, dict) and timeframe in sym_dict:
             tf_cfg = {**tf_cfg, **sym_dict.get(timeframe, {})}
@@ -533,6 +607,11 @@ def save_best_configs(best_configs: dict):
         elif isinstance(cfg, dict):
             # already nested
             cleaned[key] = cfg
+
+    cleaned["_meta"] = {
+        "strategy_signature": _strategy_signature(),
+        "saved_at": datetime.utcnow().isoformat() + "Z",
+    }
 
     BEST_CONFIG_CACHE = cleaned
     try:
@@ -3536,6 +3615,7 @@ class MainWindow(QMainWindow):
                 "finished_at": finished_at,
                 "summary": summary_rows,
                 "summary_csv": result.get("summary_csv"),
+                "strategy_signature": result.get("strategy_signature") or _strategy_signature(),
             }
             self.save_backtest_meta(meta)
             self.backtest_logs.append("📊 Özet tablo kaydedildi:")
@@ -4121,6 +4201,7 @@ def run_portfolio_backtest(
     max_draw_trades: Optional[int] = None,
 ):
     allowed_log_categories = {"progress", "potential", "summary"}
+    strategy_sig = _strategy_signature()
 
     def log(msg: str, category: str = None):
         if category not in allowed_log_categories:
@@ -4418,6 +4499,7 @@ def run_portfolio_backtest(
         "best_configs": best_configs,
         "trades_csv": out_trades_csv,
         "summary_csv": out_summary_csv,
+        "strategy_signature": strategy_sig,
     }
 
     if draw_trades:
