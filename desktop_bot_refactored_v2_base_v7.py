@@ -1940,17 +1940,14 @@ class TradingEngine:
                     tp = float(trade['tp']);
                     sl = float(trade['sl'])
 
-                    # Timestamp güvenli parse ve mum aralığı dahilinde mi kontrolü
-                    start_ts_raw = trade.get('timestamp', trade.get('time', ''))
+                    # Timestamp güvenli parse
+                    start_ts_str = trade.get('timestamp', trade.get('time', ''))
                     try:
-                        start_dt = dateutil.parser.parse(start_ts_raw)
-                        start_dt = pd.to_datetime(start_dt, utc=True)
-                        if pd.isna(start_dt) or start_dt < candle_start or start_dt > candle_end:
-                            continue
+                        # dateutil.parser kullanmak daha esnektir
+                        start_dt = dateutil.parser.parse(start_ts_str)
                         future_dt = start_dt + (time_diff * 20)
-                        start_ts_str = start_dt.strftime('%Y-%m-%d %H:%M')
                         future_ts_str = future_dt.strftime('%Y-%m-%d %H:%M')
-                    except Exception:
+                    except:
                         continue
 
                     is_active = trade in active_trades;
