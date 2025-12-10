@@ -304,6 +304,119 @@ def _apply_partial_stop_protection(trade: dict, tf: str, progress: float, t_type
     return False
 
 
+def _append_trade_event(trade: dict, event_type: str, event_time: datetime, price: Optional[float] = None):
+    """Append a serializable lifecycle event to the trade for plotting/logging parity."""
+
+    try:
+        events = trade.get("events", [])
+        if isinstance(events, str):
+            try:
+                events = json.loads(events)
+            except Exception:
+                events = []
+        if not isinstance(events, list):
+            events = []
+
+        events.append(
+            {
+                "type": event_type,
+                "time": (event_time or datetime.utcnow()).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "price": float(price) if price is not None else None,
+            }
+        )
+        trade["events"] = events
+    except Exception:
+        trade["events"] = trade.get("events", [])
+
+
+def _audit_trade_logic_parity() -> dict:
+    """Run a lightweight deterministic simulation on both managers to ensure parity."""
+
+    try:
+        symbol = "TESTCOIN"
+        tf = "5m"
+        seed_ts = datetime.utcnow()
+        trade_data = {
+            "symbol": symbol,
+            "timeframe": tf,
+            "type": "LONG",
+            "entry": 100.0,
+            "tp": 103.0,
+            "sl": 99.0,
+            "setup": "PARITY",
+            "timestamp": seed_ts.strftime("%Y-%m-%d %H:%M"),
+            "open_time_utc": seed_ts,
+        }
+
+        live_tm = TradeManager(persist=False, verbose=False)
+        sim_tm = SimTradeManager(initial_balance=TRADING_CONFIG["initial_balance"])
+
+        live_tm.open_trade(trade_data)
+        sim_tm.open_trade(trade_data)
+
+        candle_time = seed_ts
+        candles = [
+            {"high": 101.6, "low": 99.2, "close": 101.0},
+            {"high": 103.4, "low": 100.5, "close": 103.0},
+        ]
+
+        for c in candles:
+            candle_time += timedelta(minutes=5)
+            live_tm.update_trades(
+                symbol,
+                tf,
+                candle_high=c["high"],
+                candle_low=c["low"],
+                candle_close=c["close"],
+                candle_time_utc=candle_time,
+                pb_top=104.0,
+                pb_bot=102.5,
+            )
+            sim_tm.update_trades(
+                symbol,
+                tf,
+                candle_high=c["high"],
+                candle_low=c["low"],
+                candle_close=c["close"],
+                candle_time_utc=candle_time,
+                pb_top=104.0,
+                pb_bot=102.5,
+            )
+
+        live_hist = live_tm.history
+        sim_hist = sim_tm.history
+
+        def _normalize(hist):
+            result = []
+            for t in hist:
+                result.append(
+                    {
+                        "status": t.get("status"),
+                        "pnl": round(float(t.get("pnl", 0.0)), 6),
+                        "close_price": round(float(t.get("close_price", 0.0)), 6)
+                        if t.get("close_price") not in (None, "")
+                        else None,
+                    }
+                )
+            return result
+
+        parity_ok = (
+            len(live_hist) == len(sim_hist)
+            and _normalize(live_hist) == _normalize(sim_hist)
+            and abs(live_tm.wallet_balance - sim_tm.wallet_balance) < 1e-6
+        )
+
+        return {
+            "parity_ok": parity_ok,
+            "live_trades": _normalize(live_hist),
+            "sim_trades": _normalize(sim_hist),
+            "wallet_live": live_tm.wallet_balance,
+            "wallet_sim": sim_tm.wallet_balance,
+        }
+    except Exception as exc:
+        return {"parity_ok": False, "error": str(exc)}
+
+
 def _generate_candidate_configs():
     """Create a compact grid of configs to search for higher trade density."""
 
@@ -645,7 +758,10 @@ import threading  # Lock mekanizması için gerekli
 
 
 class TradeManager:
-    def __init__(self):
+    def __init__(self, persist: bool = True, verbose: bool = True):
+        self.persist = persist
+        self.verbose = verbose
+
         self.lock = threading.RLock()
         self.open_trades = []
         self.history = []
@@ -663,8 +779,10 @@ class TradeManager:
         self.max_portfolio_risk_pct = TRADING_CONFIG.get("max_portfolio_risk_pct", 0.03)
         # -----------------------------
 
-        self.load_trades()
-        print("✅ TRADE MANAGER BAŞLATILDI: Veriler Yüklendi 📂")
+        if self.persist:
+            self.load_trades()
+        if self.verbose:
+            print("✅ TRADE MANAGER BAŞLATILDI: Veriler Yüklendi 📂")
 
     def check_cooldown(self, symbol, timeframe, now_utc=None):
         """
@@ -800,7 +918,7 @@ class TradeManager:
                 "entry": real_entry,
                 "tp": float(signal_data["tp"]), "sl": sl_price,
                 "size": position_size, "margin": required_margin,
-                "notional": position_notional,
+                "notional": position_notional, "events": [],
                 "status": "OPEN", "pnl": 0.0,
                 "breakeven": False, "trailing_active": False, "partial_taken": False, "partial_price": None,
                 "has_cash": True, "close_time": "", "close_price": ""
@@ -901,17 +1019,19 @@ class TradeManager:
                 if in_profit and use_partial:
                     if (not self.open_trades[i].get("partial_taken")) and progress >= 0.50:
                         partial_size = size / 2.0
-                        if t_type == "LONG":
-                            partial_pnl = (float(fav_price) - entry) * partial_size
-                            partial_notional = abs(partial_size) * float(fav_price)
-                        else:
-                            partial_pnl = (entry - float(fav_price)) * partial_size
-                            partial_notional = abs(partial_size) * float(fav_price)
 
+                        if t_type == "LONG":
+                            partial_fill = float(fav_price) * (1 - self.slippage_pct)
+                            partial_pnl_percent = (partial_fill - entry) / entry
+                        else:
+                            partial_fill = float(fav_price) * (1 + self.slippage_pct)
+                            partial_pnl_percent = (entry - partial_fill) / entry
+
+                        partial_pnl = partial_pnl_percent * (entry * partial_size)
+                        partial_notional = abs(partial_size) * abs(partial_fill)
                         commission = partial_notional * TRADING_CONFIG["total_fee"]
                         net_partial_pnl = partial_pnl - commission
                         margin_release = initial_margin / 2.0
-                        partial_price = float(fav_price)
 
                         self.wallet_balance += margin_release + net_partial_pnl
                         self.locked_margin -= margin_release
@@ -923,29 +1043,34 @@ class TradeManager:
                         partial_record["pnl"] = net_partial_pnl
                         partial_record["status"] = "PARTIAL TP (50%)"
                         partial_record["close_time"] = (candle_time_utc + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
-                        partial_record["close_price"] = partial_price
+                        partial_record["close_price"] = float(partial_fill)
                         partial_record["pb_ema_top"] = pb_top
                         partial_record["pb_ema_bot"] = pb_bot
+                        partial_record["events"] = json.dumps(self.open_trades[i].get("events", []))
                         self.history.append(partial_record)
 
                         # Açık trade'i güncelle: yarı pozisyon kaldı, margin yarıya indi
                         self.open_trades[i]["size"] = partial_size
                         self.open_trades[i]["notional"] = partial_notional
                         self.open_trades[i]["margin"] = margin_release
-                        self.open_trades[i]["partial_price"] = partial_price
+                        self.open_trades[i]["partial_price"] = float(partial_fill)
                         self.open_trades[i]["partial_taken"] = True
+                        _append_trade_event(self.open_trades[i], "PARTIAL", candle_time_utc, partial_fill)
                         # Breakeven'e çek
                         self.open_trades[i]["sl"] = entry
                         self.open_trades[i]["breakeven"] = True
+                        _append_trade_event(self.open_trades[i], "BE_SET", candle_time_utc, entry)
                         trades_updated = True
 
                     elif (not trade.get("breakeven")) and progress >= 0.40:
                         self.open_trades[i]["sl"] = entry
                         self.open_trades[i]["breakeven"] = True
+                        _append_trade_event(self.open_trades[i], "BE_SET", candle_time_utc, entry)
                         trades_updated = True
 
                 # 1m için fiyat TP'ye çok yaklaşınca SL'i kâra çek
                 if _apply_1m_profit_lock(self.open_trades[i], tf, t_type, entry, dyn_tp, progress):
+                    _append_trade_event(self.open_trades[i], "PROFIT_LOCK", candle_time_utc, self.open_trades[i].get("sl"))
                     trades_updated = True
 
                 # ---------- TRAILING SL ----------
@@ -953,6 +1078,7 @@ class TradeManager:
                     if (not trade.get("breakeven")) and progress >= 0.40:
                         self.open_trades[i]["sl"] = entry
                         self.open_trades[i]["breakeven"] = True
+                        _append_trade_event(self.open_trades[i], "BE_SET", candle_time_utc, entry)
                         trades_updated = True
 
                     if progress >= 0.50:
@@ -963,16 +1089,19 @@ class TradeManager:
                             if new_sl > current_sl:
                                 self.open_trades[i]["sl"] = new_sl
                                 self.open_trades[i]["trailing_active"] = True
+                                _append_trade_event(self.open_trades[i], "TRAIL_SL", candle_time_utc, new_sl)
                                 trades_updated = True
                         else:
                             new_sl = close_price + trail_buffer
                             if new_sl < current_sl:
                                 self.open_trades[i]["sl"] = new_sl
                                 self.open_trades[i]["trailing_active"] = True
+                                _append_trade_event(self.open_trades[i], "TRAIL_SL", candle_time_utc, new_sl)
                                 trades_updated = True
 
                 # ---------- SL / TP KONTROLÜ ----------
                 if _apply_partial_stop_protection(self.open_trades[i], tf, progress, t_type):
+                    _append_trade_event(self.open_trades[i], "STOP_PROTECTION", candle_time_utc, self.open_trades[i].get("sl"))
                     trades_updated = True
 
                 sl = float(self.open_trades[i]["sl"])
@@ -1044,8 +1173,11 @@ class TradeManager:
                 trade["pb_ema_top"] = pb_top
                 trade["pb_ema_bot"] = pb_bot
 
-                self.history.append(trade)
-                just_closed_trades.append(trade)
+                serialized_trade = trade.copy()
+                serialized_trade["events"] = json.dumps(trade.get("events", []))
+
+                self.history.append(serialized_trade)
+                just_closed_trades.append(serialized_trade)
                 closed_indices.append(i)
                 trades_updated = True
 
@@ -1082,13 +1214,15 @@ class TradeManager:
                 self.open_trades[i]["pnl"] = gross_pnl
 
     def save_trades(self):
+        if not self.persist:
+            return
         with self.lock:
             try:
                 cols = [
                     "id", "symbol", "timestamp", "timeframe", "type", "setup", "entry", "tp", "sl", "size",
                     "margin", "notional",
                     "status", "pnl", "breakeven", "trailing_active", "partial_taken", "stop_protection", "has_cash",
-                    "close_time", "close_price"
+                    "close_time", "close_price", "events"
                 ]
 
                 if not self.open_trades and not self.history:
@@ -1097,7 +1231,8 @@ class TradeManager:
                     df_all = pd.concat([pd.DataFrame(self.open_trades), pd.DataFrame(self.history)], ignore_index=True)
 
                 for c in cols:
-                    if c not in df_all.columns: df_all[c] = ""
+                    if c not in df_all.columns:
+                        df_all[c] = ""
 
                 # ATOMIC WRITE
                 fd, tmp_path = tempfile.mkstemp(prefix="trades_temp_", suffix=".csv", dir=".")
@@ -1114,6 +1249,8 @@ class TradeManager:
                     f.write(traceback.format_exc())
 
     def load_trades(self):
+        if not self.persist:
+            return
         with self.lock:
             self.wallet_balance = TRADING_CONFIG["initial_balance"]
             self.locked_margin = 0.0
@@ -1121,7 +1258,8 @@ class TradeManager:
 
             if os.path.exists(CSV_FILE):
                 try:
-                    if os.path.getsize(CSV_FILE) == 0: return
+                    if os.path.getsize(CSV_FILE) == 0:
+                        return
                     df = pd.read_csv(CSV_FILE)
                     if "symbol" in df.columns:
                         self.open_trades = df[df["status"].astype(str).str.contains("OPEN")].to_dict('records')
@@ -1138,17 +1276,24 @@ class TradeManager:
                                     trade['notional'] = float(trade.get('entry', 0)) * float(trade.get('size', 0))
                                 except Exception:
                                     trade['notional'] = 0.0
+                            events_val = trade.get("events")
+                            if isinstance(events_val, str):
+                                try:
+                                    trade["events"] = json.loads(events_val)
+                                except Exception:
+                                    trade["events"] = []
                             self.locked_margin += m
                             open_pnl += float(trade.get('pnl', 0.0))
 
                         # Kullanılabilir bakiye = başlangıç + kapalı işlemlerden net PnL - kilitli marj
                         self.wallet_balance = TRADING_CONFIG["initial_balance"] + self.total_pnl - self.locked_margin
                         total_equity = self.wallet_balance + self.locked_margin + open_pnl
-                        print(
-                            "📂 Veriler Yüklendi. "
-                            f"Toplam Varlık (Equity): ${total_equity:.2f} | "
-                            f"Kullanılabilir Bakiye: ${self.wallet_balance:.2f} | "
-                            f"Kilitli Marj: ${self.locked_margin:.2f}")
+                        if self.verbose:
+                            print(
+                                "📂 Veriler Yüklendi. "
+                                f"Toplam Varlık (Equity): ${total_equity:.2f} | "
+                                f"Kullanılabilir Bakiye: ${self.wallet_balance:.2f} | "
+                                f"Kilitli Marj: ${self.locked_margin:.2f}")
 
                 except Exception as e:
                     print(f"YÜKLEME HATASI: {e}")
@@ -3635,6 +3780,12 @@ class MainWindow(QMainWindow):
             self.backtest_logs.append("📊 Özet tablo kaydedildi:")
             for line in self.format_backtest_summary_lines(meta):
                 self.backtest_logs.append(line)
+            parity = result.get("parity_report", {})
+            if parity:
+                icon = "✅" if parity.get("parity_ok") else "⚠️"
+                self.backtest_logs.append(
+                    f"{icon} Parity kontrolü: sim ve canlı mantık {'eşleşiyor' if parity.get('parity_ok') else 'uyuşmuyor'}"
+                )
         else:
             self.backtest_logs.append("⚠️ Backtest sonucu bulunamadı.")
 
@@ -3959,6 +4110,7 @@ class SimTradeManager:
             "sl": sl_price,
             "size": position_size,
             "margin": required_margin,
+            "notional": position_notional,
             "status": "OPEN",
             "pnl": 0.0,
             "breakeven": False,
@@ -3968,6 +4120,7 @@ class SimTradeManager:
             "has_cash": True,
             "close_time": "",
             "close_price": "",
+            "events": [],
         }
 
         self.wallet_balance -= required_margin
@@ -4090,25 +4243,32 @@ class SimTradeManager:
                     partial_record["close_price"] = float(partial_fill)
                     partial_record["pb_ema_top"] = pb_top
                     partial_record["pb_ema_bot"] = pb_bot
+                    partial_record["events"] = json.dumps(trade.get("events", []))
                     self.history.append(partial_record)
 
                     self.open_trades[i]["size"] = partial_size
+                    self.open_trades[i]["notional"] = partial_notional
                     self.open_trades[i]["margin"] = margin_release
                     self.open_trades[i]["partial_taken"] = True
                     self.open_trades[i]["partial_price"] = float(partial_fill)
                     self.open_trades[i]["sl"] = entry
                     self.open_trades[i]["breakeven"] = True
+                    _append_trade_event(self.open_trades[i], "PARTIAL", candle_time_utc, partial_fill)
+                    _append_trade_event(self.open_trades[i], "BE_SET", candle_time_utc, entry)
 
                 elif (not trade.get("breakeven")) and progress >= 0.40:
                     self.open_trades[i]["sl"] = entry
                     self.open_trades[i]["breakeven"] = True
+                    _append_trade_event(self.open_trades[i], "BE_SET", candle_time_utc, entry)
 
-            _apply_1m_profit_lock(self.open_trades[i], tf, t_type, entry, dyn_tp, progress)
+            if _apply_1m_profit_lock(self.open_trades[i], tf, t_type, entry, dyn_tp, progress):
+                _append_trade_event(self.open_trades[i], "PROFIT_LOCK", candle_time_utc, self.open_trades[i].get("sl"))
 
             if in_profit and use_trailing:
                 if (not trade.get("breakeven")) and progress >= 0.40:
                     self.open_trades[i]["sl"] = entry
                     self.open_trades[i]["breakeven"] = True
+                    _append_trade_event(self.open_trades[i], "BE_SET", candle_time_utc, entry)
 
                 if progress >= 0.50:
                     trail_buffer = total_dist * 0.40
@@ -4118,13 +4278,16 @@ class SimTradeManager:
                         if new_sl > current_sl:
                             self.open_trades[i]["sl"] = new_sl
                             self.open_trades[i]["trailing_active"] = True
+                            _append_trade_event(self.open_trades[i], "TRAIL_SL", candle_time_utc, new_sl)
                     else:
                         new_sl = close_price + trail_buffer
                         if new_sl < current_sl:
                             self.open_trades[i]["sl"] = new_sl
                             self.open_trades[i]["trailing_active"] = True
+                            _append_trade_event(self.open_trades[i], "TRAIL_SL", candle_time_utc, new_sl)
 
-            _apply_partial_stop_protection(self.open_trades[i], tf, progress, t_type)
+            if _apply_partial_stop_protection(self.open_trades[i], tf, progress, t_type):
+                _append_trade_event(self.open_trades[i], "STOP_PROTECTION", candle_time_utc, self.open_trades[i].get("sl"))
 
             sl = float(self.open_trades[i]["sl"])
 
@@ -4192,6 +4355,8 @@ class SimTradeManager:
             trade["pb_ema_top"] = pb_top
             trade["pb_ema_bot"] = pb_bot
 
+            trade["events"] = json.dumps(trade.get("events", []))
+
             self.history.append(trade)
             just_closed_trades.append(trade)
             closed_indices.append(i)
@@ -4223,6 +4388,15 @@ def run_portfolio_backtest(
         if progress_callback:
             progress_callback(msg)
         print(msg)
+
+    parity_report = _audit_trade_logic_parity()
+    if parity_report:
+        status_icon = "✅" if parity_report.get("parity_ok") else "⚠️"
+        diff_text = "" if parity_report.get("parity_ok") else " (sim/real ayrımı tespit edildi)"
+        log(
+            f"{status_icon} TradeManager/SimTradeManager parity kontrolü tamamlandı{diff_text}.",
+            category="summary",
+        )
 
     accepted_signals_raw = {}
     opened_signals = {}
@@ -4514,6 +4688,7 @@ def run_portfolio_backtest(
         "trades_csv": out_trades_csv,
         "summary_csv": out_summary_csv,
         "strategy_signature": strategy_sig,
+        "parity_report": parity_report,
     }
 
     if draw_trades:
@@ -4572,6 +4747,10 @@ def plot_trade(
         "STOP_BOTH": {"color": "#ff9800", "marker": "v", "label": "SL/TP (Same Candle)"},
         "BE": {"color": "#90a4ae", "marker": "X", "label": "Breakeven"},
         "PARTIAL": {"color": "#00bcd4", "marker": "D", "label": "Partial"},
+        "EV_BE_SET": {"color": "#8d6e63", "marker": "|", "label": "SL BE/Taşındı"},
+        "EV_TRAIL_SL": {"color": "#ab47bc", "marker": "_", "label": "Trailing SL"},
+        "EV_PROFIT_LOCK": {"color": "#26c6da", "marker": "s", "label": "%80 Profit Lock"},
+        "EV_STOP_PROTECTION": {"color": "#ffb74d", "marker": "1", "label": "Koruma SL"},
         "OTHER": {"color": "#ab47bc", "marker": "o", "label": "Exit"},
     }
 
@@ -4606,6 +4785,16 @@ def plot_trade(
                     continue
         return None
 
+    def _parse_event_log(raw_val):
+        if isinstance(raw_val, str):
+            try:
+                return json.loads(raw_val)
+            except Exception:
+                return []
+        if isinstance(raw_val, list):
+            return raw_val
+        return []
+
     event_points = []
     for _, ev in trades_for_id.iterrows():
         status_val = str(ev.get("status", "")).strip()
@@ -4632,6 +4821,24 @@ def plot_trade(
                 "key": status_key,
             }
         )
+
+        for raw_ev in _parse_event_log(ev.get("events")):
+            try:
+                ev_type = str(raw_ev.get("type", "")).upper()
+                ev_key = f"EV_{ev_type}" if ev_type else "OTHER"
+                ev_time = pd.to_datetime(raw_ev.get("time"), utc=True, errors="coerce")
+                if pd.isna(ev_time):
+                    ev_time = None
+                event_points.append(
+                    {
+                        "time": ev_time,
+                        "price": raw_ev.get("price"),
+                        "status": ev_type,
+                        "key": ev_key if ev_key in status_palette else "OTHER",
+                    }
+                )
+            except Exception:
+                continue
 
     def _safe_dt_col(df: pd.DataFrame, col: str):
         if col in df.columns:
