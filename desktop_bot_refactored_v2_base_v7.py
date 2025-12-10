@@ -8,7 +8,6 @@ import ssl
 import base64
 import contextlib
 import threading
-from multiprocessing import Pool, cpu_count
 import pandas as pd
 import pandas_ta as ta
 import numpy as np
@@ -42,19 +41,36 @@ import plotly.utils
 # ⚙️ GENEL AYARLAR VE SABİTLER (MERKEZİ YÖNETİM)
 # ==========================================
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-TIMEFRAMES = ["1m", "5m", "15m", "1h"]
+LOWER_TIMEFRAMES = ["1m", "5m", "15m", "1h"]
+HTF_TIMEFRAMES = ["4h", "12h", "1d"]
+TIMEFRAMES = LOWER_TIMEFRAMES + HTF_TIMEFRAMES
 candles = 50000
 REFRESH_RATE = 3
 CSV_FILE = "trades.csv"
 CONFIG_FILE = "config.json"
 # Backtestler için maks. mum sayısı sınırları
-BACKTEST_CANDLE_LIMITS = {"1m": 4000, "5m": 4000, "15m": 4000, "1h": 4000}
+BACKTEST_CANDLE_LIMITS = {
+    "1m": 4000,
+    "5m": 4000,
+    "15m": 4000,
+    "1h": 4000,
+    "4h": 3000,
+    "12h": 2000,
+    "1d": 1500,
+}
 # Günlük raporlar için özel mum sayısı sınırı
-DAILY_REPORT_CANDLE_LIMITS = {"1m": 15000, "5m": 15000, "15m": 15000, "1h": 15000}
+DAILY_REPORT_CANDLE_LIMITS = {
+    "1m": 15000,
+    "5m": 15000,
+    "15m": 15000,
+    "1h": 15000,
+    "4h": 8000,
+    "12h": 5000,
+    "1d": 4000,
+}
 BEST_CONFIGS_FILE = "best_configs.json"
 BEST_CONFIG_CACHE = {}
 BACKTEST_META_FILE = "backtest_meta.json"
-INDICATOR_CACHE = {}
 # Çökme veya kapanma durumlarında otomatik yeniden başlatma gecikmesi (saniye)
 AUTO_RESTART_DELAY_SECONDS = 5
 
@@ -87,6 +103,9 @@ SYMBOL_PARAMS = {
         # 4h: AlphaTrend KAPALI (Saf Trend) (16.53 R)
         "4h": {"rr": 2.0, "rsi": 30, "slope": 0.3, "at_active": False, "use_trailing": False},
 
+        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
+        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
+
         # Ara dönemler (1h fena değil, eklendi)
         "15m": {"rr": 1.8, "rsi": 55, "slope": 0.6, "at_active": False, "use_trailing": False},
         "1h": {"rr": 1.8, "rsi": 45, "slope": 0.8, "at_active": True, "use_trailing": False}
@@ -102,7 +121,9 @@ SYMBOL_PARAMS = {
         "15m": {"rr": 3.0, "rsi": 40, "slope": 0.9, "at_active": True, "use_trailing": False},
 
         "1h": {"rr": 3.0, "rsi": 30, "slope": 0.3, "at_active": True, "use_trailing": False},
-        "4h": {"rr": 3.0, "rsi": 30, "slope": 0.3, "at_active": True, "use_trailing": False}
+        "4h": {"rr": 3.0, "rsi": 30, "slope": 0.3, "at_active": True, "use_trailing": False},
+        "12h": {"rr": 3.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False},
+        "1d": {"rr": 3.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False}
     },
     "SOLUSDT": {
         # 1m: Zayıf (7.14 R). Pasif kalabilir.
@@ -115,7 +136,9 @@ SYMBOL_PARAMS = {
         "1h": {"rr": 3.0, "rsi": 40, "slope": 0.9, "at_active": True, "use_trailing": False},
 
         "15m": {"rr": 3.0, "rsi": 30, "slope": 0.3, "at_active": True, "use_trailing": False},
-        "4h": {"rr": 3.0, "rsi": 30, "slope": 0.3, "at_active": True, "use_trailing": False}
+        "4h": {"rr": 3.0, "rsi": 30, "slope": 0.3, "at_active": True, "use_trailing": False},
+        "12h": {"rr": 3.0, "rsi": 35, "slope": 0.4, "at_active": True, "use_trailing": False},
+        "1d": {"rr": 3.0, "rsi": 35, "slope": 0.4, "at_active": True, "use_trailing": False}
     }
 }
 
@@ -246,9 +269,11 @@ def _apply_partial_stop_protection(trade: dict, tf: str, progress: float, t_type
 
     if t_type == "LONG" and p_price > current_sl:
         trade["sl"] = p_price
+        trade["stop_protection"] = True
         return True
     if t_type == "SHORT" and p_price < current_sl:
         trade["sl"] = p_price
+        trade["stop_protection"] = True
         return True
 
     return False
@@ -257,10 +282,10 @@ def _apply_partial_stop_protection(trade: dict, tf: str, progress: float, t_type
 def _generate_candidate_configs():
     """Create a compact grid of configs to search for higher trade density."""
 
-    rr_vals = [1.2, 1.6, 2.0]
-    rsi_vals = [30, 35, 40, 45]
-    slope_vals = [0.4, 0.6]
-    at_vals = [False]
+    rr_vals = np.arange(1.2, 2.6, 0.3)
+    rsi_vals = np.arange(35, 76, 10)
+    slope_vals = np.arange(0.2, 0.9, 0.2)
+    at_vals = [False, True]
 
     candidates = []
     for rr, rsi, slope, at_active in itertools.product(rr_vals, rsi_vals, slope_vals, at_vals):
@@ -275,48 +300,14 @@ def _generate_candidate_configs():
             }
         )
 
-    return candidates
+    # Birkaç agresif trailing seçeneği ekle
+    trailing_extras = []
+    for base in candidates[:: max(1, len(candidates) // 20)]:  # toplamı şişirmeden örnekle
+        cfg = dict(base)
+        cfg["use_trailing"] = True
+        trailing_extras.append(cfg)
 
-
-def _get_indicator_stream(
-    symbol: str,
-    timeframe: str,
-    target_candles: int,
-    active_limit_map: Optional[dict],
-    write_prices: bool = False,
-):
-    cache_key = (symbol, timeframe)
-    active_limit_map = active_limit_map or {}
-
-    tf_candle_limit = active_limit_map.get(timeframe, target_candles)
-    if tf_candle_limit:
-        tf_candle_limit = min(target_candles, tf_candle_limit)
-    else:
-        tf_candle_limit = target_candles
-
-    cached = INDICATOR_CACHE.get(cache_key)
-    if cached:
-        cached_df = cached.get("df")
-        if cached_df is not None and len(cached_df) >= tf_candle_limit:
-            df_out = cached_df.tail(tf_candle_limit).reset_index(drop=True)
-            if write_prices:
-                df_out.to_csv(f"{symbol}_{timeframe}_prices.csv", index=False)
-            return symbol, timeframe, df_out
-
-    df = TradingEngine.get_historical_data_pagination(symbol, timeframe, total_candles=tf_candle_limit)
-    if df is None or df.empty or len(df) < 400:
-        return symbol, timeframe, None
-
-    df = TradingEngine.calculate_indicators(df)
-    df = df.reset_index(drop=True)
-
-    INDICATOR_CACHE[cache_key] = {"df": df}
-
-    df_out = df.tail(tf_candle_limit).reset_index(drop=True)
-    if write_prices:
-        df_out.to_csv(f"{symbol}_{timeframe}_prices.csv", index=False)
-
-    return symbol, timeframe, df_out
+    return candidates + trailing_extras
 
 
 def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) -> Tuple[float, int]:
@@ -401,119 +392,6 @@ def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) 
     return tm.total_pnl, unique_trades
 
 
-def _find_best_config_for_pair(args):
-    sym, tf, df, candidates = args
-
-    best_cfg = None
-    best_pnl = -float("inf")
-    best_trades = 0
-
-    for cfg in candidates:
-        net_pnl, trades = _score_config_for_stream(df, sym, tf, cfg)
-        if trades == 0:
-            continue
-        if net_pnl > best_pnl:
-            best_pnl = net_pnl
-            best_cfg = cfg
-            best_trades = trades
-
-    return sym, tf, best_cfg, best_pnl, best_trades
-
-
-def _run_pair_backtest(args):
-    sym, tf, df, config = args
-
-    tm = SimTradeManager(initial_balance=TRADING_CONFIG["initial_balance"])
-    warmup = 250
-    end = len(df) - 2
-
-    if end <= warmup:
-        return {"pair": (sym, tf), "history": [], "summary": None, "events": 0}
-
-    for i in range(warmup, end):
-        row = df.iloc[i]
-        event_time = row["timestamp"] + _tf_to_timedelta(tf)
-
-        tm.update_trades(
-            sym,
-            tf,
-            candle_high=float(row["high"]),
-            candle_low=float(row["low"]),
-            candle_close=float(row["close"]),
-            candle_time_utc=event_time,
-            pb_top=float(row.get("pb_ema_top", row["close"])),
-            pb_bot=float(row.get("pb_ema_bot", row["close"])),
-        )
-
-        s_type, s_entry, s_tp, s_sl, s_reason = TradingEngine.check_signal_diagnostic(
-            df,
-            index=i,
-            min_rr=config.get("rr"),
-            rsi_limit=config.get("rsi"),
-            slope_thresh=config.get("slope"),
-            use_alphatrend=config.get("at_active", False),
-            hold_n=config.get("hold_n"),
-            min_hold_frac=config.get("min_hold_frac"),
-            pb_touch_tolerance=config.get("pb_touch_tolerance"),
-            body_tolerance=config.get("body_tolerance"),
-            cloud_keltner_gap_min=config.get("cloud_keltner_gap_min"),
-            tp_min_dist_ratio=config.get("tp_min_dist_ratio"),
-            tp_max_dist_ratio=config.get("tp_max_dist_ratio"),
-            adx_min=config.get("adx_min"),
-        )
-
-        if not (s_type and "ACCEPTED" in str(s_reason)):
-            continue
-
-        has_open = any(
-            t.get("symbol") == sym and t.get("timeframe") == tf for t in tm.open_trades
-        )
-
-        if has_open or tm.check_cooldown(sym, tf, event_time):
-            continue
-
-        next_row = df.iloc[i + 1]
-        entry_open = float(next_row["open"])
-        open_ts = next_row["timestamp"]
-        ts_str = (open_ts + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
-
-        tm.open_trade(
-            {
-                "symbol": sym,
-                "timeframe": tf,
-                "type": s_type,
-                "setup": str(s_reason),
-                "entry": entry_open,
-                "tp": float(s_tp),
-                "sl": float(s_sl),
-                "timestamp": ts_str,
-                "open_time_utc": open_ts,
-                "use_trailing": config.get("use_trailing", False),
-                "use_dynamic_pbema_tp": config.get("use_dynamic_pbema_tp", False),
-            }
-        )
-
-    history = tm.history
-
-    summary_row = None
-    trades_df = pd.DataFrame(history)
-    if not trades_df.empty:
-        pnl_list = trades_df.groupby(["symbol", "timeframe", "id"])["pnl"].sum().tolist()
-        total = len(pnl_list)
-        wins = sum(1 for x in pnl_list if x > 0)
-        pnl = sum(pnl_list)
-        wr = (wins / total * 100.0) if total else 0.0
-        summary_row = {
-            "symbol": sym,
-            "timeframe": tf,
-            "trades": total,
-            "win_rate_pct": wr,
-            "net_pnl": pnl,
-        }
-
-    return {"pair": (sym, tf), "history": history, "summary": summary_row, "events": max(0, end - warmup)}
-
-
 def _optimize_backtest_configs(
     streams: dict,
     requested_pairs: list,
@@ -539,31 +417,40 @@ def _optimize_backtest_configs(
 
     log(f"[OPT] {len(candidates)} farklı ayar taranacak (her zaman dilimi için).")
 
-    tasks = []
     for sym, tf in requested_pairs:
         if (sym, tf) not in streams:
             continue
-        tasks.append((sym, tf, streams[(sym, tf)], candidates))
 
-    with Pool(processes=cpu_count()) as pool:
-        for sym, tf, best_cfg, best_pnl, best_trades in pool.imap_unordered(
-            _find_best_config_for_pair, tasks
-        ):
-            completed += len(candidates)
-            progress = (completed / total_jobs) * 100 if total_jobs else 100
+        df = streams[(sym, tf)]
+        best_cfg = None
+        best_pnl = -float("inf")
+        best_trades = 0
+
+        for cfg in candidates:
+            net_pnl, trades = _score_config_for_stream(df, sym, tf, cfg)
+            completed += 1
+            progress = (completed / total_jobs) * 100
             if progress >= next_progress:
                 log(f"[OPT] %{progress:.1f} tamamlandı...")
                 next_progress += 5
 
-            if best_cfg:
-                best_by_pair[(sym, tf)] = {**best_cfg, "_net_pnl": best_pnl, "_trades": best_trades}
-                log(
-                    f"[OPT][{sym}-{tf}] En iyi ayar: RR={best_cfg['rr']}, RSI={best_cfg['rsi']}, "
-                    f"Slope={best_cfg['slope']}, AT={'Açık' if best_cfg['at_active'] else 'Kapalı'} | "
-                    f"Net PnL={best_pnl:.2f}, Trades={best_trades}"
-                )
-            else:
-                log(f"[OPT][{sym}-{tf}] Uygun ayar bulunamadı (yetersiz trade)")
+            if trades == 0:
+                continue
+
+            if net_pnl > best_pnl:
+                best_pnl = net_pnl
+                best_cfg = cfg
+                best_trades = trades
+
+        if best_cfg:
+            best_by_pair[(sym, tf)] = {**best_cfg, "_net_pnl": best_pnl, "_trades": best_trades}
+            log(
+                f"[OPT][{sym}-{tf}] En iyi ayar: RR={best_cfg['rr']}, RSI={best_cfg['rsi']}, "
+                f"Slope={best_cfg['slope']}, AT={'Açık' if best_cfg['at_active'] else 'Kapalı'} | "
+                f"Net PnL={best_pnl:.2f}, Trades={best_trades}"
+            )
+        else:
+            log(f"[OPT][{sym}-{tf}] Uygun ayar bulunamadı (yetersiz trade)")
 
     log("[OPT] Tarama tamamlandı. Bulunan ayarlar backtest'e uygulanacak.")
     return best_by_pair
@@ -808,6 +695,7 @@ class TradeManager:
                 "entry": real_entry,
                 "tp": float(signal_data["tp"]), "sl": sl_price,
                 "size": position_size, "margin": required_margin,
+                "notional": position_notional,
                 "status": "OPEN", "pnl": 0.0,
                 "breakeven": False, "trailing_active": False, "partial_taken": False, "partial_price": None,
                 "has_cash": True, "close_time": "", "close_price": ""
@@ -926,6 +814,7 @@ class TradeManager:
 
                         partial_record = trade.copy()
                         partial_record["size"] = partial_size
+                        partial_record["notional"] = partial_notional
                         partial_record["pnl"] = net_partial_pnl
                         partial_record["status"] = "PARTIAL TP (50%)"
                         partial_record["close_time"] = (candle_time_utc + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
@@ -936,6 +825,7 @@ class TradeManager:
 
                         # Açık trade'i güncelle: yarı pozisyon kaldı, margin yarıya indi
                         self.open_trades[i]["size"] = partial_size
+                        self.open_trades[i]["notional"] = partial_notional
                         self.open_trades[i]["margin"] = margin_release
                         self.open_trades[i]["partial_price"] = partial_price
                         self.open_trades[i]["partial_taken"] = True
@@ -1089,10 +979,12 @@ class TradeManager:
     def save_trades(self):
         with self.lock:
             try:
-                cols = ["id", "symbol", "timestamp", "timeframe", "type", "setup", "entry", "tp", "sl", "size",
-                        "margin",
-                        "status", "pnl", "breakeven", "trailing_active", "partial_taken", "has_cash", "close_time",
-                        "close_price"]
+                cols = [
+                    "id", "symbol", "timestamp", "timeframe", "type", "setup", "entry", "tp", "sl", "size",
+                    "margin", "notional",
+                    "status", "pnl", "breakeven", "trailing_active", "partial_taken", "stop_protection", "has_cash",
+                    "close_time", "close_price"
+                ]
 
                 if not self.open_trades and not self.history:
                     df_all = pd.DataFrame(columns=cols)
@@ -1136,6 +1028,11 @@ class TradeManager:
                         open_pnl = 0.0
                         for trade in self.open_trades:
                             m = float(trade.get('margin', float(trade['size']) / TRADING_CONFIG["leverage"]))
+                            if not trade.get('notional'):
+                                try:
+                                    trade['notional'] = float(trade.get('entry', 0)) * float(trade.get('size', 0))
+                                except Exception:
+                                    trade['notional'] = 0.0
                             self.locked_margin += m
                             open_pnl += float(trade.get('pnl', 0.0))
 
@@ -1890,16 +1787,34 @@ class TradingEngine:
                 time_diff = plot_df['timestamp'].iloc[-1] - plot_df['timestamp'].iloc[-2]
                 past_trades = [t for t in trade_manager.history if
                                t['timeframe'] == interval and t['symbol'] == symbol][-5:]
-                all_trades_to_show = active_trades + past_trades
-                all_trades_to_show.sort(key=lambda x: x['id'])
+
+                def _trade_sort_key(trade: dict) -> float:
+                    tid = trade.get('id')
+                    if isinstance(tid, (int, float)):
+                        tid_val = float(tid)
+                        return tid_val / 1000 if tid_val > 1e12 else tid_val
+                    ts_val = trade.get('timestamp') or trade.get('time') or ''
+                    try:
+                        return dateutil.parser.parse(ts_val).timestamp()
+                    except Exception:
+                        return 0.0
+
+                # Aynı trade'i tekrar eklememek için ID/timestamp bazlı deduplikasyon
+                dedup = {}
+                for tr in active_trades + past_trades:
+                    key = tr.get('id') or tr.get('timestamp') or tr.get('time') or id(tr)
+                    dedup[key] = tr
+
+                all_trades_sorted = sorted(dedup.values(), key=_trade_sort_key)
+                all_trades_to_show = all_trades_sorted[-2:]  # Sadece en güncel 2 trade (açıklar dahil)
 
                 trades_with_visibility = []
                 for i, trade in enumerate(all_trades_to_show):
                     draw_box = True
                     if i < len(all_trades_to_show) - 1:
                         next_trade = all_trades_to_show[i + 1]
-                        time_diff_ms = next_trade['id'] - trade['id']
-                        time_diff_mins = time_diff_ms / 1000 / 60
+                        time_diff_secs = _trade_sort_key(next_trade) - _trade_sort_key(trade)
+                        time_diff_mins = time_diff_secs / 60
                         if time_diff_mins < (interval_mins * 15): draw_box = False
                     trades_with_visibility.append((trade, draw_box))
 
@@ -1909,14 +1824,17 @@ class TradingEngine:
                     tp = float(trade['tp']);
                     sl = float(trade['sl'])
 
-                    # Timestamp güvenli parse
-                    start_ts_str = trade.get('timestamp', trade.get('time', ''))
+                    # Timestamp güvenli parse ve mum aralığı dahilinde mi kontrolü
+                    start_ts_raw = trade.get('timestamp', trade.get('time', ''))
                     try:
-                        # dateutil.parser kullanmak daha esnektir
-                        start_dt = dateutil.parser.parse(start_ts_str)
+                        start_dt = dateutil.parser.parse(start_ts_raw)
+                        start_dt = pd.to_datetime(start_dt, utc=True)
+                        if pd.isna(start_dt) or start_dt < candle_start or start_dt > candle_end:
+                            continue
                         future_dt = start_dt + (time_diff * 20)
+                        start_ts_str = start_dt.strftime('%Y-%m-%d %H:%M')
                         future_ts_str = future_dt.strftime('%Y-%m-%d %H:%M')
-                    except:
+                    except Exception:
                         continue
 
                     is_active = trade in active_trades;
@@ -2408,7 +2326,8 @@ class LiveBotWorker(QThread):
 class OptimizerWorker(QThread):
     result_signal = pyqtSignal(str)
 
-    def __init__(self, symbol, candle_limit, rr_range, rsi_range, slope_range, use_alphatrend, monte_carlo_mode=False):
+    def __init__(self, symbol, candle_limit, rr_range, rsi_range, slope_range, use_alphatrend,
+                 monte_carlo_mode=False, timeframes=None):
         super().__init__()
         self.symbol = symbol
         self.candle_limit = candle_limit
@@ -2416,6 +2335,7 @@ class OptimizerWorker(QThread):
         self.rsi_range = rsi_range
         self.slope_range = slope_range
         self.monte_carlo_mode = monte_carlo_mode
+        self.timeframes = timeframes or list(TIMEFRAMES)
 
         # --- MERKEZİ AYARLARDAN OKUMA ---
         self.slippage_rate = TRADING_CONFIG["slippage_rate"]
@@ -2440,7 +2360,7 @@ class OptimizerWorker(QThread):
                     pass
 
             data_cache = {}
-            for tf in TIMEFRAMES:
+            for tf in self.timeframes:
                 self.result_signal.emit(f"⬇️ {tf} verisi hazırlanıyor...\n")
                 df = TradingEngine.get_historical_data_pagination(self.symbol, tf, total_candles=self.candle_limit)
 
@@ -2469,7 +2389,7 @@ class OptimizerWorker(QThread):
 
             combinations = list(itertools.product(rr_vals, rsi_vals, slope_vals, at_vals))
             total_combs = len(combinations)
-            results_by_tf = {tf: [] for tf in TIMEFRAMES}
+            results_by_tf = {tf: [] for tf in self.timeframes}
             TRAILING_ALLOWED_TFS = ["5m"]
 
             start_time = time.time()
@@ -2913,25 +2833,32 @@ class MainWindow(QMainWindow):
         top_panel.addWidget(settings_group, stretch=4)
         live_layout.addLayout(top_panel)
 
-        chart_container = QWidget();
-        grid_charts = QGridLayout(chart_container);
-        grid_charts.setContentsMargins(0, 0, 0, 0);
-        grid_charts.setSpacing(5)
         self.web_views = {}
-        positions = {"1m": (0, 0), "5m": (0, 1), "15m": (0, 2), "1h": (1, 0), "4h": (1, 1)}
-        for tf in TIMEFRAMES:
-            box = QGroupBox(f"{tf} Grafiği");
-            box.setStyleSheet("QGroupBox { border: 1px solid #333; font-weight: bold; color: #00ccff; }")
-            box_layout = QVBoxLayout(box);
-            box_layout.setContentsMargins(0, 15, 0, 0)
-            view = QWebEngineView();
-            view.setHtml(CHART_TEMPLATE)
-            view.loadFinished.connect(lambda ok, t=tf: self.on_load_finished(ok, t))
-            box_layout.addWidget(view);
-            self.web_views[tf] = view
-            r, c = positions[tf];
-            grid_charts.addWidget(box, r, c)
-        live_layout.addWidget(chart_container, stretch=6)
+        chart_tabs = QTabWidget()
+
+        def build_chart_grid(timeframes):
+            widget = QWidget()
+            grid = QGridLayout(widget)
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setSpacing(5)
+
+            for idx, tf in enumerate(timeframes):
+                box = QGroupBox(f"{tf} Grafiği")
+                box.setStyleSheet("QGroupBox { border: 1px solid #333; font-weight: bold; color: #00ccff; }")
+                box_layout = QVBoxLayout(box)
+                box_layout.setContentsMargins(0, 15, 0, 0)
+                view = QWebEngineView()
+                view.setHtml(CHART_TEMPLATE)
+                view.loadFinished.connect(lambda ok, t=tf: self.on_load_finished(ok, t))
+                box_layout.addWidget(view)
+                self.web_views[tf] = view
+                grid.addWidget(box, idx // 2, idx % 2)
+
+            return widget
+
+        chart_tabs.addTab(build_chart_grid(LOWER_TIMEFRAMES), "LTF")
+        chart_tabs.addTab(build_chart_grid(HTF_TIMEFRAMES), "HTF")
+        live_layout.addWidget(chart_tabs, stretch=6)
         self.logs = QTextEdit();
         self.logs.setReadOnly(True);
         self.logs.setMaximumHeight(100)
@@ -2946,9 +2873,9 @@ class MainWindow(QMainWindow):
         self.open_trades_table = QTableWidget();
 
         # Sütun Sayısı 11 (Size Eklendi)
-        self.open_trades_table.setColumnCount(11)
+        self.open_trades_table.setColumnCount(12)
         self.open_trades_table.setHorizontalHeaderLabels(
-            ["Zaman", "Coin", "TF", "Yön", "Setup", "Giriş", "TP", "SL", "Büyüklük", "PnL", "Durum"])
+            ["Zaman", "Coin", "TF", "Yön", "Setup", "Giriş", "TP", "SL", "Büyüklük ($)", "PnL", "Durum", "Bilgi"])
         self.open_trades_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         ot_in.addWidget(self.open_trades_table);
         ot_group.setLayout(ot_in);
@@ -3060,8 +2987,15 @@ class MainWindow(QMainWindow):
         bt_cfg = QHBoxLayout()
         bt_cfg.addWidget(QLabel("Semboller:"));
         bt_cfg.addWidget(QLabel(", ".join(SYMBOLS)))
-        bt_cfg.addWidget(QLabel("TF:"));
-        bt_cfg.addWidget(QLabel(", ".join(TIMEFRAMES)))
+        bt_cfg.addWidget(QLabel("TF Seçimi:"));
+        self.backtest_tf_checks = {}
+        bt_tf_layout = QHBoxLayout()
+        for tf in TIMEFRAMES:
+            cb = QCheckBox(tf)
+            cb.setChecked(True)
+            bt_tf_layout.addWidget(cb)
+            self.backtest_tf_checks[tf] = cb
+        bt_cfg.addLayout(bt_tf_layout)
         bt_cfg.addWidget(QLabel("Mum Sayısı:"));
         self.backtest_candles = QSpinBox();
         self.backtest_candles.setRange(500, 6000);
@@ -3082,6 +3016,16 @@ class MainWindow(QMainWindow):
         opt_layout = QVBoxLayout(opt_widget)
         grid_group = QGroupBox("Parametre Aralıkları");
         grid_layout = QHBoxLayout()
+        tf_group = QGroupBox("Zaman Dilimleri")
+        tf_layout = QHBoxLayout()
+        self.opt_tf_checks = {}
+        for tf in TIMEFRAMES:
+            cb = QCheckBox(tf)
+            cb.setChecked(True)
+            tf_layout.addWidget(cb)
+            self.opt_tf_checks[tf] = cb
+        tf_group.setLayout(tf_layout)
+        opt_layout.addWidget(tf_group)
         # --- YENİ: OTOMATİK RAPOR TEST BUTONU ---
         btn_test_report = QPushButton("🌙 GÜNLÜK RAPORU ŞİMDİ OLUŞTUR (TEST)");
         btn_test_report.setStyleSheet("background-color: #444; color: #aaa; margin-top: 10px;")
@@ -3331,20 +3275,26 @@ class MainWindow(QMainWindow):
             open_trades.sort(key=lambda x: x['id'], reverse=True)
             self.open_trades_table.setRowCount(len(open_trades))
             cols_open = ["timestamp", "symbol", "timeframe", "type", "setup", "entry", "tp", "sl", "size", "pnl",
-                         "status"]
+                         "status", "info"]
 
             for row_idx, trade in enumerate(open_trades):
                 for col_idx, col_key in enumerate(cols_open):
-                    val = trade.get(col_key, "")
+                    if col_key == "info":
+                        val = self.describe_trade_state(trade)
+                    else:
+                        val = trade.get(col_key, "")
                     item = QTableWidgetItem(str(val))
 
                     if col_key == "size":
+                        entry_price = float(trade.get("entry", 0))
+                        size = float(trade.get("size", 0))
+                        notional = float(trade.get("notional", entry_price * size))
                         is_partial = trade.get("partial_taken", False)
                         if is_partial:
-                            item.setText(f"📉 ${float(val):,.0f} (Yarım)")
+                            item.setText(f"📉 ${notional:,.0f} (Yarım)")
                             item.setForeground(QColor("orange"))
                         else:
-                            item.setText(f"${float(val):,.0f} (Tam)")
+                            item.setText(f"${notional:,.0f} (Tam)")
                             item.setForeground(QColor("yellow"))
                         item.setFont(QFont("Arial", 10, QFont.Bold))
                     elif col_key == "pnl":
@@ -3361,6 +3311,8 @@ class MainWindow(QMainWindow):
                     if col_key == "type":
                         item.setForeground(QColor("#00ff00") if val == "LONG" else QColor("#ff0000"))
                         item.setFont(QFont("Arial", 10, QFont.Bold))
+                    if col_key == "status":
+                        item.setForeground(QColor("#00ccff"))
                     self.open_trades_table.setItem(row_idx, col_idx, item)
 
             # Portföy tablosunu güncelle
@@ -3418,6 +3370,29 @@ class MainWindow(QMainWindow):
                 f.write(f"\n[{datetime.now()}] HATA: {str(e)}\n")
                 f.write(traceback.format_exc())  # Hatanın hangi satırda olduğunu yazar
 
+    def describe_trade_state(self, trade: dict) -> str:
+        parts = []
+
+        if trade.get("partial_taken"):
+            partial_price = trade.get("partial_price")
+            price_note = f" @{float(partial_price):.4f}" if partial_price else ""
+            parts.append(f"Partial alındı{price_note}")
+        else:
+            parts.append("Tam pozisyon")
+
+        if trade.get("breakeven"):
+            parts.append("SL BE/ileri çekildi")
+        if trade.get("trailing_active"):
+            parts.append("Trailing aktif")
+        if trade.get("stop_protection"):
+            parts.append("Koruma SL")
+
+        return " | ".join(parts)
+
+    def get_selected_timeframes(self, checkbox_map: dict) -> list:
+        selected = [tf for tf, cb in (checkbox_map or {}).items() if cb.isChecked()]
+        return selected if selected else list(TIMEFRAMES)
+
     def update_portfolio_table(self, open_trades):
         if not hasattr(self, "portfolio_table"):
             return
@@ -3434,7 +3409,10 @@ class MainWindow(QMainWindow):
                 elif key == "margin":
                     display = f"${float(val):,.2f}"
                 elif key == "size":
-                    display = f"${float(val):,.2f}"
+                    entry_price = float(trade.get("entry", 0))
+                    size = float(trade.get("size", 0))
+                    notional = float(trade.get("notional", entry_price * size))
+                    display = f"${notional:,.2f}"
                 elif key == "pnl":
                     pnl_val = float(val)
                     display = f"${pnl_val:,.2f}"
@@ -3524,8 +3502,9 @@ class MainWindow(QMainWindow):
 
         self.backtest_logs.append("🧪 Backtest başlatıldı. Lütfen bekleyin...")
         candles = self.backtest_candles.value()
+        selected_tfs = self.get_selected_timeframes(getattr(self, "backtest_tf_checks", {}))
 
-        self.backtest_worker = BacktestWorker(SYMBOLS, TIMEFRAMES, candles)
+        self.backtest_worker = BacktestWorker(SYMBOLS, selected_tfs, candles)
         self.backtest_worker.log_signal.connect(self.append_backtest_log)
         self.backtest_worker.finished_signal.connect(self.on_backtest_finished)
         self.btn_run_backtest.setEnabled(False)
@@ -3625,13 +3604,15 @@ class MainWindow(QMainWindow):
         is_monte_carlo = self.chk_monte_carlo.isChecked()
         use_at = False
 
+        selected_tfs = self.get_selected_timeframes(getattr(self, "opt_tf_checks", {}))
+
         selected_sym = self.combo_opt_symbol.currentText()
         self.opt_logs.clear()
         self.btn_run_opt.setEnabled(False)
 
         # Worker'a monte_carlo parametresini gönder
         self.opt_worker = OptimizerWorker(selected_sym, candles, rr_range, rsi_range, slope_range, use_at,
-                                              is_monte_carlo)
+                                          is_monte_carlo, selected_tfs)
         self.opt_worker.result_signal.connect(self.on_opt_update)
         self.opt_worker.start()
 
@@ -3653,10 +3634,9 @@ class MainWindow(QMainWindow):
         header.setSectionResizeMode(QHeaderView.Stretch)
 
         # Örnek boş satırlar ekleyelim (Daha sonra gerçek veriyle dolacak)
-        timeframes = ["1m", "5m", "15m", "1h", "4h"]
-        table.setRowCount(len(timeframes))
+        table.setRowCount(len(TIMEFRAMES))
 
-        for i, tf in enumerate(timeframes):
+        for i, tf in enumerate(TIMEFRAMES):
             table.setItem(i, 0, QTableWidgetItem(tf))  # Zaman
             table.setItem(i, 1, QTableWidgetItem("%0.0"))  # Başarı
             table.setItem(i, 2, QTableWidgetItem("$0.00"))  # PnL
@@ -3686,7 +3666,7 @@ class MainWindow(QMainWindow):
         self.pnl_table.setRowCount(0)  # Eski satırları sil
 
         # Zaman dilimlerini belli bir sıraya göre dizmek istersen (isteğe bağlı)
-        sirali_tf = ["1m", "5m", "15m", "1h", "4h"]
+        sirali_tf = list(TIMEFRAMES)
         mevcut_keys = list(stats.keys())
         # Sadece istatistiği olanları listele, sıralı listede varsa öncelik ver
         final_list = [t for t in sirali_tf if t in mevcut_keys] + [t for t in mevcut_keys if t not in sirali_tf]
@@ -4128,7 +4108,7 @@ def run_portfolio_backtest(
     draw_trades: bool = True,
     max_draw_trades: Optional[int] = None,
 ):
-    allowed_log_categories = {"progress", "summary"}
+    allowed_log_categories = {"progress", "potential", "summary"}
 
     def log(msg: str, category: str = None):
         if category not in allowed_log_categories:
@@ -4137,6 +4117,8 @@ def run_portfolio_backtest(
             progress_callback(msg)
         print(msg)
 
+    accepted_signals_raw = {}
+    opened_signals = {}
     # ---- HER ÇALIŞTIRMA ÖNCESİ CSV TEMİZLE ----
     if os.path.exists(out_trades_csv):
         os.remove(out_trades_csv)
@@ -4150,6 +4132,8 @@ def run_portfolio_backtest(
     - Trade geçmişini ve özetini CSV'ye yazar
     - Her sembol/timeframe için fiyat datasını da <symbol>_<tf>_prices.csv olarak kaydeder (plot için)
     """
+    import heapq
+
     limit_map = limit_map or {}
     requested_pairs = list(itertools.product(symbols, timeframes))
 
@@ -4159,16 +4143,20 @@ def run_portfolio_backtest(
 
         for sym in symbols:
             for tf in timeframes:
-                _, _, df = _get_indicator_stream(
-                    sym,
-                    tf,
-                    target_candles,
-                    active_limit_map=active_limit_map,
-                    write_prices=write_prices,
-                )
+                tf_candle_limit = active_limit_map.get(tf, target_candles)
+                if tf_candle_limit:
+                    tf_candle_limit = min(target_candles, tf_candle_limit)
+                else:
+                    tf_candle_limit = target_candles
 
+                df = TradingEngine.get_historical_data_pagination(sym, tf, total_candles=tf_candle_limit)
                 if df is None or df.empty or len(df) < 400:
                     continue
+
+                df = TradingEngine.calculate_indicators(df)
+
+                if write_prices:
+                    df.to_csv(f"{sym}_{tf}_prices.csv", index=False)
 
                 result[(sym, tf)] = df.reset_index(drop=True)
 
@@ -4188,30 +4176,150 @@ def run_portfolio_backtest(
         log_to_stdout=False,
     )
 
-    sim_tasks = []
+    # Çoklu stream için zaman bazlı event kuyruğu
+    heap = []
+    ptr = {}
+    total_events = 0
     for (sym, tf), df in streams.items():
+        warmup = 250
+        end = len(df) - 2
+        if end <= warmup:
+            continue
+        ptr[(sym, tf)] = warmup
+        total_events += max(0, end - warmup)
+        heapq.heappush(
+            heap,
+            (df.loc[warmup, "timestamp"] + _tf_to_timedelta(tf), sym, tf),
+        )
+
+    tm = SimTradeManager(initial_balance=TRADING_CONFIG["initial_balance"])
+    logged_cfg_pairs = set()
+    processed_events = 0
+    next_progress = 10
+
+    # Ana backtest döngüsü
+    while heap:
+        event_time, sym, tf = heapq.heappop(heap)
+        df = streams[(sym, tf)]
+        i = ptr[(sym, tf)]
+        if i >= len(df) - 1:
+            continue
+
+        row = df.iloc[i]
+
+        # Açık pozisyonları güncelle (PBEMA ile birlikte)
+        tm.update_trades(
+            sym,
+            tf,
+            candle_high=float(row["high"]),
+            candle_low=float(row["low"]),
+            candle_close=float(row["close"]),
+            candle_time_utc=row["timestamp"] + _tf_to_timedelta(tf),
+            pb_top=float(row.get("pb_ema_top", row["close"])),
+            pb_bot=float(row.get("pb_ema_bot", row["close"])),
+        )
+
+        # Bu sembol/timeframe için optimize edilmiş config
         config = best_configs.get((sym, tf)) or load_optimized_config(sym, tf)
-        sim_tasks.append((sym, tf, df, config))
+        if (sym, tf) not in logged_cfg_pairs:
+            logged_cfg_pairs.add((sym, tf))
+        rr, rsi, slope = config["rr"], config["rsi"], config["slope"]
+        use_at = config.get("at_active", False)
 
-    pair_results = []
-    total_pairs = len(sim_tasks)
-    next_progress = 20
+        # Sinyal kontrolü (Base setup mantığı burada)
+        s_type, s_entry, s_tp, s_sl, s_reason = TradingEngine.check_signal_diagnostic(
+            df,
+            index=i,
+            min_rr=rr,
+            rsi_limit=rsi,
+            slope_thresh=slope,
+            use_alphatrend=use_at,
+            hold_n=config.get("hold_n"),
+            min_hold_frac=config.get("min_hold_frac"),
+            pb_touch_tolerance=config.get("pb_touch_tolerance"),
+            body_tolerance=config.get("body_tolerance"),
+            cloud_keltner_gap_min=config.get("cloud_keltner_gap_min"),
+            tp_min_dist_ratio=config.get("tp_min_dist_ratio"),
+            tp_max_dist_ratio=config.get("tp_max_dist_ratio"),
+            adx_min=config.get("adx_min"),
+        )
 
-    if total_pairs:
-        with Pool(processes=cpu_count()) as pool:
-            for idx, result in enumerate(pool.imap_unordered(_run_pair_backtest, sim_tasks), start=1):
-                pair_results.append(result)
-                progress = (idx / total_pairs) * 100
-                if progress >= next_progress:
-                    log(f"[BACKTEST] %{progress:.1f} tamamlandı...", category="progress")
-                    next_progress += 20
+        if s_type and "ACCEPTED" in str(s_reason):
+            accepted_signals_raw[(sym, tf)] = accepted_signals_raw.get((sym, tf), 0) + 1
+            # Aynı sembol/timeframe için açık trade var mı?
+            has_open = any(
+                t["symbol"] == sym and t["timeframe"] == tf
+                for t in tm.open_trades
+            )
 
-    all_history = []
+            cooldown_active = tm.check_cooldown(sym, tf, event_time)
+            signal_ts_str = (event_time + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
 
-    for res in pair_results:
-        all_history.extend(res.get("history", []))
+            if has_open:
+                log(
+                    f"[POT][{sym}-{tf}] {s_type} {signal_ts_str} reddedildi: açık pozisyon var.",
+                    category="potential",
+                )
+            elif cooldown_active:
+                log(
+                    f"[POT][{sym}-{tf}] {s_type} {signal_ts_str} reddedildi: cooldown aktif.",
+                    category="potential",
+                )
+            else:
+                next_row = df.iloc[i + 1]
+                entry_open = float(next_row["open"])
+                open_ts = next_row["timestamp"]
+                ts_str = (open_ts + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
 
-    trades_df = pd.DataFrame(all_history)
+                # Setup tag (ör: Base), reason string içinden çekiliyor
+                setup_tag = "Unknown"
+                s_reason_str = str(s_reason)
+                if "ACCEPTED" in s_reason_str and "(" in s_reason_str and ")" in s_reason_str:
+                    setup_tag = s_reason_str[s_reason_str.find("(") + 1 : s_reason_str.find(")")]
+
+                log(
+                    f"[POT][{sym}-{tf}] {s_type} {signal_ts_str} kabul edildi (setup={setup_tag}).",
+                    category="potential",
+                )
+
+                tm.open_trade(
+                    {
+                        "symbol": sym,
+                        "timeframe": tf,
+                        "type": s_type,
+                        "entry": entry_open,
+                        "tp": float(s_tp),
+                        "sl": float(s_sl),
+                        "setup": setup_tag,
+                        "timestamp": ts_str,
+                        "open_time_utc": open_ts,
+                    }
+                )
+                opened_signals[(sym, tf)] = opened_signals.get((sym, tf), 0) + 1
+
+        # Sonraki bara ilerle
+        i2 = i + 1
+        ptr[(sym, tf)] = i2
+        if i2 < len(df) - 1:
+            heapq.heappush(
+                heap,
+                (df.loc[i2, "timestamp"] + _tf_to_timedelta(tf), sym, tf),
+            )
+
+        # Progress log
+        processed_events += 1
+        if total_events > 0:
+            progress = (processed_events / total_events) * 100
+            if progress >= next_progress:
+                log(f"[BACKTEST] %{progress:.1f} tamamlandı...", category="progress")
+                next_progress += 10
+    total_closed_legs = len(tm.history)
+    unique_trades = len({t.get("id") for t in tm.history}) if tm.history else 0
+    partial_legs = sum(1 for t in tm.history if "PARTIAL" in str(t.get("status", "")))
+    full_exits = total_closed_legs - partial_legs
+
+    # Tüm history'den DataFrame oluştur ve CSV / özet yaz
+    trades_df = pd.DataFrame(tm.history)
     if not trades_df.empty:
         trades_df.to_csv(out_trades_csv, index=False)
 
@@ -4279,11 +4387,8 @@ def run_portfolio_backtest(
                 category="summary",
             )
 
-    total_pnl = float(trades_df["pnl"].astype(float).sum()) if not trades_df.empty else 0.0
-    sim_wallet = TRADING_CONFIG.get("initial_balance", 0.0) + total_pnl
-
     log(
-        f"Final Wallet (sim): ${sim_wallet:.2f} | Total PnL: ${total_pnl:.2f}",
+        f"Final Wallet (sim): ${tm.wallet_balance:.2f} | Total PnL: ${tm.total_pnl:.2f}",
         category="summary",
     )
 
@@ -4735,7 +4840,6 @@ def run_with_auto_restart(restart_delay: int = AUTO_RESTART_DELAY_SECONDS) -> No
 
 if __name__ == "__main__":
     run_with_auto_restart()
-
 
 
 
