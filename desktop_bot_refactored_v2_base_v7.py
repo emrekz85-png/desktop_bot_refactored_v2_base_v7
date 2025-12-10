@@ -1621,9 +1621,8 @@ class TradingEngine:
         - RR >= min_rr   (RR = reward / risk)
 
         Not: Bu kurgu trend-takip eden değil, PBEMA bulutunu mıknatıs gibi
-        kullanan mean reversion yaklaşımıdır. Fiyat PBEMA bulutunun üstündeyse
-        yalnızca SHORT, altındaysa yalnızca LONG senaryosu aranır; Keltner
-        dokunuşları bu yön filtresiyle tetikleyici olur.
+        kullanan mean reversion yaklaşımıdır; Keltner dokunuşları hem üstten
+        SHORT hem alttan LONG için tetikleyici olabilir.
         """
 
         debug_info = {
@@ -1708,19 +1707,17 @@ class TradingEngine:
         pb_top = float(curr["pb_ema_top"])
         pb_bot = float(curr["pb_ema_bot"])
 
-        # --- Mean reversion: yön kısıtı PBEMA konumuna göre ---
+        # --- Mean reversion: yön kısıtı yok ---
         slope_top = float(curr.get("slope_top", 0.0) or 0.0)
         slope_bot = float(curr.get("slope_bot", 0.0) or 0.0)
         slope_thresh = slope_thresh or 0.0
 
-        # Slope bilgisi yalnızca debug amaçlı tutuluyor.
+        # Slope bilgisi yalnızca debug amaçlı tutuluyor; yön kısıtı uygulanmıyor.
         debug_info["trend_up_strong"] = slope_top > slope_thresh and pb_top >= pb_bot and close > pb_top
         debug_info["trend_down_strong"] = slope_bot < -slope_thresh and pb_bot <= pb_top and close < pb_bot
 
-        above_cloud = close >= pb_top * (1 + touch_tol)
-        below_cloud = close <= pb_bot * (1 - touch_tol)
-        long_direction_ok = below_cloud
-        short_direction_ok = above_cloud
+        long_direction_ok = True
+        short_direction_ok = True
 
         # ================= LONG =================
         holding_long = (closes_slice > lower_slice).mean() >= min_hold_frac
