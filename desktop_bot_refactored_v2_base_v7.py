@@ -4336,11 +4336,11 @@ def run_portfolio_backtest(
         "summary_csv": out_summary_csv,
     }
 
-    if draw_trades:
-        try:
-            replay_backtest_trades(trades_csv=out_trades_csv, max_trades=max_draw_trades)
-        except Exception as e:
-            log(f"[BACKTEST] Trade çiziminde hata: {e}", category="summary")
+        if draw_trades:
+            try:
+                replay_backtest_trades(trades_csv=out_trades_csv, max_trades=max_draw_trades)
+            except Exception as e:
+                log(f"[BACKTEST] Trade çiziminde hata: {e}", category="summary")
 
     return result
 
