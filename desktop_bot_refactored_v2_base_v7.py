@@ -3953,10 +3953,14 @@ class MainWindow(QMainWindow):
 # 🧪 CLI BACKTEST (Portföy Senkron) - v2
 # ==========================================
 def _tf_to_timedelta(tf: str) -> timedelta:
+    tf = tf.strip().lower()
+
     if tf.endswith("m"):
         return timedelta(minutes=int(tf[:-1]))
     if tf.endswith("h"):
         return timedelta(hours=int(tf[:-1]))
+    if tf.endswith("d"):
+        return timedelta(days=int(tf[:-1]))
     raise ValueError(f"Unsupported timeframe: {tf}")
 
 class SimTradeManager:
