@@ -1730,10 +1730,8 @@ class TradingEngine:
 
         keltner_pb_gap_long = (pb_bot - lower_band) / lower_band if lower_band != 0 else 0.0
 
-        within_cloud_long = pb_bot <= close <= pb_top * (1 + touch_tol)
         pb_target_long = (
                 long_direction_ok and
-                ((close <= pb_bot * (1 + touch_tol)) or within_cloud_long) and
                 (keltner_pb_gap_long >= cloud_keltner_gap_min)
         )
 
@@ -1755,10 +1753,8 @@ class TradingEngine:
 
         keltner_pb_gap_short = (upper_band - pb_top) / upper_band if upper_band != 0 else 0.0
 
-        within_cloud_short = pb_bot * (1 - touch_tol) <= close <= pb_top
         pb_target_short = (
                 short_direction_ok and
-                ((close >= pb_top * (1 - touch_tol)) or within_cloud_short) and
                 (keltner_pb_gap_short >= cloud_keltner_gap_min)
         )
 
