@@ -305,6 +305,42 @@ def _generate_candidate_configs():
     return candidates
 
 
+def _analyze_be_protection_history(history_records):
+    """Warn if breakeven/stop protection trades still end with large negative PnL."""
+
+    anomalies = []
+
+    for rec in history_records or []:
+        if not isinstance(rec, dict):
+            continue
+
+        be_active = bool(rec.get("breakeven"))
+        stop_prot_active = bool(rec.get("stop_protection"))
+
+        if not (be_active or stop_prot_active):
+            continue
+
+        try:
+            pnl_val = float(rec.get("pnl"))
+        except (TypeError, ValueError):
+            continue
+
+        if pnl_val < -1:
+            anomalies.append((rec, pnl_val))
+
+    if anomalies:
+        print("[WARN] BE/Protection aktif ama negatif PnL:")
+        for rec, pnl_val in anomalies:
+            ts_val = rec.get("timestamp") or rec.get("open_time_utc") or rec.get("close_time")
+            print(
+                f"ID: {rec.get('id')}, Symbol: {rec.get('symbol')}, TF: {rec.get('timeframe')}, "
+                f"TS: {ts_val}, PnL: {pnl_val}, Entry: {rec.get('entry')}, SL: {rec.get('sl')}, "
+                f"Partial: {rec.get('partial_taken')}"
+            )
+    else:
+        print("[CHECK] BE/Protection tüm kayıtlar için doğru çalışıyor. Negatif sonuç yok.")
+
+
 def _get_indicator_stream(
     symbol: str,
     timeframe: str,
@@ -4393,6 +4429,8 @@ def run_portfolio_backtest(
                 f"NetPnL={cfg['_net_pnl']:.2f}, Trades={cfg['_trades']}",
                 category="summary",
             )
+
+    _analyze_be_protection_history(all_history)
 
     total_pnl = float(trades_df["pnl"].astype(float).sum()) if not trades_df.empty else 0.0
     sim_wallet = TRADING_CONFIG.get("initial_balance", 0.0) + total_pnl
