@@ -1364,14 +1364,12 @@ class TradingEngine:
 
         Filtreler:
         - ADX düşükse alma
-        - Keltner holding + retest
+        - Keltner holding + retest (holding sadece trend takibi için loglanır)
         - PBEMA cloud hizalaması
         - Keltner bandı ile PBEMA TP hedefi arasında minimum mesafe
         - TP çok yakın / çok uzak değil
         - RR >= min_rr   (RR = reward / risk)
-        - ***Trend filtresi (hafif):***
-              * Güçlü uptrend + fiyat PBEMA üstünde => SHORT yasak
-              * Güçlü downtrend + fiyat PBEMA altında => LONG yasak
+        - Trend verisi sadece teşhis amaçlıdır, sinyali bloke etmez
         """
 
         debug_info = {
@@ -1456,7 +1454,7 @@ class TradingEngine:
         pb_top = float(curr["pb_ema_top"])
         pb_bot = float(curr["pb_ema_bot"])
 
-        # --- Hafif trend filtresi (yalnızca aşırı ters işlemleri keser) ---
+        # --- Trend durumu (yalnızca teşhis için) ---
         slope_top = float(curr.get("slope_top", 0.0) or 0.0)
         slope_bot = float(curr.get("slope_bot", 0.0) or 0.0)
         slope_thresh = slope_thresh or 0.0
@@ -1478,9 +1476,6 @@ class TradingEngine:
         debug_info["trend_up_strong"] = trend_up_strong
         debug_info["trend_down_strong"] = trend_down_strong
 
-        long_direction_ok = not trend_down_strong
-        short_direction_ok = not trend_up_strong
-
         # ================= LONG =================
         holding_long = (closes_slice > lower_slice).mean() >= min_hold_frac
 
@@ -1494,16 +1489,16 @@ class TradingEngine:
 
         within_cloud_long = pb_bot <= close <= pb_top * (1 + touch_tol)
         pb_target_long = (
-                long_direction_ok and
                 ((close <= pb_bot * (1 + touch_tol)) or within_cloud_long) and
                 (keltner_pb_gap_long >= cloud_keltner_gap_min)
         )
 
-        is_long = holding_long and retest_long and pb_target_long
+        is_long = retest_long and pb_target_long
         debug_info.update({
             "holding_long": holding_long,
             "retest_long": retest_long,
             "pb_target_long": pb_target_long,
+            "trend_ok": holding_long,
         })
 
         # ================= SHORT =================
@@ -1519,16 +1514,16 @@ class TradingEngine:
 
         within_cloud_short = pb_bot * (1 - touch_tol) <= close <= pb_top
         pb_target_short = (
-                short_direction_ok and
                 ((close >= pb_top * (1 - touch_tol)) or within_cloud_short) and
                 (keltner_pb_gap_short >= cloud_keltner_gap_min)
         )
 
-        is_short = holding_short and retest_short and pb_target_short
+        is_short = retest_short and pb_target_short
         debug_info.update({
             "holding_short": holding_short,
             "retest_short": retest_short,
             "pb_target_short": pb_target_short,
+            "trend_ok": debug_info.get("trend_ok", False) or holding_short,
         })
 
         # --- RSI (LONG için üst sınır) ---
@@ -3177,12 +3172,12 @@ class MainWindow(QMainWindow):
             direction = entry.get("type", "") or "-"
 
             if direction == "LONG":
-                trend_ok = not bool(checks.get("trend_down_strong"))
+                trend_ok = bool(checks.get("holding_long") or checks.get("holding_short"))
                 hold_ok = bool(checks.get("holding_long"))
                 retest_ok = bool(checks.get("retest_long"))
                 pb_ok = bool(checks.get("pb_target_long"))
             else:
-                trend_ok = not bool(checks.get("trend_up_strong"))
+                trend_ok = bool(checks.get("holding_long") or checks.get("holding_short"))
                 hold_ok = bool(checks.get("holding_short"))
                 retest_ok = bool(checks.get("retest_short"))
                 pb_ok = bool(checks.get("pb_target_short"))
@@ -3202,7 +3197,7 @@ class MainWindow(QMainWindow):
                 self._fmt_bool(hold_ok),
                 self._fmt_bool(retest_ok),
                 self._fmt_bool(pb_ok),
-                self._fmt_bool(trend_ok),
+                "✓" if trend_ok else "Weak",
                 f"{float(rsi_val):.2f}" if isinstance(rsi_val, (int, float)) else "-",
                 f"{rr_val:.2f}" if isinstance(rr_val, (int, float)) else "-",
                 f"{tp_ratio*100:.2f}%" if isinstance(tp_ratio, (int, float)) else "-",
