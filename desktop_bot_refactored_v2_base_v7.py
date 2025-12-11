@@ -166,12 +166,14 @@ SYMBOL_PARAMS = {
     "HYPEUSDT": {
         # NEW SYMBOL - Starting with balanced/conservative settings
         # Will be optimized based on backtest results
+        # NOTE: HYPEUSDT is new, not enough data for HTF (12h, 1d needs 200+ candles for EMA200)
         "5m": {"rr": 1.5, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": True},
         "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False},
         "1h": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
         "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False},
-        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False},
-        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False}
+        # HTF disabled - not enough historical data for HYPEUSDT
+        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False, "disabled": True},
+        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False, "disabled": True}
     }
 }
 
