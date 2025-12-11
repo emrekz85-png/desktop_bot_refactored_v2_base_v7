@@ -1757,8 +1757,9 @@ class TradingEngine:
             upper_wick_ratio = 0.0
             lower_wick_ratio = 0.0
 
-        # Minimum wick ratio for quality rejection (0.3 = 30% of candle is wick)
-        min_wick_ratio = 0.3
+        # Minimum wick ratio for quality rejection (0.15 = 15% of candle is wick)
+        # Lowered from 0.3 to 0.15 for softer filtering
+        min_wick_ratio = 0.15
         long_rejection_quality = lower_wick_ratio >= min_wick_ratio
         short_rejection_quality = upper_wick_ratio >= min_wick_ratio
 
@@ -1827,16 +1828,19 @@ class TradingEngine:
                 (keltner_pb_gap_long >= cloud_keltner_gap_min)
         )
 
-        # Enhanced LONG signal with new filters
-        # Rejection quality OR penetration (trap) makes the signal valid
+        # Quality indicators (for analysis, NOT mandatory filters)
+        # These are kept for debugging and future optimization
         long_quality_ok = long_rejection_quality or long_penetration
 
-        is_long = holding_long and retest_long and pb_target_long and price_below_pbema and long_quality_ok
+        # SOFT VERSION: Only core filters are mandatory
+        # price_below_pbema and quality_ok are tracked but NOT required
+        is_long = holding_long and retest_long and pb_target_long
         debug_info.update({
             "holding_long": holding_long,
             "retest_long": retest_long,
             "pb_target_long": pb_target_long,
             "long_quality_ok": long_quality_ok,
+            "price_below_pbema": price_below_pbema,
         })
 
         # ================= SHORT =================
@@ -1855,16 +1859,19 @@ class TradingEngine:
                 (keltner_pb_gap_short >= cloud_keltner_gap_min)
         )
 
-        # Enhanced SHORT signal with new filters
-        # Rejection quality OR penetration (trap) makes the signal valid
+        # Quality indicators (for analysis, NOT mandatory filters)
+        # These are kept for debugging and future optimization
         short_quality_ok = short_rejection_quality or short_penetration
 
-        is_short = holding_short and retest_short and pb_target_short and price_above_pbema and short_quality_ok
+        # SOFT VERSION: Only core filters are mandatory
+        # price_above_pbema and quality_ok are tracked but NOT required
+        is_short = holding_short and retest_short and pb_target_short
         debug_info.update({
             "holding_short": holding_short,
             "retest_short": retest_short,
             "pb_target_short": pb_target_short,
             "short_quality_ok": short_quality_ok,
+            "price_above_pbema": price_above_pbema,
         })
 
         # --- RSI (LONG için üst sınır) ---
