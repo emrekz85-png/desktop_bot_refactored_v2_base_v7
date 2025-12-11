@@ -3963,11 +3963,12 @@ class MainWindow(QMainWindow):
 # ==========================================
 # 🧪 CLI BACKTEST (Portföy Senkron) - v2
 # ==========================================
-def _tf_to_timedelta(tf: str) -> timedelta:
+def _tf_to_timedelta(tf: str) -> pd.Timedelta:
+    """Convert timeframe string to pandas Timedelta (compatible with numpy datetime64)."""
     if tf.endswith("m"):
-        return timedelta(minutes=int(tf[:-1]))
+        return pd.Timedelta(minutes=int(tf[:-1]))
     if tf.endswith("h"):
-        return timedelta(hours=int(tf[:-1]))
+        return pd.Timedelta(hours=int(tf[:-1]))
     raise ValueError(f"Unsupported timeframe: {tf}")
 
 class SimTradeManager:
