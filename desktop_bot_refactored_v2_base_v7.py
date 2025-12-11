@@ -2497,6 +2497,11 @@ class LiveBotWorker(QThread):
                             if df.empty: continue
 
                             try:
+                                # Skip disabled symbol/timeframe combinations EARLY
+                                sym_cfg = SYMBOL_PARAMS.get(sym, {})
+                                tf_cfg = sym_cfg.get(tf, {}) if isinstance(sym_cfg, dict) else {}
+                                if tf_cfg.get("disabled", False):
+                                    continue
 
                                 if len(df) < 3:
                                     continue
