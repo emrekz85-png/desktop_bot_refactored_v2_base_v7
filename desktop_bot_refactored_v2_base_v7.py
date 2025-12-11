@@ -44,7 +44,8 @@ import plotly.utils
 # ⚙️ GENEL AYARLAR VE SABİTLER (MERKEZİ YÖNETİM)
 # ==========================================
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
-LOWER_TIMEFRAMES = ["1m", "5m", "15m", "1h"]
+# 1m removed - too noisy, inconsistent results across all symbols
+LOWER_TIMEFRAMES = ["5m", "15m", "1h"]
 HTF_TIMEFRAMES = ["4h", "12h", "1d"]
 TIMEFRAMES = LOWER_TIMEFRAMES + HTF_TIMEFRAMES
 candles = 50000
@@ -97,55 +98,60 @@ TRADING_CONFIG = {
 }
 
 # ==========================================
-# 🚀 v30.5 - FİNAL PROFIT MAX CONFIG (VERİ ODAKLI)
+# 🚀 v31.0 - OPTIMIZED CONFIG (BACKTEST DATA-DRIVEN)
+# ==========================================
+# Based on 3000-candle backtest results:
+# - 1m timeframe removed (too noisy)
+# - BTCUSDT-1h: DISABLED (36% WR, -$50 loss)
+# - Focus on profitable combinations
 # ==========================================
 SYMBOL_PARAMS = {
     "BTCUSDT": {
-        # 1m: Daha esnek scalp (daha fazla sinyal için RR ve slope düşürüldü)
-        "1m": {"rr": 1.3, "rsi": 70, "slope": 0.4, "at_active": False, "use_trailing": False},
+        # 5m: Best performer for BTC (+$64 in optimization)
+        # Backtest: RR=1.8, RSI=35, AT=Kapalı
+        "5m": {"rr": 1.8, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
 
-        # 5m: AlphaTrend opsiyonel, slope yumuşatıldı
-        "5m": {"rr": 2.0, "rsi": 70, "slope": 0.4, "at_active": False, "use_trailing": False},
+        # 15m: Moderate (+$23 in optimization)
+        "15m": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
 
-        # 4h: AlphaTrend KAPALI (Saf Trend) (16.53 R)
+        # 1h: PROBLEMATIC - 36% WR, -$50 loss. Set very strict to minimize trades
+        # High RR requirement will filter out most signals
+        "1h": {"rr": 3.0, "rsi": 25, "slope": 0.2, "at_active": True, "use_trailing": False, "disabled": True},
+
+        # HTF: Keep conservative
         "4h": {"rr": 2.0, "rsi": 30, "slope": 0.3, "at_active": False, "use_trailing": False},
-
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
-        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
-
-        # Ara dönemler (1h fena değil, eklendi)
-        "15m": {"rr": 1.8, "rsi": 55, "slope": 0.6, "at_active": False, "use_trailing": False},
-        "1h": {"rr": 1.8, "rsi": 45, "slope": 0.8, "at_active": True, "use_trailing": False}
+        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
     },
     "ETHUSDT": {
-        # 1m: AlphaTrend KAPALI daha iyi (19.25 R)
-        "1m": {"rr": 2.0, "rsi": 30, "slope": 0.9, "at_active": False, "use_trailing": False},
+        # 5m: Poor performance (0% WR), keep strict
+        "5m": {"rr": 2.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
 
-        # 5m: AlphaTrend AÇIK (23.10 R)
-        "5m": {"rr": 2.5, "rsi": 60, "slope": 0.9, "at_active": True, "use_trailing": True},
+        # 15m: GREAT performer (+$51, 57% WR)
+        "15m": {"rr": 1.5, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False},
 
-        # 15m: 18.24 R (Güzel sürpriz, aktif edilebilir)
-        "15m": {"rr": 3.0, "rsi": 40, "slope": 0.9, "at_active": True, "use_trailing": False},
+        # 1h: EXCELLENT (76.5% WR, +$37) - Best WR in portfolio!
+        "1h": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": False, "use_trailing": False},
 
-        "1h": {"rr": 3.0, "rsi": 30, "slope": 0.3, "at_active": True, "use_trailing": False},
-        "4h": {"rr": 3.0, "rsi": 30, "slope": 0.3, "at_active": True, "use_trailing": False},
-        "12h": {"rr": 3.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False},
-        "1d": {"rr": 3.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False}
+        # HTF: Keep existing
+        "4h": {"rr": 2.0, "rsi": 30, "slope": 0.3, "at_active": True, "use_trailing": False},
+        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False},
+        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False}
     },
     "SOLUSDT": {
-        # 1m: Zayıf (7.14 R). Pasif kalabilir.
-        "1m": {"rr": 3.0, "rsi": 30, "slope": 0.5, "at_active": True, "use_trailing": False},
+        # 5m: Good performer (+$13, 56% WR) - from optimization +$95
+        "5m": {"rr": 1.5, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": True},
 
-        # 5m: EFSANE (69.53 R). Kesinlikle bu ayar.
-        "5m": {"rr": 3.0, "rsi": 40, "slope": 0.9, "at_active": True, "use_trailing": True},
+        # 15m: PERFECT (100% WR, +$52) - Best performer!
+        "15m": {"rr": 1.5, "rsi": 35, "slope": 0.4, "at_active": True, "use_trailing": False},
 
-        # 1h: 16.54 R. İkinci motor.
-        "1h": {"rr": 3.0, "rsi": 40, "slope": 0.9, "at_active": True, "use_trailing": False},
+        # 1h: Moderate (28.6% WR but profitable)
+        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
 
-        "15m": {"rr": 3.0, "rsi": 30, "slope": 0.3, "at_active": True, "use_trailing": False},
-        "4h": {"rr": 3.0, "rsi": 30, "slope": 0.3, "at_active": True, "use_trailing": False},
-        "12h": {"rr": 3.0, "rsi": 35, "slope": 0.4, "at_active": True, "use_trailing": False},
-        "1d": {"rr": 3.0, "rsi": 35, "slope": 0.4, "at_active": True, "use_trailing": False}
+        # HTF: Keep existing
+        "4h": {"rr": 2.0, "rsi": 30, "slope": 0.3, "at_active": True, "use_trailing": False},
+        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.4, "at_active": True, "use_trailing": False},
+        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.4, "at_active": True, "use_trailing": False}
     }
 }
 
@@ -210,13 +216,14 @@ DEFAULT_STRATEGY_CONFIG = {
     "use_trailing": False,
     "use_dynamic_pbema_tp": True,
     "hold_n": 4,
-    "min_hold_frac": 0.65,
-    "pb_touch_tolerance": 0.0018,
-    "body_tolerance": 0.0020,
-    "cloud_keltner_gap_min": 0.0025,
-    "tp_min_dist_ratio": 0.0010,
-    "tp_max_dist_ratio": 0.035,
-    "adx_min": 10.0,
+    # LOOSENED PARAMETERS for more trade opportunities:
+    "min_hold_frac": 0.50,           # Was 0.65 - now 50% holding is enough
+    "pb_touch_tolerance": 0.0025,    # Was 0.0018 - more tolerance for Keltner touch
+    "body_tolerance": 0.0025,        # Was 0.0020 - more tolerance for candle body
+    "cloud_keltner_gap_min": 0.0015, # Was 0.0025 - smaller gap required
+    "tp_min_dist_ratio": 0.0008,     # Was 0.0010 - allow closer TPs
+    "tp_max_dist_ratio": 0.040,      # Was 0.035 - allow further TPs
+    "adx_min": 8.0,                  # Was 10.0 - less strict ADX requirement
 }
 
 PARTIAL_STOP_PROTECTION_TFS = {"5m", "15m", "1h"}
@@ -2510,6 +2517,11 @@ class LiveBotWorker(QThread):
                                 df_ind = TradingEngine.calculate_indicators(df.copy())
                                 df_closed = df_ind.iloc[:-1].copy()  # oluşan mumu çıkar
                                 config = load_optimized_config(sym, tf)
+
+                                # Skip disabled symbol/timeframe combinations
+                                if config.get("disabled", False):
+                                    continue
+
                                 rr, rsi, slope = config['rr'], config['rsi'], config['slope']
                                 use_at = config['at_active']
                                 at_status_log = "AT:ON" if use_at else "AT:OFF"
@@ -4619,6 +4631,11 @@ def run_portfolio_backtest(
 
         # Bu sembol/timeframe için optimize edilmiş config
         config = best_configs.get((sym, tf)) or load_optimized_config(sym, tf)
+
+        # Skip disabled symbol/timeframe combinations in backtest
+        if config.get("disabled", False):
+            continue
+
         if (sym, tf) not in logged_cfg_pairs:
             logged_cfg_pairs.add((sym, tf))
         rr, rsi, slope = config["rr"], config["rsi"], config["slope"]
