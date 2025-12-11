@@ -4679,7 +4679,10 @@ def run_portfolio_backtest(
         config = best_configs.get((sym, tf)) or load_optimized_config(sym, tf)
 
         # Skip disabled symbol/timeframe combinations in backtest
-        if config.get("disabled", False):
+        # Check SYMBOL_PARAMS directly since best_configs from optimization doesn't have disabled flag
+        sym_params = SYMBOL_PARAMS.get(sym, {})
+        tf_params = sym_params.get(tf, {}) if isinstance(sym_params, dict) else {}
+        if tf_params.get("disabled", False) or config.get("disabled", False):
             continue
 
         if (sym, tf) not in logged_cfg_pairs:
