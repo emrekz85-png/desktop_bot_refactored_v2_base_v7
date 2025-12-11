@@ -466,7 +466,8 @@ def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) 
         return 0.0, 0
 
     # PERFORMANCE: Extract NumPy arrays once before the loop (10-50x faster than df.iloc[i])
-    timestamps = df["timestamp"].values
+    # Ensure timestamp is datetime64 (may become object after multiprocessing serialization)
+    timestamps = pd.to_datetime(df["timestamp"]).values
     highs = df["high"].values
     lows = df["low"].values
     closes = df["close"].values
@@ -4476,7 +4477,7 @@ def run_portfolio_backtest(
     streams_arrays = {}
     for (sym, tf), df in streams.items():
         streams_arrays[(sym, tf)] = {
-            "timestamps": df["timestamp"].values,
+            "timestamps": pd.to_datetime(df["timestamp"]).values,
             "highs": df["high"].values,
             "lows": df["low"].values,
             "closes": df["close"].values,
