@@ -596,6 +596,13 @@ def _optimize_backtest_configs(
         if (sym, tf) not in streams:
             continue
 
+        # Skip disabled symbol/timeframe combinations
+        sym_cfg = SYMBOL_PARAMS.get(sym, {})
+        tf_cfg = sym_cfg.get(tf, {}) if isinstance(sym_cfg, dict) else {}
+        if tf_cfg.get("disabled", False):
+            log(f"[OPT][{sym}-{tf}] Atlandı (disabled)")
+            continue
+
         df = streams[(sym, tf)]
         best_cfg = None
         best_pnl = -float("inf")
