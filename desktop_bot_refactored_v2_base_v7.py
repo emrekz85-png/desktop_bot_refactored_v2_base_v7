@@ -517,7 +517,7 @@ def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) 
         # Access next candle for entry price
         entry_open = float(opens[i + 1])
         open_ts = timestamps[i + 1]
-        ts_str = (open_ts + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
+        ts_str = (pd.Timestamp(open_ts) + pd.Timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
 
         tm.open_trade(
             {
@@ -1049,7 +1049,7 @@ class TradeManager:
                         partial_record["notional"] = partial_notional
                         partial_record["pnl"] = net_partial_pnl
                         partial_record["status"] = "PARTIAL TP (50%)"
-                        partial_record["close_time"] = (candle_time_utc + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
+                        partial_record["close_time"] = (pd.Timestamp(candle_time_utc) + pd.Timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
                         partial_record["close_price"] = float(partial_fill)
                         partial_record["pb_ema_top"] = pb_top
                         partial_record["pb_ema_bot"] = pb_bot
@@ -1168,13 +1168,8 @@ class TradeManager:
                 if "STOP" in reason:
                     wait_minutes = 10 if tf == "1m" else (30 if tf == "5m" else 60)
 
-                    cooldown_base = candle_time_utc
-                    if isinstance(cooldown_base, pd.Timestamp):
-                        cooldown_base = cooldown_base.to_pydatetime()
-                    if getattr(cooldown_base, "tzinfo", None) is not None:
-                        cooldown_base = cooldown_base.replace(tzinfo=None)
-
-                    self.cooldowns[(symbol, tf)] = cooldown_base + timedelta(minutes=wait_minutes)
+                    cooldown_base = pd.Timestamp(candle_time_utc)
+                    self.cooldowns[(symbol, tf)] = cooldown_base + pd.Timedelta(minutes=wait_minutes)
 
                 # BE statüsünü ayır
                 if trade.get("breakeven") and abs(final_net_pnl) < 1e-6 and "STOP" in reason:
@@ -1182,7 +1177,7 @@ class TradeManager:
 
                 trade["status"] = reason
                 trade["pnl"] = final_net_pnl
-                trade["close_time"] = (candle_time_utc + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
+                trade["close_time"] = (pd.Timestamp(candle_time_utc) + pd.Timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
                 trade["close_price"] = float(exit_fill)
                 trade["pb_ema_top"] = pb_top
                 trade["pb_ema_bot"] = pb_bot
@@ -1992,7 +1987,7 @@ class TradingEngine:
 
             # --- DÜZELTME: TIMESTAMP PARSING (Rapordaki Talep) ---
             # Pandas zaten datetime nesnelerini iyi yönetir, string dönüşümünde .astype(str) veya .strftime en güvenlisidir.
-            istanbul_time_series = plot_df['timestamp'] + timedelta(hours=3)
+            istanbul_time_series = plot_df['timestamp'] + pd.Timedelta(hours=3)
             timestamps_str = istanbul_time_series.dt.strftime('%Y-%m-%d %H:%M').tolist()
             # -----------------------------------------------------
 
@@ -2379,11 +2374,11 @@ class LiveBotWorker(QThread):
                                 curr_price = float(closed['close'])
                                 closed_ts_utc = closed['timestamp']
                                 forming_ts_utc = forming['timestamp']
-                                istanbul_time = closed_ts_utc + timedelta(hours=3)
+                                istanbul_time = pd.Timestamp(closed_ts_utc) + pd.Timedelta(hours=3)
                                 ts_str = istanbul_time.strftime("%Y-%m-%d %H:%M")
                                 # Backtest ile uyumlu fill: sinyal mumu kapandıktan sonraki mumun OPEN fiyatı
                                 next_open_price = float(forming['open'])
-                                next_open_ts_str = (forming_ts_utc + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
+                                next_open_ts_str = (pd.Timestamp(forming_ts_utc) + pd.Timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
                                 # Fiyatı Arayüze Gönder (Sadece 1m mumlarında veya her döngüde bir kere)
                                 if tf == "1m":
                                     self.price_signal.emit(sym, curr_price)
@@ -4248,7 +4243,7 @@ class SimTradeManager:
                     partial_record["pnl"] = net_partial_pnl
                     partial_record["status"] = "PARTIAL TP (50%)"
                     partial_record["close_time"] = (
-                        candle_time_utc + timedelta(hours=3)
+                        pd.Timestamp(candle_time_utc) + pd.Timedelta(hours=3)
                     ).strftime("%Y-%m-%d %H:%M")
                     partial_record["close_price"] = float(partial_fill)
                     partial_record["pb_ema_top"] = pb_top
@@ -4353,21 +4348,15 @@ class SimTradeManager:
 
             if "STOP" in reason:
                 wait_minutes = 10 if tf == "1m" else (30 if tf == "5m" else 60)
-
-                cooldown_base = candle_time_utc
-                if isinstance(cooldown_base, pd.Timestamp):
-                    cooldown_base = cooldown_base.to_pydatetime()
-                if getattr(cooldown_base, "tzinfo", None) is not None:
-                    cooldown_base = cooldown_base.replace(tzinfo=None)
-
-                self.cooldowns[(symbol, tf)] = cooldown_base + timedelta(minutes=wait_minutes)
+                cooldown_base = pd.Timestamp(candle_time_utc)
+                self.cooldowns[(symbol, tf)] = cooldown_base + pd.Timedelta(minutes=wait_minutes)
 
             if trade.get("breakeven") and abs(final_net_pnl) < 1e-6 and "STOP" in reason:
                 reason = "BE"
 
             trade["status"] = reason
             trade["pnl"] = final_net_pnl
-            trade["close_time"] = (candle_time_utc + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
+            trade["close_time"] = (pd.Timestamp(candle_time_utc) + pd.Timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
             trade["close_price"] = float(exit_fill)
             trade["pb_ema_top"] = pb_top
             trade["pb_ema_bot"] = pb_bot
@@ -4563,7 +4552,7 @@ def run_portfolio_backtest(
             )
 
             cooldown_active = tm.check_cooldown(sym, tf, event_time)
-            signal_ts_str = (event_time + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
+            signal_ts_str = (pd.Timestamp(event_time) + pd.Timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
 
             if has_open:
                 log(
@@ -4578,7 +4567,7 @@ def run_portfolio_backtest(
             else:
                 entry_open = float(arrays["opens"][i + 1])
                 open_ts = arrays["timestamps"][i + 1]
-                ts_str = (open_ts + timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
+                ts_str = (pd.Timestamp(open_ts) + pd.Timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
 
                 # Setup tag (ör: Base), reason string içinden çekiliyor
                 setup_tag = "Unknown"
