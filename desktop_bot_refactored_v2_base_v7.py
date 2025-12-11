@@ -304,7 +304,7 @@ def _apply_partial_stop_protection(trade: dict, tf: str, progress: float, t_type
     return False
 
 
-def _append_trade_event(trade: dict, event_type: str, event_time: datetime, price: Optional[float] = None):
+def _append_trade_event(trade: dict, event_type: str, event_time, price: Optional[float] = None):
     """Append a serializable lifecycle event to the trade for plotting/logging parity."""
 
     try:
@@ -317,10 +317,17 @@ def _append_trade_event(trade: dict, event_type: str, event_time: datetime, pric
         if not isinstance(events, list):
             events = []
 
+        # event_time'ı datetime'a çevir (numpy.datetime64, pd.Timestamp veya datetime olabilir)
+        et = event_time or datetime.utcnow()
+        if isinstance(et, np.datetime64):
+            et = pd.Timestamp(et).to_pydatetime()
+        elif isinstance(et, pd.Timestamp):
+            et = et.to_pydatetime()
+
         events.append(
             {
                 "type": event_type,
-                "time": (event_time or datetime.utcnow()).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "time": et.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "price": float(price) if price is not None else None,
             }
         )
@@ -918,9 +925,16 @@ class TradeManager:
                     f"⚠️ Gerekli marjin bakiyeyi aşıyor, pozisyon {scale_factor:.2f} oranında düşürüldü."
                 )
 
+            # open_time_utc'yi datetime string'e çevir (numpy.datetime64, pd.Timestamp veya datetime olabilir)
+            _otv = signal_data.get("open_time_utc") or datetime.utcnow()
+            if isinstance(_otv, np.datetime64):
+                _otv = pd.Timestamp(_otv).to_pydatetime()
+            elif isinstance(_otv, pd.Timestamp):
+                _otv = _otv.to_pydatetime()
+
             new_trade = {
                 "id": int(time.time() * 1000), "symbol": sym, "timestamp": signal_data["timestamp"],
-                "open_time_utc": (signal_data.get("open_time_utc") or datetime.utcnow()).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "open_time_utc": _otv.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "timeframe": tf, "type": trade_type, "setup": setup_type,
                 "entry": real_entry,
                 "tp": float(signal_data["tp"]), "sl": sl_price,
@@ -4098,7 +4112,10 @@ class SimTradeManager:
             required_margin = position_notional / leverage
 
         open_time_val = trade_data.get("open_time_utc") or datetime.utcnow()
-        if isinstance(open_time_val, pd.Timestamp):
+        # numpy.datetime64, pd.Timestamp veya datetime olabilir - hepsini datetime'a çevir
+        if isinstance(open_time_val, np.datetime64):
+            open_time_val = pd.Timestamp(open_time_val).to_pydatetime()
+        elif isinstance(open_time_val, pd.Timestamp):
             open_time_val = open_time_val.to_pydatetime()
         open_time_str = open_time_val.strftime("%Y-%m-%dT%H:%M:%SZ")
 
