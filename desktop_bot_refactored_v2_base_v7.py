@@ -99,79 +99,89 @@ TRADING_CONFIG = {
 }
 
 # ==========================================
-# 🚀 v32.0 - AGGRESSIVE PROFIT OPTIMIZATION
+# 🚀 v34.0 - BACKTEST OPTIMIZED (Dec 11, 2025)
 # ==========================================
-# Based on v31.0 backtest: +$166.31
-# Target: +$250+ (50% improvement)
+# Based on latest backtest: +$559.60 (+28%)
 #
-# Key changes:
-# - BTCUSDT-1h: RE-ENABLED (was +$99.48!)
-# - BTCUSDT-5m: DISABLED (-$29.21)
-# - ETHUSDT-5m: DISABLED (-$42.65)
-# - Using optimization best settings
+# Key changes from backtest results:
+# - BTCUSDT-15m: DISABLED (still losing -$17.29)
+# - BTCUSDT-4h: Updated to OPT settings (RR=2.1, +$98.58)
+# - ETHUSDT-15m: Slope 0.4→0.2 (+$62.45, 78% WR)
+# - HYPEUSDT-5m: RR=1.2, RSI=35 (+$55.83, 75% WR)
+# - HYPEUSDT-1h: DISABLED (-$70.46, 25% WR)
+# - HYPEUSDT-4h: DISABLED (no trades, OPT=-$37)
 # ==========================================
 SYMBOL_PARAMS = {
     "BTCUSDT": {
-        # 5m: DISABLED - losing money (-$29.21, 40% WR)
+        # 5m: DISABLED - losing money
         "5m": {"rr": 2.4, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False, "disabled": True},
 
-        # 15m: Keep but monitor (-$12.93, 60% WR - high WR but still losing)
-        # Using optimization settings: RR=1.2, RSI=45, AT=On
-        "15m": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False},
+        # 15m: DISABLED - still losing (-$17.29, 60% WR)
+        "15m": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False, "disabled": True},
 
-        # 1h: STAR PERFORMER! +$99.48, 42% WR - RE-ENABLED!
-        # Using optimization settings: RR=2.1, RSI=45, AT=Off
+        # 1h: STAR PERFORMER! +$170.13, 42% WR
+        # OPT: RR=2.1, RSI=45, AT=Off
         "1h": {"rr": 2.1, "rsi": 45, "slope": 0.2, "at_active": False, "use_trailing": False},
 
-        # HTF: Keep conservative
-        "4h": {"rr": 2.0, "rsi": 30, "slope": 0.3, "at_active": False, "use_trailing": False},
+        # 4h: EXCELLENT +$98.58, 50% WR
+        # OPT: RR=2.1, RSI=35, AT=Off
+        "4h": {"rr": 2.1, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
+
+        # HTF: Keep conservative (no trades in backtest)
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
     },
     "ETHUSDT": {
-        # 5m: DISABLED - very poor performance (-$42.65, 33% WR)
+        # 5m: DISABLED - poor performance
         "5m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False, "disabled": True},
 
-        # 15m: GREAT performer (+$32.33, 78% WR!)
-        # Using optimization settings: RR=1.2, RSI=45, AT=On
-        "15m": {"rr": 1.2, "rsi": 45, "slope": 0.4, "at_active": True, "use_trailing": False},
+        # 15m: EXCELLENT +$62.45, 78% WR!
+        # OPT: RR=1.2, RSI=45, Slope=0.2, AT=On
+        "15m": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False},
 
-        # 1h: EXCELLENT (+$48.45, 76% WR!)
-        # Using optimization settings: RR=1.2, RSI=45, AT=Off
+        # 1h: EXCELLENT +$93.50, 76% WR!
+        # OPT: RR=1.2, RSI=45, AT=Off
         "1h": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": False, "use_trailing": False},
 
-        # HTF: Keep existing
+        # HTF: Keep existing (no trades in backtest)
         "4h": {"rr": 2.0, "rsi": 30, "slope": 0.3, "at_active": True, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False},
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False}
     },
     "SOLUSDT": {
-        # 5m: GREAT performer (+$48.28, 56% WR)
-        # Using optimization settings: RR=1.5, RSI=45, AT=On
+        # 5m: EXCELLENT +$115.48, 56% WR
+        # OPT: RR=1.5, RSI=45, AT=On
         "5m": {"rr": 1.5, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": True},
 
-        # 15m: Good performer (+$25.92, 67% WR)
-        # Using optimization settings: RR=1.5, RSI=35, AT=On
+        # 15m: GOOD +$47.03, 67% WR
+        # OPT: RR=1.5, RSI=35, AT=On
         "15m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
 
-        # 1h: Slight loss (-$3.36, 43% WR) - keep but with optimized settings
-        # Using optimization settings: RR=1.2, RSI=35, AT=Off
+        # 1h: Slight loss (-$11.96, 43% WR) - keep monitoring
+        # OPT: RR=1.2, RSI=35, AT=Off
         "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
 
-        # HTF: Keep existing
+        # HTF: Keep existing (no trades in backtest)
         "4h": {"rr": 2.0, "rsi": 30, "slope": 0.3, "at_active": True, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.4, "at_active": True, "use_trailing": False},
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.4, "at_active": True, "use_trailing": False}
     },
     "HYPEUSDT": {
-        # NEW SYMBOL - Starting with balanced/conservative settings
-        # Will be optimized based on backtest results
-        # NOTE: HYPEUSDT is new, not enough data for HTF (12h, 1d needs 200+ candles for EMA200)
-        "5m": {"rr": 1.5, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": True},
-        "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False},
-        "1h": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False},
-        # HTF disabled - not enough historical data for HYPEUSDT
+        # 5m: GOOD +$55.83, 75% WR
+        # OPT: RR=1.2, RSI=35, AT=On
+        "5m": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True},
+
+        # 15m: OK +$16.33, 100% WR (only 1 trade)
+        # OPT: RR=1.5, RSI=55, Slope=0.4, AT=On
+        "15m": {"rr": 1.5, "rsi": 55, "slope": 0.4, "at_active": True, "use_trailing": False},
+
+        # 1h: DISABLED - very poor (-$70.46, 25% WR)
+        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False, "disabled": True},
+
+        # 4h: DISABLED - no trades, OPT showed -$37.16
+        "4h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False, "disabled": True},
+
+        # HTF disabled - not enough historical data
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False, "disabled": True},
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False, "disabled": True}
     }
