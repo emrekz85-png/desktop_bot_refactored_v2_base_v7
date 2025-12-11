@@ -1746,6 +1746,71 @@ class TradingEngine:
         long_direction_ok = True
         short_direction_ok = True
 
+        # ================= WICK REJECTION QUALITY =================
+        candle_range = high - low
+        if candle_range > 0:
+            upper_wick = high - max(open_, close)
+            lower_wick = min(open_, close) - low
+            upper_wick_ratio = upper_wick / candle_range
+            lower_wick_ratio = lower_wick / candle_range
+        else:
+            upper_wick_ratio = 0.0
+            lower_wick_ratio = 0.0
+
+        # Minimum wick ratio for quality rejection (0.3 = 30% of candle is wick)
+        min_wick_ratio = 0.3
+        long_rejection_quality = lower_wick_ratio >= min_wick_ratio
+        short_rejection_quality = upper_wick_ratio >= min_wick_ratio
+
+        debug_info.update({
+            "upper_wick_ratio": upper_wick_ratio,
+            "lower_wick_ratio": lower_wick_ratio,
+            "long_rejection_quality": long_rejection_quality,
+            "short_rejection_quality": short_rejection_quality,
+        })
+
+        # ================= PRICE-PBEMA POSITION CHECK =================
+        # LONG: Fiyat PBEMA'nın ALTINDA olmalı (PBEMA üstte/kırmızı)
+        # SHORT: Fiyat PBEMA'nın ÜSTÜNDE olmalı (PBEMA altta/yeşil)
+        price_below_pbema = close < pb_bot
+        price_above_pbema = close > pb_top
+
+        debug_info.update({
+            "price_below_pbema": price_below_pbema,
+            "price_above_pbema": price_above_pbema,
+        })
+
+        # ================= KELTNER PENETRATION (TRAP) DETECTION =================
+        # Son N mumda Keltner'ı aşıp geri dönen mum var mı? (daha güçlü sinyal)
+        penetration_lookback = min(3, len(df) - abs_index - 1) if abs_index < len(df) - 1 else 0
+
+        # Long: Son mumlarda alt Keltner'ın altına inip geri dönen var mı?
+        long_penetration = False
+        if penetration_lookback > 0:
+            for i in range(1, penetration_lookback + 1):
+                if abs_index - i >= 0:
+                    past_low = float(df["low"].iloc[abs_index - i])
+                    past_lower_band = float(df["keltner_lower"].iloc[abs_index - i])
+                    if past_low < past_lower_band:
+                        long_penetration = True
+                        break
+
+        # Short: Son mumlarda üst Keltner'ın üstüne çıkıp geri dönen var mı?
+        short_penetration = False
+        if penetration_lookback > 0:
+            for i in range(1, penetration_lookback + 1):
+                if abs_index - i >= 0:
+                    past_high = float(df["high"].iloc[abs_index - i])
+                    past_upper_band = float(df["keltner_upper"].iloc[abs_index - i])
+                    if past_high > past_upper_band:
+                        short_penetration = True
+                        break
+
+        debug_info.update({
+            "long_penetration": long_penetration,
+            "short_penetration": short_penetration,
+        })
+
         # ================= LONG =================
         holding_long = (closes_slice > lower_slice).mean() >= min_hold_frac
 
@@ -1762,11 +1827,16 @@ class TradingEngine:
                 (keltner_pb_gap_long >= cloud_keltner_gap_min)
         )
 
-        is_long = holding_long and retest_long and pb_target_long
+        # Enhanced LONG signal with new filters
+        # Rejection quality OR penetration (trap) makes the signal valid
+        long_quality_ok = long_rejection_quality or long_penetration
+
+        is_long = holding_long and retest_long and pb_target_long and price_below_pbema and long_quality_ok
         debug_info.update({
             "holding_long": holding_long,
             "retest_long": retest_long,
             "pb_target_long": pb_target_long,
+            "long_quality_ok": long_quality_ok,
         })
 
         # ================= SHORT =================
@@ -1785,11 +1855,16 @@ class TradingEngine:
                 (keltner_pb_gap_short >= cloud_keltner_gap_min)
         )
 
-        is_short = holding_short and retest_short and pb_target_short
+        # Enhanced SHORT signal with new filters
+        # Rejection quality OR penetration (trap) makes the signal valid
+        short_quality_ok = short_rejection_quality or short_penetration
+
+        is_short = holding_short and retest_short and pb_target_short and price_above_pbema and short_quality_ok
         debug_info.update({
             "holding_short": holding_short,
             "retest_short": retest_short,
             "pb_target_short": pb_target_short,
+            "short_quality_ok": short_quality_ok,
         })
 
         # --- RSI (LONG için üst sınır) ---
