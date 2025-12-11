@@ -476,7 +476,7 @@ def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) 
     pb_bots = df.get("pb_ema_bot", df["close"]).values if "pb_ema_bot" in df.columns else closes
 
     for i in range(warmup, end):
-        event_time = timestamps[i] + _tf_to_timedelta(tf)
+        event_time = pd.Timestamp(timestamps[i]) + _tf_to_timedelta(tf)
         tm.update_trades(
             sym,
             tf,
@@ -4489,7 +4489,7 @@ def run_portfolio_backtest(
         total_events += max(0, end - warmup)
         heapq.heappush(
             heap,
-            (df.loc[warmup, "timestamp"] + _tf_to_timedelta(tf), sym, tf),
+            (pd.Timestamp(df.loc[warmup, "timestamp"]) + _tf_to_timedelta(tf), sym, tf),
         )
 
     tm = SimTradeManager(initial_balance=TRADING_CONFIG["initial_balance"])
@@ -4513,7 +4513,7 @@ def run_portfolio_backtest(
             candle_high=float(arrays["highs"][i]),
             candle_low=float(arrays["lows"][i]),
             candle_close=float(arrays["closes"][i]),
-            candle_time_utc=arrays["timestamps"][i] + _tf_to_timedelta(tf),
+            candle_time_utc=pd.Timestamp(arrays["timestamps"][i]) + _tf_to_timedelta(tf),
             pb_top=float(arrays["pb_tops"][i]),
             pb_bot=float(arrays["pb_bots"][i]),
         )
@@ -4601,7 +4601,7 @@ def run_portfolio_backtest(
         if i2 < len(df) - 1:
             heapq.heappush(
                 heap,
-                (df.loc[i2, "timestamp"] + _tf_to_timedelta(tf), sym, tf),
+                (pd.Timestamp(df.loc[i2, "timestamp"]) + _tf_to_timedelta(tf), sym, tf),
             )
 
         # Progress log
