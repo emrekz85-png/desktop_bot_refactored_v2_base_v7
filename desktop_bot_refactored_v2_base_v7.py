@@ -43,7 +43,7 @@ import plotly.utils
 # ==========================================
 # ⚙️ GENEL AYARLAR VE SABİTLER (MERKEZİ YÖNETİM)
 # ==========================================
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT"]
 # 1m removed - too noisy, inconsistent results across all symbols
 LOWER_TIMEFRAMES = ["5m", "15m", "1h"]
 HTF_TIMEFRAMES = ["4h", "12h", "1d"]
@@ -88,9 +88,9 @@ TRADING_CONFIG = {
     "initial_balance": 2000.0,
     "leverage": 10,
     "usable_balance_pct": 0.20,  # Bakiyenin %20'si
-    # INCREASED from 0.01 to 0.015 for 50% more profit potential
-    "risk_per_trade_pct": 0.015,  # Her işlemde %1.5 risk (was 1%)
-    "max_portfolio_risk_pct": 0.045,  # Toplam portföy riski %4.5 (was 3%)
+    # INCREASED from 0.015 to 0.0175 for additional profit potential
+    "risk_per_trade_pct": 0.0175,  # Her işlemde %1.75 risk (was 1.5%)
+    "max_portfolio_risk_pct": 0.05,  # Toplam portföy riski %5 (was 4.5%)
     "slippage_rate": 0.0005,     # %0.05 Kayma Payı
     "funding_rate_8h": 0.0001,   # %0.01 Fonlama (8 saatlik)
     "maker_fee": 0.0002,         # %0.02 Limit Emir Komisyonu
@@ -162,6 +162,16 @@ SYMBOL_PARAMS = {
         "4h": {"rr": 2.0, "rsi": 30, "slope": 0.3, "at_active": True, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.4, "at_active": True, "use_trailing": False},
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.4, "at_active": True, "use_trailing": False}
+    },
+    "HYPEUSDT": {
+        # NEW SYMBOL - Starting with balanced/conservative settings
+        # Will be optimized based on backtest results
+        "5m": {"rr": 1.5, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": True},
+        "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "1h": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False},
+        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False},
+        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False}
     }
 }
 
