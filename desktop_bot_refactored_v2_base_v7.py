@@ -88,8 +88,9 @@ TRADING_CONFIG = {
     "initial_balance": 2000.0,
     "leverage": 10,
     "usable_balance_pct": 0.20,  # Bakiyenin %20'si
-    "risk_per_trade_pct": 0.01,  # Her işlemde %1 risk
-    "max_portfolio_risk_pct": 0.03,  # Toplam portföy riski %3
+    # INCREASED from 0.01 to 0.015 for 50% more profit potential
+    "risk_per_trade_pct": 0.015,  # Her işlemde %1.5 risk (was 1%)
+    "max_portfolio_risk_pct": 0.045,  # Toplam portföy riski %4.5 (was 3%)
     "slippage_rate": 0.0005,     # %0.05 Kayma Payı
     "funding_rate_8h": 0.0001,   # %0.01 Fonlama (8 saatlik)
     "maker_fee": 0.0002,         # %0.02 Limit Emir Komisyonu
@@ -98,25 +99,29 @@ TRADING_CONFIG = {
 }
 
 # ==========================================
-# 🚀 v31.0 - OPTIMIZED CONFIG (BACKTEST DATA-DRIVEN)
+# 🚀 v32.0 - AGGRESSIVE PROFIT OPTIMIZATION
 # ==========================================
-# Based on 3000-candle backtest results:
-# - 1m timeframe removed (too noisy)
-# - BTCUSDT-1h: DISABLED (36% WR, -$50 loss)
-# - Focus on profitable combinations
+# Based on v31.0 backtest: +$166.31
+# Target: +$250+ (50% improvement)
+#
+# Key changes:
+# - BTCUSDT-1h: RE-ENABLED (was +$99.48!)
+# - BTCUSDT-5m: DISABLED (-$29.21)
+# - ETHUSDT-5m: DISABLED (-$42.65)
+# - Using optimization best settings
 # ==========================================
 SYMBOL_PARAMS = {
     "BTCUSDT": {
-        # 5m: Best performer for BTC (+$64 in optimization)
-        # Backtest: RR=1.8, RSI=35, AT=Kapalı
-        "5m": {"rr": 1.8, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
+        # 5m: DISABLED - losing money (-$29.21, 40% WR)
+        "5m": {"rr": 2.4, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False, "disabled": True},
 
-        # 15m: Moderate (+$23 in optimization)
-        "15m": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
+        # 15m: Keep but monitor (-$12.93, 60% WR - high WR but still losing)
+        # Using optimization settings: RR=1.2, RSI=45, AT=On
+        "15m": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False},
 
-        # 1h: PROBLEMATIC - 36% WR, -$50 loss. Set very strict to minimize trades
-        # High RR requirement will filter out most signals
-        "1h": {"rr": 3.0, "rsi": 25, "slope": 0.2, "at_active": True, "use_trailing": False, "disabled": True},
+        # 1h: STAR PERFORMER! +$99.48, 42% WR - RE-ENABLED!
+        # Using optimization settings: RR=2.1, RSI=45, AT=Off
+        "1h": {"rr": 2.1, "rsi": 45, "slope": 0.2, "at_active": False, "use_trailing": False},
 
         # HTF: Keep conservative
         "4h": {"rr": 2.0, "rsi": 30, "slope": 0.3, "at_active": False, "use_trailing": False},
@@ -124,13 +129,15 @@ SYMBOL_PARAMS = {
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
     },
     "ETHUSDT": {
-        # 5m: Poor performance (0% WR), keep strict
-        "5m": {"rr": 2.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
+        # 5m: DISABLED - very poor performance (-$42.65, 33% WR)
+        "5m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False, "disabled": True},
 
-        # 15m: GREAT performer (+$51, 57% WR)
-        "15m": {"rr": 1.5, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False},
+        # 15m: GREAT performer (+$32.33, 78% WR!)
+        # Using optimization settings: RR=1.2, RSI=45, AT=On
+        "15m": {"rr": 1.2, "rsi": 45, "slope": 0.4, "at_active": True, "use_trailing": False},
 
-        # 1h: EXCELLENT (76.5% WR, +$37) - Best WR in portfolio!
+        # 1h: EXCELLENT (+$48.45, 76% WR!)
+        # Using optimization settings: RR=1.2, RSI=45, AT=Off
         "1h": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": False, "use_trailing": False},
 
         # HTF: Keep existing
@@ -139,13 +146,16 @@ SYMBOL_PARAMS = {
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False}
     },
     "SOLUSDT": {
-        # 5m: Good performer (+$13, 56% WR) - from optimization +$95
+        # 5m: GREAT performer (+$48.28, 56% WR)
+        # Using optimization settings: RR=1.5, RSI=45, AT=On
         "5m": {"rr": 1.5, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": True},
 
-        # 15m: PERFECT (100% WR, +$52) - Best performer!
-        "15m": {"rr": 1.5, "rsi": 35, "slope": 0.4, "at_active": True, "use_trailing": False},
+        # 15m: Good performer (+$25.92, 67% WR)
+        # Using optimization settings: RR=1.5, RSI=35, AT=On
+        "15m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
 
-        # 1h: Moderate (28.6% WR but profitable)
+        # 1h: Slight loss (-$3.36, 43% WR) - keep but with optimized settings
+        # Using optimization settings: RR=1.2, RSI=35, AT=Off
         "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
 
         # HTF: Keep existing
