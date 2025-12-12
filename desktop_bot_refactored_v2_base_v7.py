@@ -382,12 +382,12 @@ def _apply_1m_profit_lock(
 ) -> bool:
     """Shift SL into profit on 1m trades once price is very close to TP.
 
-    When the price reaches 85% of the distance to TP, move SL to a level that
+    When the price reaches 80% of the distance to TP, move SL to a level that
     locks 40% of the entry-to-TP distance as profit. Applies to both live and
     backtest flows.
     """
 
-    if tf != "1m" or progress < 0.85:
+    if tf != "1m" or progress < 0.80:
         return False
 
     total_dist = abs(tp - entry)
@@ -414,12 +414,15 @@ def _apply_1m_profit_lock(
 
 
 def _apply_partial_stop_protection(trade: dict, tf: str, progress: float, t_type: str) -> bool:
-    """Raise SL to partial fill price after deeper TP progress on higher timeframes."""
+    """Raise SL to partial fill price after deeper TP progress on higher timeframes.
+
+    %80 progress'te SL'yi partial fill seviyesine çeker (kar koruma).
+    """
 
     if tf not in PARTIAL_STOP_PROTECTION_TFS:
         return False
 
-    if not trade.get("partial_taken") or progress < 0.85:
+    if not trade.get("partial_taken") or progress < 0.80:
         return False
 
     p_price = trade.get("partial_price")
@@ -1235,27 +1238,22 @@ class TradeManager:
                 use_dynamic_tp = config.get("use_dynamic_pbema_tp", True)
 
                 # --- Fiyatlar ---
-                # CONSERVATIVE PARTIAL TP: Use weighted average of extreme and close
-                # This reduces optimistic bias from using wick extremes
-                # Weight: 70% close + 30% extreme (more realistic fill simulation)
-                close_weight = 0.70
-                extreme_weight = 0.30
+                # Partial TP için conservative fill hesaplaması
+                # Ama progress için gerçek candle extreme kullanılmalı
                 if t_type == "LONG":
                     close_price = candle_close
-                    extreme_price = candle_high
-                    # Conservative fill: blend of close and high (can't always fill at the wick)
-                    fav_price = close_price * close_weight + extreme_price * extreme_weight
+                    extreme_price = candle_high  # Progress için gerçek high
+                    # Partial fill için conservative: 70% close + 30% extreme
+                    partial_fill_price = close_price * 0.70 + extreme_price * 0.30
                     pnl_percent_close = (close_price - entry) / entry
-                    pnl_percent_fav = (fav_price - entry) / entry
-                    in_profit = fav_price > entry
+                    in_profit = extreme_price > entry
                 else:
                     close_price = candle_close
-                    extreme_price = candle_low
-                    # Conservative fill: blend of close and low (can't always fill at the wick)
-                    fav_price = close_price * close_weight + extreme_price * extreme_weight
+                    extreme_price = candle_low  # Progress için gerçek low
+                    # Partial fill için conservative: 70% close + 30% extreme
+                    partial_fill_price = close_price * 0.70 + extreme_price * 0.30
                     pnl_percent_close = (entry - close_price) / entry
-                    pnl_percent_fav = (entry - fav_price) / entry
-                    in_profit = fav_price < entry
+                    in_profit = extreme_price < entry
 
                 # Dinamik PBEMA TP: varsa her mumda bulutun güncel seviyesini hedefle
                 dyn_tp = tp
@@ -1274,11 +1272,11 @@ class TradeManager:
                     live_pnl = (entry - close_price) * size
                 self.open_trades[i]["pnl"] = live_pnl
 
-                # Hedefe ilerleme oranı (en iyi fiyata göre)
+                # Hedefe ilerleme oranı (GERÇEK extreme'e göre, conservative değil)
                 total_dist = abs(dyn_tp - entry)
                 if total_dist <= 0:
                     continue
-                current_dist = abs(fav_price - entry)
+                current_dist = abs(extreme_price - entry)
                 progress = current_dist / total_dist if total_dist > 0 else 0.0
 
                 # ---------- PARTIAL TP + BREAKEVEN ----------
@@ -1286,11 +1284,12 @@ class TradeManager:
                     if (not self.open_trades[i].get("partial_taken")) and progress >= 0.50:
                         partial_size = size / 2.0
 
+                        # Partial fill için conservative fiyat kullan
                         if t_type == "LONG":
-                            partial_fill = float(fav_price) * (1 - self.slippage_pct)
+                            partial_fill = float(partial_fill_price) * (1 - self.slippage_pct)
                             partial_pnl_percent = (partial_fill - entry) / entry
                         else:
-                            partial_fill = float(fav_price) * (1 + self.slippage_pct)
+                            partial_fill = float(partial_fill_price) * (1 + self.slippage_pct)
                             partial_pnl_percent = (entry - partial_fill) / entry
 
                         partial_pnl = partial_pnl_percent * (entry * partial_size)
@@ -4572,27 +4571,23 @@ class SimTradeManager:
             use_partial = not use_trailing
             use_dynamic_tp = config.get("use_dynamic_pbema_tp", True)
 
-            # CONSERVATIVE PARTIAL TP: Use weighted average of extreme and close
-            # This reduces optimistic bias from using wick extremes
-            # Weight: 70% close + 30% extreme (more realistic fill simulation)
-            close_weight = 0.70
-            extreme_weight = 0.30
+            # --- Fiyatlar ---
+            # Partial TP için conservative fill hesaplaması
+            # Ama progress için gerçek candle extreme kullanılmalı
             if t_type == "LONG":
                 close_price = candle_close
-                extreme_price = candle_high
-                # Conservative fill: blend of close and high (can't always fill at the wick)
-                fav_price = close_price * close_weight + extreme_price * extreme_weight
+                extreme_price = candle_high  # Progress için gerçek high
+                # Partial fill için conservative: 70% close + 30% extreme
+                partial_fill_price = close_price * 0.70 + extreme_price * 0.30
                 pnl_percent_close = (close_price - entry) / entry
-                pnl_percent_fav = (fav_price - entry) / entry
-                in_profit = fav_price > entry
+                in_profit = extreme_price > entry
             else:
                 close_price = candle_close
-                extreme_price = candle_low
-                # Conservative fill: blend of close and low (can't always fill at the wick)
-                fav_price = close_price * close_weight + extreme_price * extreme_weight
+                extreme_price = candle_low  # Progress için gerçek low
+                # Partial fill için conservative: 70% close + 30% extreme
+                partial_fill_price = close_price * 0.70 + extreme_price * 0.30
                 pnl_percent_close = (entry - close_price) / entry
-                pnl_percent_fav = (entry - fav_price) / entry
-                in_profit = fav_price < entry
+                in_profit = extreme_price < entry
 
             dyn_tp = tp
             if use_dynamic_tp:
@@ -4609,21 +4604,23 @@ class SimTradeManager:
                 live_pnl = (entry - close_price) * size
             self.open_trades[i]["pnl"] = live_pnl
 
+            # Hedefe ilerleme oranı (GERÇEK extreme'e göre, conservative değil)
             total_dist = abs(dyn_tp - entry)
             if total_dist <= 0:
                 continue
-            current_dist = abs(fav_price - entry)
+            current_dist = abs(extreme_price - entry)
             progress = current_dist / total_dist if total_dist > 0 else 0.0
 
             if in_profit and use_partial:
                 if (not trade.get("partial_taken")) and progress >= 0.50:
                     partial_size = size / 2.0
 
+                    # Partial fill için conservative fiyat kullan
                     if t_type == "LONG":
-                        partial_fill = float(fav_price) * (1 - self.slippage_pct)
+                        partial_fill = float(partial_fill_price) * (1 - self.slippage_pct)
                         partial_pnl_percent = (partial_fill - entry) / entry
                     else:
-                        partial_fill = float(fav_price) * (1 + self.slippage_pct)
+                        partial_fill = float(partial_fill_price) * (1 + self.slippage_pct)
                         partial_pnl_percent = (entry - partial_fill) / entry
 
                     partial_pnl = partial_pnl_percent * (entry * partial_size)
