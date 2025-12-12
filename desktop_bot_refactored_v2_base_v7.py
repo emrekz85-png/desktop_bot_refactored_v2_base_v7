@@ -4887,6 +4887,60 @@ def run_portfolio_backtest(
             if progress >= next_progress:
                 log(f"[BACKTEST] %{progress:.1f} tamamlandı...", category="progress")
                 next_progress += 10
+
+    # ==========================================
+    # BACKTEST SONUNDA AÇIK POZİSYONLARI KAPAT
+    # ==========================================
+    # Açık kalan pozisyonları son bilinen fiyattan zorla kapat
+    if tm.open_trades:
+        log(f"[BACKTEST] {len(tm.open_trades)} açık pozisyon kapatılıyor...", category="summary")
+        for trade in list(tm.open_trades):
+            sym = trade["symbol"]
+            tf = trade["timeframe"]
+            entry = float(trade["entry"])
+            t_type = trade["type"]
+            current_size = float(trade.get("size", 0))
+            initial_margin = float(trade.get("margin", 0))
+
+            # Son kapanış fiyatını bul
+            if (sym, tf) in df_cache:
+                df = df_cache[(sym, tf)]
+                if not df.empty:
+                    last_close = float(df.iloc[-1]["close"])
+                else:
+                    last_close = entry  # Veri yoksa entry fiyatından kapat
+            else:
+                last_close = entry
+
+            # PnL hesapla
+            if t_type == "LONG":
+                exit_fill = last_close * (1 - tm.slippage_pct)
+                gross_pnl = (exit_fill - entry) * current_size
+            else:
+                exit_fill = last_close * (1 + tm.slippage_pct)
+                gross_pnl = (entry - exit_fill) * current_size
+
+            # Komisyon
+            exit_notional = abs(current_size) * abs(exit_fill)
+            commission = exit_notional * TRADING_CONFIG["total_fee"]
+            net_pnl = gross_pnl - commission
+
+            # Margin geri ver ve PnL ekle
+            tm.wallet_balance += initial_margin + net_pnl
+            tm.locked_margin -= initial_margin
+            tm.total_pnl += net_pnl
+
+            # Trade'i history'ye ekle
+            trade["status"] = "FORCE_CLOSE"
+            trade["pnl"] = net_pnl
+            trade["close_price"] = exit_fill
+            trade["close_time"] = "BACKTEST_END"
+            tm.history.append(trade)
+
+        # Açık trade listesini temizle
+        tm.open_trades.clear()
+        log(f"[BACKTEST] Açık pozisyonlar kapatıldı. Yeni bakiye: ${tm.wallet_balance:.2f}", category="summary")
+
     total_closed_legs = len(tm.history)
     unique_trades = len({t.get("id") for t in tm.history}) if tm.history else 0
     partial_legs = sum(1 for t in tm.history if "PARTIAL" in str(t.get("status", "")))
