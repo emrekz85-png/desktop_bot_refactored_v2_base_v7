@@ -46,5 +46,6 @@ daily_report_summary.csv
 config.json
 best_configs.json
 backtest_meta.json
+potential_trades.json
 error_log.txt
 trades_temp_*.csv
