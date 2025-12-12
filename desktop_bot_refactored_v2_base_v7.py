@@ -35,7 +35,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QGroupBox, QDoubleSpinBox, QComboBox, QMessageBox, QCheckBox,
                              QLineEdit, QSpinBox, QFrame)  # <--- EKLENDİ
 from PyQt5.QtWebEngineWidgets import QWebEngineView
-from PyQt5.QtCore import QThread, pyqtSignal, QTimer
+from PyQt5.QtCore import QThread, pyqtSignal, QTimer, Qt
 from PyQt5.QtGui import QColor, QFont
 import plotly.graph_objects as go
 import plotly.utils
@@ -50,6 +50,9 @@ HTF_TIMEFRAMES = ["4h", "12h", "1d"]
 TIMEFRAMES = LOWER_TIMEFRAMES + HTF_TIMEFRAMES
 candles = 50000
 REFRESH_RATE = 3
+
+# Grafik güncelleme - False = daha hızlı başlatma, daha az CPU
+ENABLE_CHARTS = False
 CSV_FILE = "trades.csv"
 CONFIG_FILE = "config.json"
 # Backtestler için maks. mum sayısı sınırları
@@ -3463,11 +3466,20 @@ class MainWindow(QMainWindow):
                 box.setStyleSheet("QGroupBox { border: 1px solid #333; font-weight: bold; color: #00ccff; }")
                 box_layout = QVBoxLayout(box)
                 box_layout.setContentsMargins(0, 15, 0, 0)
-                view = QWebEngineView()
-                view.setHtml(CHART_TEMPLATE)
-                view.loadFinished.connect(lambda ok, t=tf: self.on_load_finished(ok, t))
-                box_layout.addWidget(view)
-                self.web_views[tf] = view
+
+                if ENABLE_CHARTS:
+                    view = QWebEngineView()
+                    view.setHtml(CHART_TEMPLATE)
+                    view.loadFinished.connect(lambda ok, t=tf: self.on_load_finished(ok, t))
+                    box_layout.addWidget(view)
+                    self.web_views[tf] = view
+                else:
+                    # Grafik kapalı - basit placeholder
+                    placeholder = QLabel(f"📊 {tf} - Grafik devre dışı (ENABLE_CHARTS=False)")
+                    placeholder.setStyleSheet("color: #666; padding: 20px; font-size: 14px;")
+                    placeholder.setAlignment(Qt.AlignCenter)
+                    box_layout.addWidget(placeholder)
+
                 grid.addWidget(box, idx // 2, idx % 2)
 
             return widget
@@ -3757,7 +3769,8 @@ class MainWindow(QMainWindow):
         if symbol == self.current_symbol: self.render_chart_and_log(tf, json_data, log_msg)
 
     def render_chart_and_log(self, tf, json_data, log_msg):
-        if self.views_ready.get(tf, False) and json_data and json_data != "{}":
+        # Grafik güncelleme sadece ENABLE_CHARTS=True ise
+        if ENABLE_CHARTS and self.views_ready.get(tf, False) and json_data and json_data != "{}":
             safe_json = json_data.replace("'", "\\'").replace("\\", "\\\\")
             js = f"if(window.updateChartData) window.updateChartData('{safe_json}');"
             self.web_views[tf].page().runJavaScript(js)
