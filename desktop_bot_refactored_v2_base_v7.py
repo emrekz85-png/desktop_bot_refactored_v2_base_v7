@@ -4301,12 +4301,13 @@ class SimTradeManager:
         return tid
 
     def open_trade(self, trade_data):
+        """Returns True if trade was opened successfully, False otherwise."""
         tf = trade_data["timeframe"]
         sym = trade_data["symbol"]
 
         cooldown_ref_time = trade_data.get("open_time_utc") or datetime.utcnow()
         if self.check_cooldown(sym, tf, cooldown_ref_time):
-            return
+            return False
 
         # Aynı sembol ve timeframe için halihazırda açık bir pozisyon varsa
         # yeni trade'i reddet (üst katmanda kontrol kaçsa bile güvenlik katmanı).
@@ -4314,12 +4315,12 @@ class SimTradeManager:
             t.get("symbol") == sym and t.get("timeframe") == tf
             for t in self.open_trades
         ):
-            return
+            return False
 
         setup_type = trade_data.get("setup", "Unknown")
 
         if self.wallet_balance < 10:
-            return
+            return False
 
         raw_entry = float(trade_data["entry"])
         trade_type = trade_data["type"]
@@ -4333,20 +4334,20 @@ class SimTradeManager:
 
         current_portfolio_risk_pct = self._calculate_portfolio_risk_pct(self.wallet_balance)
         if current_portfolio_risk_pct + self.risk_per_trade_pct > self.max_portfolio_risk_pct:
-            return
+            return False
 
         wallet_balance = self.wallet_balance
         if wallet_balance <= 0:
-            return
+            return False
 
         risk_amount = wallet_balance * self.risk_per_trade_pct
         sl_distance = abs(real_entry - sl_price)
         if sl_distance <= 0:
-            return
+            return False
 
         sl_fraction = sl_distance / real_entry
         if sl_fraction <= 0:
-            return
+            return False
 
         position_notional = risk_amount / sl_fraction
         position_size = position_notional / real_entry
@@ -4357,7 +4358,7 @@ class SimTradeManager:
         if required_margin > wallet_balance:
             max_notional = wallet_balance * leverage
             if max_notional <= 0:
-                return
+                return False
             position_notional = max_notional
             position_size = position_notional / real_entry
             required_margin = position_notional / leverage
@@ -4407,6 +4408,7 @@ class SimTradeManager:
             f"Margin: ${required_margin:.2f}, Risk%: {self.risk_per_trade_pct * 100:.2f}%, "
             f"Risk$: ${risk_amount:.2f}, Portföy Risk%: {new_portfolio_risk_pct * 100:.2f}%"
         )
+        return True
 
     def update_trades(
         self,
@@ -4851,12 +4853,15 @@ def run_portfolio_backtest(
                 if "ACCEPTED" in s_reason_str and "(" in s_reason_str and ")" in s_reason_str:
                     setup_tag = s_reason_str[s_reason_str.find("(") + 1 : s_reason_str.find(")")]
 
-                log(
-                    f"[POT][{sym}-{tf}] {s_type} {signal_ts_str} kabul edildi (setup={setup_tag}).",
-                    category="potential",
-                )
+                # R/R from reason string
+                rr_str = ""
+                if "R:" in s_reason_str:
+                    rr_start = s_reason_str.find("R:") + 2
+                    rr_end = s_reason_str.find(")", rr_start) if ")" in s_reason_str[rr_start:] else len(s_reason_str)
+                    rr_str = s_reason_str[rr_start:rr_start + (rr_end - rr_start)].split(",")[0].split(")")[0]
 
-                tm.open_trade(
+                # Try to open trade - only log if successful
+                trade_opened = tm.open_trade(
                     {
                         "symbol": sym,
                         "timeframe": tf,
@@ -4869,7 +4874,18 @@ def run_portfolio_backtest(
                         "open_time_utc": open_ts,
                     }
                 )
-                opened_signals[(sym, tf)] = opened_signals.get((sym, tf), 0) + 1
+
+                if trade_opened:
+                    log(
+                        f"[POT][{sym}-{tf}] {s_type} {signal_ts_str} kabul edildi (setup={setup_tag},R:{rr_str}).",
+                        category="potential",
+                    )
+                    opened_signals[(sym, tf)] = opened_signals.get((sym, tf), 0) + 1
+                else:
+                    log(
+                        f"[POT][{sym}-{tf}] {s_type} {signal_ts_str} reddedildi: portföy risk limiti.",
+                        category="potential",
+                    )
 
         # Sonraki bara ilerle
         i2 = i + 1
