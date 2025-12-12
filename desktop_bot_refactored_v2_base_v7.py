@@ -565,9 +565,13 @@ def _generate_candidate_configs():
     rsi_vals = np.arange(35, 76, 10)
     slope_vals = np.arange(0.2, 0.9, 0.2)
     at_vals = [False, True]
+    # Include both dynamic TP options to ensure optimizer matches what live will use
+    dyn_tp_vals = [True, False]
 
     candidates = []
-    for rr, rsi, slope, at_active in itertools.product(rr_vals, rsi_vals, slope_vals, at_vals):
+    for rr, rsi, slope, at_active, dyn_tp in itertools.product(
+        rr_vals, rsi_vals, slope_vals, at_vals, dyn_tp_vals
+    ):
         candidates.append(
             {
                 "rr": round(float(rr), 2),
@@ -575,7 +579,7 @@ def _generate_candidate_configs():
                 "slope": round(float(slope), 2),
                 "at_active": bool(at_active),
                 "use_trailing": False,
-                "use_dynamic_pbema_tp": False,
+                "use_dynamic_pbema_tp": bool(dyn_tp),
             }
         )
 
@@ -589,8 +593,66 @@ def _generate_candidate_configs():
     return candidates + trailing_extras
 
 
-def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) -> Tuple[float, int]:
-    """Simulate a single timeframe with the given config and return (net_pnl, trades).
+def _compute_optimizer_score(net_pnl: float, trades: int, trade_pnls: list, min_trades: int = 5) -> float:
+    """Compute a robust optimizer score that penalizes overfitting.
+
+    Uses a modified Sortino-like approach:
+    - Penalizes low trade counts (statistical insignificance)
+    - Penalizes high variance in returns (inconsistent edge)
+    - Rewards positive expectancy with consistency
+
+    Args:
+        net_pnl: Total net profit/loss
+        trades: Number of trades
+        trade_pnls: List of individual trade PnLs
+        min_trades: Minimum trades for full confidence (default 5)
+
+    Returns:
+        Composite score (higher is better)
+    """
+    if trades == 0:
+        return -float("inf")
+
+    # Trade count confidence factor (0.3 to 1.0)
+    # Few trades = less confidence in the edge
+    trade_confidence = min(1.0, 0.3 + 0.7 * (trades / max(min_trades, 1)))
+
+    # Average PnL per trade (expectancy)
+    avg_pnl = net_pnl / trades
+
+    # Downside deviation (Sortino-style) - only penalize negative variance
+    if len(trade_pnls) >= 2:
+        negative_pnls = [p for p in trade_pnls if p < 0]
+        if negative_pnls:
+            downside_std = (sum(p**2 for p in negative_pnls) / len(negative_pnls)) ** 0.5
+        else:
+            downside_std = 0.0
+
+        # Consistency bonus: lower variance = more reliable edge
+        # Normalize by average trade size to make it comparable
+        if downside_std > 0 and avg_pnl != 0:
+            consistency_ratio = abs(avg_pnl) / (downside_std + 1e-6)
+            consistency_factor = min(1.5, 0.5 + consistency_ratio * 0.25)
+        else:
+            consistency_factor = 1.0 if avg_pnl > 0 else 0.5
+    else:
+        consistency_factor = 0.7  # Single trade = less reliable
+
+    # Win rate bonus (slight preference for higher win rates at equal PnL)
+    if trade_pnls:
+        win_rate = sum(1 for p in trade_pnls if p > 0) / len(trade_pnls)
+        win_rate_factor = 0.9 + win_rate * 0.2  # 0.9 to 1.1
+    else:
+        win_rate_factor = 1.0
+
+    # Final score = net_pnl * confidence * consistency * win_rate_bonus
+    score = net_pnl * trade_confidence * consistency_factor * win_rate_factor
+
+    return score
+
+
+def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) -> Tuple[float, int, list]:
+    """Simulate a single timeframe with the given config and return (net_pnl, trades, trade_pnls).
 
     Not: Öndeki uyumsuzluk, tarayıcıdaki skorlamanın mum kapanışından
     aynı mumda giriş yapıp cooldown/açık trade kontrollerini atlaması yüzünden
@@ -655,10 +717,28 @@ def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) 
         if has_open or tm.check_cooldown(sym, tf, event_time):
             continue
 
-        # Access next candle for entry price
+        # Access next candle for entry price (more realistic simulation)
         entry_open = float(opens[i + 1])
         open_ts = timestamps[i + 1]
         ts_str = (pd.Timestamp(open_ts) + pd.Timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
+
+        # RR re-validation with actual entry price (next candle open)
+        # Signal calculated RR based on close, but actual entry is at next open
+        # This prevents edge degradation from slippage
+        min_rr = config["rr"]
+        if s_type == "LONG":
+            actual_risk = entry_open - s_sl
+            actual_reward = s_tp - entry_open
+        else:  # SHORT
+            actual_risk = s_sl - entry_open
+            actual_reward = entry_open - s_tp
+
+        if actual_risk <= 0 or actual_reward <= 0:
+            continue  # Invalid RR after slippage
+
+        actual_rr = actual_reward / actual_risk
+        if actual_rr < min_rr * 0.9:  # 10% tolerance for slippage
+            continue  # RR degraded too much after slippage
 
         tm.open_trade(
             {
@@ -677,7 +757,8 @@ def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) 
         )
 
     unique_trades = len({t.get("id") for t in tm.history}) if tm.history else 0
-    return tm.total_pnl, unique_trades
+    trade_pnls = [t.get("pnl", 0.0) for t in tm.history] if tm.history else []
+    return tm.total_pnl, unique_trades, trade_pnls
 
 
 def _optimize_backtest_configs(
@@ -722,11 +803,12 @@ def _optimize_backtest_configs(
 
         df = streams[(sym, tf)]
         best_cfg = None
+        best_score = -float("inf")
         best_pnl = -float("inf")
         best_trades = 0
 
-        def handle_result(cfg, net_pnl, trades):
-            nonlocal completed, next_progress, best_cfg, best_pnl, best_trades
+        def handle_result(cfg, net_pnl, trades, trade_pnls):
+            nonlocal completed, next_progress, best_cfg, best_score, best_pnl, best_trades
 
             completed += 1
             progress = (completed / total_jobs) * 100
@@ -737,7 +819,11 @@ def _optimize_backtest_configs(
             if trades == 0:
                 return
 
-            if net_pnl > best_pnl:
+            # Use the new composite score instead of raw net_pnl
+            score = _compute_optimizer_score(net_pnl, trades, trade_pnls, min_trades=5)
+
+            if score > best_score:
+                best_score = score
                 best_pnl = net_pnl
                 best_cfg = cfg
                 best_trades = trades
@@ -752,7 +838,7 @@ def _optimize_backtest_configs(
                 for future in as_completed(futures):
                     cfg = futures[future]
                     try:
-                        net_pnl, trades = future.result()
+                        net_pnl, trades, trade_pnls = future.result()
                     except BrokenProcessPool:
                         # Havuza ait iş parçacığı çöktüyse seri moda düş.
                         raise
@@ -760,7 +846,7 @@ def _optimize_backtest_configs(
                         log(f"[OPT][{sym}-{tf}] Skorlama hatası (cfg={cfg}): {exc}")
                         continue
 
-                    handle_result(cfg, net_pnl, trades)
+                    handle_result(cfg, net_pnl, trades, trade_pnls)
 
         except BrokenProcessPool as exc:
             log(
@@ -770,19 +856,20 @@ def _optimize_backtest_configs(
 
             for cfg in candidates:
                 try:
-                    net_pnl, trades = _score_config_for_stream(df, sym, tf, cfg)
+                    net_pnl, trades, trade_pnls = _score_config_for_stream(df, sym, tf, cfg)
                 except Exception as exc:
                     log(f"[OPT][{sym}-{tf}] Seri skorlama hatası (cfg={cfg}): {exc}")
                     continue
 
-                handle_result(cfg, net_pnl, trades)
+                handle_result(cfg, net_pnl, trades, trade_pnls)
 
         if best_cfg:
-            best_by_pair[(sym, tf)] = {**best_cfg, "_net_pnl": best_pnl, "_trades": best_trades}
+            best_by_pair[(sym, tf)] = {**best_cfg, "_net_pnl": best_pnl, "_trades": best_trades, "_score": best_score}
+            dyn_tp_str = "Açık" if best_cfg.get('use_dynamic_pbema_tp') else "Kapalı"
             log(
                 f"[OPT][{sym}-{tf}] En iyi ayar: RR={best_cfg['rr']}, RSI={best_cfg['rsi']}, "
-                f"Slope={best_cfg['slope']}, AT={'Açık' if best_cfg['at_active'] else 'Kapalı'} | "
-                f"Net PnL={best_pnl:.2f}, Trades={best_trades}"
+                f"Slope={best_cfg['slope']}, AT={'Açık' if best_cfg['at_active'] else 'Kapalı'}, "
+                f"DynTP={dyn_tp_str} | Net PnL={best_pnl:.2f}, Trades={best_trades}, Score={best_score:.2f}"
             )
         else:
             log(f"[OPT][{sym}-{tf}] Uygun ayar bulunamadı (yetersiz trade)")
@@ -1140,15 +1227,24 @@ class TradeManager:
                 use_dynamic_tp = config.get("use_dynamic_pbema_tp", True)
 
                 # --- Fiyatlar ---
+                # CONSERVATIVE PARTIAL TP: Use weighted average of extreme and close
+                # This reduces optimistic bias from using wick extremes
+                # Weight: 70% close + 30% extreme (more realistic fill simulation)
+                close_weight = 0.70
+                extreme_weight = 0.30
                 if t_type == "LONG":
                     close_price = candle_close
-                    fav_price = candle_high  # long için en iyi fiyat wick-high
+                    extreme_price = candle_high
+                    # Conservative fill: blend of close and high (can't always fill at the wick)
+                    fav_price = close_price * close_weight + extreme_price * extreme_weight
                     pnl_percent_close = (close_price - entry) / entry
                     pnl_percent_fav = (fav_price - entry) / entry
                     in_profit = fav_price > entry
                 else:
                     close_price = candle_close
-                    fav_price = candle_low  # short için en iyi fiyat wick-low
+                    extreme_price = candle_low
+                    # Conservative fill: blend of close and low (can't always fill at the wick)
+                    fav_price = close_price * close_weight + extreme_price * extreme_weight
                     pnl_percent_close = (entry - close_price) / entry
                     pnl_percent_fav = (entry - fav_price) / entry
                     in_profit = fav_price < entry
@@ -1875,17 +1971,29 @@ class TradingEngine:
         pb_top = float(curr["pb_ema_top"])
         pb_bot = float(curr["pb_ema_bot"])
 
-        # --- Mean reversion: yön kısıtı yok ---
+        # --- Mean reversion with slope filter ---
         slope_top = float(curr.get("slope_top", 0.0) or 0.0)
         slope_bot = float(curr.get("slope_bot", 0.0) or 0.0)
         slope_thresh = slope_thresh or 0.0
 
-        # Slope bilgisi yalnızca debug amaçlı tutuluyor; yön kısıtı uygulanmıyor.
-        debug_info["trend_up_strong"] = slope_top > slope_thresh and pb_top >= pb_bot and close > pb_top
-        debug_info["trend_down_strong"] = slope_bot < -slope_thresh and pb_bot <= pb_top and close < pb_bot
+        # Trend detection for debug info
+        trend_up_strong = slope_top > slope_thresh and pb_top >= pb_bot and close > pb_top
+        trend_down_strong = slope_bot < -slope_thresh and pb_bot <= pb_top and close < pb_bot
+        debug_info["trend_up_strong"] = trend_up_strong
+        debug_info["trend_down_strong"] = trend_down_strong
+        debug_info["slope_top"] = slope_top
+        debug_info["slope_bot"] = slope_bot
+        debug_info["slope_thresh"] = slope_thresh
 
-        long_direction_ok = True
-        short_direction_ok = True
+        # Slope filter for mean reversion:
+        # - For LONG: Avoid buying when PBEMA is in strong downtrend (slope_bot < -thresh)
+        #   This prevents catching falling knives in a strong downmove
+        # - For SHORT: Avoid selling when PBEMA is in strong uptrend (slope_top > thresh)
+        #   This prevents shorting into strong momentum
+        long_direction_ok = not (slope_bot < -slope_thresh)
+        short_direction_ok = not (slope_top > slope_thresh)
+        debug_info["long_direction_ok"] = long_direction_ok
+        debug_info["short_direction_ok"] = short_direction_ok
 
         # ================= WICK REJECTION QUALITY =================
         candle_range = high - low
@@ -2015,14 +2123,28 @@ class TradingEngine:
             "price_above_pbema": price_above_pbema,
         })
 
-        # --- RSI (LONG için üst sınır) ---
-        long_rsi_limit = rsi_limit + 10.0
+        # --- RSI filters (symmetric for LONG and SHORT) ---
         rsi_val = float(curr["rsi"])
         debug_info["rsi_value"] = rsi_val
+
+        # LONG: RSI should not be too high (overbought territory)
+        # Using rsi_limit + 10 as upper bound
+        long_rsi_limit = rsi_limit + 10.0
         long_rsi_ok = rsi_val <= long_rsi_limit
         debug_info["long_rsi_ok"] = long_rsi_ok
+        debug_info["long_rsi_limit"] = long_rsi_limit
         if is_long and not long_rsi_ok:
             is_long = False
+
+        # SHORT: RSI should not be too low (oversold territory)
+        # Mirror of long: 100 - (rsi_limit + 10) as lower bound
+        # If rsi_limit=45, long_upper=55, short_lower=100-55=45
+        short_rsi_limit = 100.0 - long_rsi_limit
+        short_rsi_ok = rsi_val >= short_rsi_limit
+        debug_info["short_rsi_ok"] = short_rsi_ok
+        debug_info["short_rsi_limit"] = short_rsi_limit
+        if is_short and not short_rsi_ok:
+            is_short = False
 
         # --- AlphaTrend (opsiyonel) ---
         if use_alphatrend and "alphatrend" in df.columns:
@@ -4437,15 +4559,24 @@ class SimTradeManager:
             use_partial = not use_trailing
             use_dynamic_tp = config.get("use_dynamic_pbema_tp", True)
 
+            # CONSERVATIVE PARTIAL TP: Use weighted average of extreme and close
+            # This reduces optimistic bias from using wick extremes
+            # Weight: 70% close + 30% extreme (more realistic fill simulation)
+            close_weight = 0.70
+            extreme_weight = 0.30
             if t_type == "LONG":
                 close_price = candle_close
-                fav_price = candle_high
+                extreme_price = candle_high
+                # Conservative fill: blend of close and high (can't always fill at the wick)
+                fav_price = close_price * close_weight + extreme_price * extreme_weight
                 pnl_percent_close = (close_price - entry) / entry
                 pnl_percent_fav = (fav_price - entry) / entry
                 in_profit = fav_price > entry
             else:
                 close_price = candle_close
-                fav_price = candle_low
+                extreme_price = candle_low
+                # Conservative fill: blend of close and low (can't always fill at the wick)
+                fav_price = close_price * close_weight + extreme_price * extreme_weight
                 pnl_percent_close = (entry - close_price) / entry
                 pnl_percent_fav = (entry - fav_price) / entry
                 in_profit = fav_price < entry
