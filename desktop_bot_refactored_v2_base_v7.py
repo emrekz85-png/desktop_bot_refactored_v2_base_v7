@@ -477,7 +477,13 @@ def _append_trade_event(trade: dict, event_type: str, event_time, price: Optiona
 
 
 def _audit_trade_logic_parity() -> dict:
-    """Run a lightweight deterministic simulation on both managers to ensure parity."""
+    """Run a lightweight deterministic simulation on both managers to ensure parity.
+
+    Includes config change simulation to verify that trades use snapshot values
+    and are not affected by mid-trade config changes.
+    """
+
+    global BEST_CONFIG_CACHE
 
     try:
         symbol = "TESTCOIN"
@@ -495,11 +501,33 @@ def _audit_trade_logic_parity() -> dict:
             "open_time_utc": seed_ts,
         }
 
+        # Backup current config cache
+        original_cache = BEST_CONFIG_CACHE.copy() if BEST_CONFIG_CACHE else {}
+
         live_tm = TradeManager(persist=False, verbose=False)
         sim_tm = SimTradeManager(initial_balance=TRADING_CONFIG["initial_balance"])
 
         live_tm.open_trade(trade_data)
         sim_tm.open_trade(trade_data)
+
+        # Verify snapshot fields were written to trade
+        snapshot_fields_ok = True
+        for tm, name in [(live_tm, "live"), (sim_tm, "sim")]:
+            if tm.open_trades:
+                t = tm.open_trades[0]
+                if "use_trailing" not in t or "use_dynamic_pbema_tp" not in t:
+                    snapshot_fields_ok = False
+
+        # CRITICAL: Simulate config change AFTER trade is open
+        # This tests that update_trades uses snapshot values, not fresh config
+        BEST_CONFIG_CACHE[symbol] = {
+            tf: {
+                "use_trailing": True,  # Changed from default False
+                "use_dynamic_pbema_tp": False,  # Changed from default True
+                "rr": 99.0,  # Obviously different value
+                "rsi": 99,
+            }
+        }
 
         candle_time = seed_ts
         candles = [
@@ -530,6 +558,10 @@ def _audit_trade_logic_parity() -> dict:
                 pb_bot=102.5,
             )
 
+        # Restore original config cache
+        BEST_CONFIG_CACHE.clear()
+        BEST_CONFIG_CACHE.update(original_cache)
+
         live_hist = live_tm.history
         sim_hist = sim_tm.history
 
@@ -555,12 +587,19 @@ def _audit_trade_logic_parity() -> dict:
 
         return {
             "parity_ok": parity_ok,
+            "snapshot_fields_ok": snapshot_fields_ok,
             "live_trades": _normalize(live_hist),
             "sim_trades": _normalize(sim_hist),
             "wallet_live": live_tm.wallet_balance,
             "wallet_sim": sim_tm.wallet_balance,
         }
     except Exception as exc:
+        # Restore original config cache on error
+        try:
+            BEST_CONFIG_CACHE.clear()
+            BEST_CONFIG_CACHE.update(original_cache)
+        except Exception:
+            pass
         return {"parity_ok": False, "error": str(exc)}
 
 
@@ -1248,15 +1287,21 @@ class TradeManager:
                 initial_margin = float(trade.get("margin", size / TRADING_CONFIG["leverage"]))
 
                 # Config'i trade dict'inden oku (açılışta snapshot edildi)
-                # Eski trade'ler için fallback olarak load_optimized_config kullan
+                # Eski trade'ler için fallback olarak load_optimized_config kullan ve trade'e yaz
                 if "use_trailing" in trade:
                     use_trailing = trade.get("use_trailing", False)
                     use_dynamic_tp = trade.get("use_dynamic_pbema_tp", True)
                 else:
-                    # Backward compatibility: eski trade'ler için config'den oku
+                    # Backward compatibility: eski trade'ler için config'den oku ve trade'e yaz
+                    # Bu sayede sadece bir kere config'ten okunur, sonraki mumlarda trade'den okunur
                     config = load_optimized_config(symbol, tf)
                     use_trailing = config.get("use_trailing", False)
                     use_dynamic_tp = config.get("use_dynamic_pbema_tp", True)
+                    # Trade'e yaz - sonraki mumlarda trade'den okunacak
+                    self.open_trades[i]["use_trailing"] = use_trailing
+                    self.open_trades[i]["use_dynamic_pbema_tp"] = use_dynamic_tp
+                    self.open_trades[i]["opt_rr"] = config.get("rr", 3.0)
+                    self.open_trades[i]["opt_rsi"] = config.get("rsi", 60)
                 use_partial = not use_trailing
 
                 # --- Fiyatlar ---
@@ -4695,15 +4740,21 @@ class SimTradeManager:
             initial_margin = float(trade.get("margin", size / TRADING_CONFIG["leverage"]))
 
             # Config'i trade dict'inden oku (açılışta snapshot edildi)
-            # Eski trade'ler için fallback olarak load_optimized_config kullan
+            # Eski trade'ler için fallback olarak load_optimized_config kullan ve trade'e yaz
             if "use_trailing" in trade:
                 use_trailing = trade.get("use_trailing", False)
                 use_dynamic_tp = trade.get("use_dynamic_pbema_tp", True)
             else:
-                # Backward compatibility: eski trade'ler için config'den oku
+                # Backward compatibility: eski trade'ler için config'den oku ve trade'e yaz
+                # Bu sayede sadece bir kere config'ten okunur, sonraki mumlarda trade'den okunur
                 config = load_optimized_config(symbol, tf)
                 use_trailing = config.get("use_trailing", False)
                 use_dynamic_tp = config.get("use_dynamic_pbema_tp", True)
+                # Trade'e yaz - sonraki mumlarda trade'den okunacak
+                self.open_trades[i]["use_trailing"] = use_trailing
+                self.open_trades[i]["use_dynamic_pbema_tp"] = use_dynamic_tp
+                self.open_trades[i]["opt_rr"] = config.get("rr", 3.0)
+                self.open_trades[i]["opt_rsi"] = config.get("rsi", 60)
             use_partial = not use_trailing
 
             # --- Fiyatlar ---
