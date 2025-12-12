@@ -643,29 +643,46 @@ def _generate_candidate_configs():
     return candidates + trailing_extras
 
 
-def _get_min_trades_for_timeframe(tf: str) -> int:
-    """Return minimum trade count for statistical significance based on timeframe.
+def _get_min_trades_for_timeframe(tf: str, num_candles: int = 20000) -> int:
+    """Return minimum trade count for statistical significance based on timeframe AND data size.
 
-    Longer timeframes need fewer trades (less noise), shorter timeframes need more.
-    These values ensure ~95% confidence that observed edge is not random.
+    The key insight: min_trades must scale with available data.
+    - 20000 candles on 15m = ~208 days → can expect ~40 trades
+    - 3000 candles on 15m = ~31 days → can only expect ~6 trades
+    - 3000 candles on 5m = ~10 days → can only expect ~3 trades
+
+    Formula: min_trades = base_rate * (num_candles / base_candles)
+    Where base_rate is calibrated for 20000 candles.
     """
-    tf_min_trades = {
-        "1m": 150,   # Very noisy, need lots of samples
-        "5m": 100,   # Still noisy
-        "15m": 40,   # Moderate
-        "30m": 30,   # Less noise
-        "1h": 25,    # Even less noise
-        "4h": 20,    # Low noise
-        "1d": 15,    # Very low noise
+    # Base rates for 20000 candles (these are the "ideal" minimums)
+    base_candles = 20000
+    tf_base_rates = {
+        "1m": 150,   # Very noisy
+        "5m": 80,    # Noisy
+        "15m": 35,   # Moderate
+        "30m": 25,   # Less noise
+        "1h": 20,    # Even less noise
+        "4h": 15,    # Low noise
+        "1d": 10,    # Very low noise
     }
-    return tf_min_trades.get(tf, 40)  # Default to 40 if unknown
+
+    base_rate = tf_base_rates.get(tf, 30)
+
+    # Scale min_trades proportionally to data size
+    # But enforce absolute minimum of 5 trades (below this is pure noise)
+    scaled_min = max(5, int(base_rate * (num_candles / base_candles)))
+
+    # Cap at base_rate (don't require MORE trades for small data)
+    return min(scaled_min, base_rate)
 
 
 def _compute_optimizer_score(net_pnl: float, trades: int, trade_pnls: list,
-                              min_trades: int = 40, hard_min_trades: int = 10) -> float:
+                              min_trades: int = 40, hard_min_trades: int = 5,
+                              reject_negative_pnl: bool = True) -> float:
     """Compute a robust optimizer score that penalizes overfitting.
 
     Uses a modified Sortino-like approach with aggressive anti-overfit measures:
+    - HARD REJECT configs with negative net PnL (no edge = no config)
     - HARD REJECT configs with fewer than hard_min_trades
     - Penalizes low trade counts (statistical insignificance)
     - Penalizes high variance in returns (inconsistent edge)
@@ -677,11 +694,16 @@ def _compute_optimizer_score(net_pnl: float, trades: int, trade_pnls: list,
         trades: Number of trades
         trade_pnls: List of individual trade PnLs
         min_trades: Trades needed for full confidence (default 40)
-        hard_min_trades: Absolute minimum trades, below this = reject (default 10)
+        hard_min_trades: Absolute minimum trades, below this = reject (default 5)
+        reject_negative_pnl: If True, reject configs with net_pnl <= 0 (default True)
 
     Returns:
         Composite score (higher is better, -inf for rejected configs)
     """
+    # HARD REJECT: Negative PnL = no edge, don't use this config
+    if reject_negative_pnl and net_pnl <= 0:
+        return -float("inf")
+
     # HARD REJECT: Too few trades = statistically meaningless
     if trades < hard_min_trades:
         return -float("inf")
@@ -753,15 +775,11 @@ def _compute_optimizer_score(net_pnl: float, trades: int, trade_pnls: list,
     else:
         win_rate_factor = 1.0
 
-    # NEW: Expectancy check - reject negative expectancy configs
-    if avg_pnl < 0:
-        # Still allow negative PnL but penalize heavily
-        expectancy_factor = 0.5
-    else:
-        expectancy_factor = 1.0
+    # Note: Negative PnL configs are already hard-rejected above if reject_negative_pnl=True
+    # This branch only executes for positive PnL configs
 
-    # Final score = net_pnl * confidence * consistency * win_rate * dd_penalty * expectancy
-    score = net_pnl * trade_confidence * consistency_factor * win_rate_factor * dd_penalty * expectancy_factor
+    # Final score = net_pnl * confidence * consistency * win_rate * dd_penalty
+    score = net_pnl * trade_confidence * consistency_factor * win_rate_factor * dd_penalty
 
     return score
 
@@ -917,6 +935,7 @@ def _optimize_backtest_configs(
             continue
 
         df = streams[(sym, tf)]
+        num_candles = len(df)
         best_cfg = None
         best_score = -float("inf")
         best_pnl = -float("inf")
@@ -934,16 +953,18 @@ def _optimize_backtest_configs(
             if trades == 0:
                 return
 
-            # Use timeframe-aware min_trades for statistical significance
-            tf_min_trades = _get_min_trades_for_timeframe(tf)
-            # Hard minimum: at least 25% of min_trades to even consider
-            hard_min = max(10, tf_min_trades // 4)
+            # Use timeframe AND data-size aware min_trades for statistical significance
+            tf_min_trades = _get_min_trades_for_timeframe(tf, num_candles)
+            # Hard minimum: at least 3 trades (absolute floor)
+            hard_min = max(3, tf_min_trades // 3)
 
             # Use the new composite score with anti-overfit measures
+            # reject_negative_pnl=True means configs with net_pnl <= 0 are rejected
             score = _compute_optimizer_score(
                 net_pnl, trades, trade_pnls,
                 min_trades=tf_min_trades,
-                hard_min_trades=hard_min
+                hard_min_trades=hard_min,
+                reject_negative_pnl=True
             )
 
             if score > best_score:
@@ -987,9 +1008,9 @@ def _optimize_backtest_configs(
 
                 handle_result(cfg, net_pnl, trades, trade_pnls)
 
-        # Get min_trades for this timeframe for logging
-        tf_min_trades = _get_min_trades_for_timeframe(tf)
-        hard_min = max(10, tf_min_trades // 4)
+        # Get min_trades for this timeframe for logging (using actual num_candles)
+        tf_min_trades = _get_min_trades_for_timeframe(tf, num_candles)
+        hard_min = max(3, tf_min_trades // 3)
 
         if best_cfg:
             best_by_pair[(sym, tf)] = {**best_cfg, "_net_pnl": best_pnl, "_trades": best_trades, "_score": best_score}
@@ -1011,7 +1032,7 @@ def _optimize_backtest_configs(
             )
         else:
             log(
-                f"[OPT][{sym}-{tf}] Uygun ayar bulunamadı - tüm config'ler min. {hard_min} trade'in altında "
+                f"[OPT][{sym}-{tf}] Pozitif PnL'li config bulunamadı - ya trade < {hard_min} ya da net PnL <= 0 "
                 f"(istatistiksel güven için {tf_min_trades} trade gerekli)"
             )
 
