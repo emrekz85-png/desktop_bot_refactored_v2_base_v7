@@ -643,29 +643,62 @@ def _generate_candidate_configs():
     return candidates + trailing_extras
 
 
-def _compute_optimizer_score(net_pnl: float, trades: int, trade_pnls: list, min_trades: int = 5) -> float:
+def _get_min_trades_for_timeframe(tf: str) -> int:
+    """Return minimum trade count for statistical significance based on timeframe.
+
+    Longer timeframes need fewer trades (less noise), shorter timeframes need more.
+    These values ensure ~95% confidence that observed edge is not random.
+    """
+    tf_min_trades = {
+        "1m": 150,   # Very noisy, need lots of samples
+        "5m": 100,   # Still noisy
+        "15m": 40,   # Moderate
+        "30m": 30,   # Less noise
+        "1h": 25,    # Even less noise
+        "4h": 20,    # Low noise
+        "1d": 15,    # Very low noise
+    }
+    return tf_min_trades.get(tf, 40)  # Default to 40 if unknown
+
+
+def _compute_optimizer_score(net_pnl: float, trades: int, trade_pnls: list,
+                              min_trades: int = 40, hard_min_trades: int = 10) -> float:
     """Compute a robust optimizer score that penalizes overfitting.
 
-    Uses a modified Sortino-like approach:
+    Uses a modified Sortino-like approach with aggressive anti-overfit measures:
+    - HARD REJECT configs with fewer than hard_min_trades
     - Penalizes low trade counts (statistical insignificance)
     - Penalizes high variance in returns (inconsistent edge)
+    - Penalizes extreme drawdowns
     - Rewards positive expectancy with consistency
 
     Args:
         net_pnl: Total net profit/loss
         trades: Number of trades
         trade_pnls: List of individual trade PnLs
-        min_trades: Minimum trades for full confidence (default 5)
+        min_trades: Trades needed for full confidence (default 40)
+        hard_min_trades: Absolute minimum trades, below this = reject (default 10)
 
     Returns:
-        Composite score (higher is better)
+        Composite score (higher is better, -inf for rejected configs)
     """
+    # HARD REJECT: Too few trades = statistically meaningless
+    if trades < hard_min_trades:
+        return -float("inf")
+
     if trades == 0:
         return -float("inf")
 
-    # Trade count confidence factor (0.3 to 1.0)
-    # Few trades = less confidence in the edge
-    trade_confidence = min(1.0, 0.3 + 0.7 * (trades / max(min_trades, 1)))
+    # Trade count confidence factor - MUCH more aggressive penalty for low counts
+    # Uses logarithmic scaling: need ~min_trades to reach 90% confidence
+    # 10 trades = ~50%, 20 trades = ~70%, 40 trades = ~90%, 60+ trades = ~100%
+    if trades >= min_trades:
+        trade_confidence = 1.0
+    else:
+        # Logarithmic penalty: confidence = 0.3 + 0.7 * log(trades) / log(min_trades)
+        import math
+        log_ratio = math.log(max(trades, 1)) / math.log(max(min_trades, 2))
+        trade_confidence = max(0.2, min(0.95, 0.2 + 0.75 * log_ratio))
 
     # Average PnL per trade (expectancy)
     avg_pnl = net_pnl / trades
@@ -679,24 +712,56 @@ def _compute_optimizer_score(net_pnl: float, trades: int, trade_pnls: list, min_
             downside_std = 0.0
 
         # Consistency bonus: lower variance = more reliable edge
-        # Normalize by average trade size to make it comparable
         if downside_std > 0 and avg_pnl != 0:
             consistency_ratio = abs(avg_pnl) / (downside_std + 1e-6)
             consistency_factor = min(1.5, 0.5 + consistency_ratio * 0.25)
         else:
             consistency_factor = 1.0 if avg_pnl > 0 else 0.5
+
+        # NEW: Max drawdown penalty
+        # Calculate running max drawdown from trade PnLs
+        cumulative = 0
+        peak = 0
+        max_dd = 0
+        for pnl in trade_pnls:
+            cumulative += pnl
+            peak = max(peak, cumulative)
+            dd = peak - cumulative
+            max_dd = max(max_dd, dd)
+
+        # Penalize if max drawdown exceeds 50% of total profit (or is large absolute)
+        if net_pnl > 0 and max_dd > net_pnl * 0.5:
+            dd_penalty = 0.7  # 30% penalty for excessive drawdown
+        elif max_dd > 100:  # $100 absolute drawdown threshold
+            dd_penalty = 0.85
+        else:
+            dd_penalty = 1.0
     else:
-        consistency_factor = 0.7  # Single trade = less reliable
+        consistency_factor = 0.5  # Single trade = very unreliable
+        dd_penalty = 0.5  # Heavy penalty for single trade
 
     # Win rate bonus (slight preference for higher win rates at equal PnL)
     if trade_pnls:
         win_rate = sum(1 for p in trade_pnls if p > 0) / len(trade_pnls)
-        win_rate_factor = 0.9 + win_rate * 0.2  # 0.9 to 1.1
+        # Penalize very low win rates even with good RR
+        if win_rate < 0.25:
+            win_rate_factor = 0.7  # Too low WR = high variance
+        elif win_rate < 0.35:
+            win_rate_factor = 0.85
+        else:
+            win_rate_factor = 0.9 + win_rate * 0.2  # 0.9 to 1.1
     else:
         win_rate_factor = 1.0
 
-    # Final score = net_pnl * confidence * consistency * win_rate_bonus
-    score = net_pnl * trade_confidence * consistency_factor * win_rate_factor
+    # NEW: Expectancy check - reject negative expectancy configs
+    if avg_pnl < 0:
+        # Still allow negative PnL but penalize heavily
+        expectancy_factor = 0.5
+    else:
+        expectancy_factor = 1.0
+
+    # Final score = net_pnl * confidence * consistency * win_rate * dd_penalty * expectancy
+    score = net_pnl * trade_confidence * consistency_factor * win_rate_factor * dd_penalty * expectancy_factor
 
     return score
 
@@ -869,8 +934,17 @@ def _optimize_backtest_configs(
             if trades == 0:
                 return
 
-            # Use the new composite score instead of raw net_pnl
-            score = _compute_optimizer_score(net_pnl, trades, trade_pnls, min_trades=5)
+            # Use timeframe-aware min_trades for statistical significance
+            tf_min_trades = _get_min_trades_for_timeframe(tf)
+            # Hard minimum: at least 25% of min_trades to even consider
+            hard_min = max(10, tf_min_trades // 4)
+
+            # Use the new composite score with anti-overfit measures
+            score = _compute_optimizer_score(
+                net_pnl, trades, trade_pnls,
+                min_trades=tf_min_trades,
+                hard_min_trades=hard_min
+            )
 
             if score > best_score:
                 best_score = score
@@ -913,16 +987,33 @@ def _optimize_backtest_configs(
 
                 handle_result(cfg, net_pnl, trades, trade_pnls)
 
+        # Get min_trades for this timeframe for logging
+        tf_min_trades = _get_min_trades_for_timeframe(tf)
+        hard_min = max(10, tf_min_trades // 4)
+
         if best_cfg:
             best_by_pair[(sym, tf)] = {**best_cfg, "_net_pnl": best_pnl, "_trades": best_trades, "_score": best_score}
             dyn_tp_str = "Açık" if best_cfg.get('use_dynamic_pbema_tp') else "Kapalı"
+
+            # Confidence indicator based on trade count vs min_trades
+            if best_trades >= tf_min_trades:
+                confidence = "✓ Yüksek"
+            elif best_trades >= tf_min_trades * 0.6:
+                confidence = "~ Orta"
+            else:
+                confidence = "⚠ Düşük"
+
             log(
                 f"[OPT][{sym}-{tf}] En iyi ayar: RR={best_cfg['rr']}, RSI={best_cfg['rsi']}, "
                 f"Slope={best_cfg['slope']}, AT={'Açık' if best_cfg['at_active'] else 'Kapalı'}, "
-                f"DynTP={dyn_tp_str} | Net PnL={best_pnl:.2f}, Trades={best_trades}, Score={best_score:.2f}"
+                f"DynTP={dyn_tp_str} | Net PnL={best_pnl:.2f}, Trades={best_trades}/{tf_min_trades}, "
+                f"Score={best_score:.2f}, Güven={confidence}"
             )
         else:
-            log(f"[OPT][{sym}-{tf}] Uygun ayar bulunamadı (yetersiz trade)")
+            log(
+                f"[OPT][{sym}-{tf}] Uygun ayar bulunamadı - tüm config'ler min. {hard_min} trade'in altında "
+                f"(istatistiksel güven için {tf_min_trades} trade gerekli)"
+            )
 
     log("[OPT] Tarama tamamlandı. Bulunan ayarlar backtest'e uygulanacak.")
     return best_by_pair
