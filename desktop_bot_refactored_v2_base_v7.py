@@ -1036,6 +1036,8 @@ class TradeManager:
 
         if self.persist:
             self.load_trades()
+            # Startup'ta stale trade'leri temizle
+            self.force_close_stale_trades()
         if self.verbose:
             print("✅ TRADE MANAGER BAŞLATILDI: Veriler Yüklendi 📂")
 
@@ -1568,6 +1570,99 @@ class TradeManager:
                         f.write(f"\n[{datetime.now()}] LOAD_TRADES HATA: {str(e)}\n")
                     self.open_trades = []
                     self.history = []
+
+    def force_close_stale_trades(self):
+        """Force-close trades that should have been closed but weren't due to code changes.
+
+        Fetches current market price and checks TP/SL conditions immediately.
+        Called on startup to clean up any stale trades.
+        """
+        if not self.open_trades:
+            return
+
+        print("[CLEANUP] Açık trade'ler kontrol ediliyor...")
+
+        with self.lock:
+            closed_indices = []
+
+            for i, trade in enumerate(self.open_trades):
+                symbol = trade.get("symbol")
+                tf = trade.get("timeframe")
+                t_type = trade.get("type")
+                entry = float(trade.get("entry", 0))
+                tp = float(trade.get("tp", 0))
+                sl = float(trade.get("sl", 0))
+
+                if not all([symbol, t_type, entry, tp, sl]):
+                    continue
+
+                # Fetch current price
+                try:
+                    url = f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={symbol}"
+                    resp = requests.get(url, timeout=5)
+                    current_price = float(resp.json()["price"])
+                except Exception as e:
+                    print(f"[CLEANUP] {symbol} fiyat alınamadı: {e}")
+                    continue
+
+                # Check TP/SL conditions
+                should_close = False
+                reason = ""
+
+                if t_type == "LONG":
+                    if current_price >= tp:
+                        should_close = True
+                        reason = "WIN (TP) [Stale]"
+                    elif current_price <= sl:
+                        should_close = True
+                        reason = "STOP [Stale]"
+                else:  # SHORT
+                    if current_price <= tp:
+                        should_close = True
+                        reason = "WIN (TP) [Stale]"
+                    elif current_price >= sl:
+                        should_close = True
+                        reason = "STOP [Stale]"
+
+                if should_close:
+                    print(f"[CLEANUP] {symbol}-{tf} {t_type} kapatılıyor: {reason} (Fiyat: {current_price:.4f}, TP: {tp:.4f}, SL: {sl:.4f})")
+
+                    # Calculate PnL
+                    size = float(trade.get("size", 0))
+                    if t_type == "LONG":
+                        exit_fill = current_price * (1 - self.slippage_pct)
+                        gross_pnl = (exit_fill - entry) * size
+                    else:
+                        exit_fill = current_price * (1 + self.slippage_pct)
+                        gross_pnl = (entry - exit_fill) * size
+
+                    commission = abs(size * exit_fill) * TRADING_CONFIG["total_fee"]
+                    net_pnl = gross_pnl - commission
+
+                    # Release margin
+                    margin = float(trade.get("margin", size / TRADING_CONFIG["leverage"]))
+                    self.wallet_balance += margin + net_pnl
+                    self.locked_margin -= margin
+                    self.total_pnl += net_pnl
+
+                    # Update trade record
+                    trade["status"] = reason
+                    trade["pnl"] = net_pnl
+                    trade["close_price"] = exit_fill
+                    trade["close_time"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+
+                    self.history.append(trade)
+                    closed_indices.append(i)
+
+            # Remove closed trades
+            for idx in sorted(closed_indices, reverse=True):
+                self.open_trades.pop(idx)
+
+            if closed_indices:
+                self.save_trades()
+                print(f"[CLEANUP] {len(closed_indices)} stale trade kapatıldı.")
+            else:
+                print("[CLEANUP] Kapatılması gereken stale trade bulunamadı.")
 
     def reset_logs(self):
         with self.lock:
