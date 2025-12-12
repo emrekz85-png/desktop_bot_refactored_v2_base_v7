@@ -43,7 +43,7 @@ import plotly.utils
 # ==========================================
 # ⚙️ GENEL AYARLAR VE SABİTLER (MERKEZİ YÖNETİM)
 # ==========================================
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "LINKUSDT", "BNBUSDT", "FARTCOINUSDT", "XRPUSDT", "MKRUSDT", "LTCUSDT", "DOGEUSDT", "SUIUSDT", "ENAUSDT"]
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "LINKUSDT", "BNBUSDT", "XRPUSDT", "LTCUSDT", "DOGEUSDT", "SUIUSDT", "ENAUSDT"]
 # 1m removed - too noisy, inconsistent results across all symbols
 LOWER_TIMEFRAMES = ["5m", "15m", "1h"]
 HTF_TIMEFRAMES = ["4h", "12h", "1d"]
@@ -99,25 +99,19 @@ TRADING_CONFIG = {
 }
 
 # ==========================================
-# 🚀 v35.0 - 8 SYMBOL OPTIMIZED (Dec 11, 2025)
+# 🚀 v36.0 - 11 SYMBOLS, REDUCED SLOT COMPETITION (Dec 12, 2025)
 # ==========================================
-# Based on 8-symbol backtest: $429.70 → Target $800+
+# Changes from v35.0:
+# - Removed FARTCOINUSDT (poor performer across all TFs)
+# - Removed MKRUSDT (insufficient trades in backtest)
+# - Added LTC, DOGE, SUI, ENA with 5m/15m DISABLED
+# - Only 1h active for new symbols to reduce portfolio risk slot competition
 #
-# DISABLED (total -$372.87 loss prevented):
-# - LINKUSDT-5m: -$124.56, 25% WR
-# - BNBUSDT-1h: -$94.22, 45% WR
-# - XRPUSDT-5m: -$84.10, 21% WR
-# - BNBUSDT-5m: -$44.78, 25% WR
-# - XRPUSDT-15m: -$13.99, 45% WR
-# - FARTCOINUSDT: ALL DISABLED (poor performer)
+# ACTIVE SYMBOLS (11): BTC, ETH, SOL, HYPE, LINK, BNB, XRP, LTC, DOGE, SUI, ENA
 #
-# TOP PERFORMERS:
-# - BTCUSDT-1h: +$175.28
-# - SOLUSDT-5m: +$110.22
-# - ETHUSDT-1h: +$99.18
-# - BTCUSDT-4h: +$99.14
-# - LINKUSDT-1h: +$81.04
-# - BNBUSDT-4h: +$69.93
+# STRATEGY: Focus on 1h timeframe for reliability
+# - 5m/15m disabled for most symbols (too noisy, takes risk slots)
+# - 1h/4h provides better signal quality with less competition
 # ==========================================
 SYMBOL_PARAMS = {
     "BTCUSDT": {
@@ -220,15 +214,6 @@ SYMBOL_PARAMS = {
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
     },
-    "FARTCOINUSDT": {
-        # ALL DISABLED - Poor performer across all timeframes
-        "5m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True, "disabled": True},
-        "15m": {"rr": 1.8, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False, "disabled": True},
-        "1h": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False, "disabled": True},
-        "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False, "disabled": True},
-        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False, "disabled": True},
-        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False, "disabled": True}
-    },
     "XRPUSDT": {
         # 5m: DISABLED -$84.10, 21% WR
         "5m": {"rr": 2.4, "rsi": 35, "slope": 0.4, "at_active": False, "use_trailing": False, "disabled": True},
@@ -248,49 +233,44 @@ SYMBOL_PARAMS = {
     },
     # ==========================================
     # 🆕 NEW SYMBOLS BATCH 2 - Dec 12, 2025
-    # MKR, LTC, DOGE, SUI, ENA
-    # Starting with balanced settings, will optimize with backtest
+    # LTC, DOGE, SUI, ENA (MKR removed - insufficient trades)
+    # 5m/15m DISABLED to reduce competition for portfolio risk slots
     # ==========================================
-    "MKRUSDT": {
-        # MakerDAO - DeFi blue chip, lower liquidity than majors
-        "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True},
-        "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False},
-        "1h": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
-        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
-        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
-    },
     "LTCUSDT": {
         # Litecoin - Very established, good liquidity
-        "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True},
-        "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False},
-        "1h": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
+        # 5m/15m DISABLED to reduce slot competition
+        "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True, "disabled": True},
+        "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False, "disabled": True},
+        "1h": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": False, "use_trailing": False},
         "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
     },
     "DOGEUSDT": {
         # Dogecoin - Very liquid memecoin, high volatility
-        "5m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True},
-        "15m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
-        "1h": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
+        # 5m/15m DISABLED to reduce slot competition
+        "5m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True, "disabled": True},
+        "15m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False, "disabled": True},
+        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
         "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
     },
     "SUIUSDT": {
         # Sui - Newer L1, moderate liquidity
-        "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True},
-        "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False},
-        "1h": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
+        # 5m/15m DISABLED to reduce slot competition
+        "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True, "disabled": True},
+        "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False, "disabled": True},
+        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
         "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
     },
     "ENAUSDT": {
         # Ethena - DeFi token, newer
-        "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True},
-        "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False},
+        # 5m/15m DISABLED to reduce slot competition
+        "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True, "disabled": True},
+        "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False, "disabled": True},
         "1h": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
         "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
