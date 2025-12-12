@@ -4903,8 +4903,8 @@ def run_portfolio_backtest(
             initial_margin = float(trade.get("margin", 0))
 
             # Son kapanış fiyatını bul
-            if (sym, tf) in df_cache:
-                df = df_cache[(sym, tf)]
+            if (sym, tf) in streams:
+                df = streams[(sym, tf)]
                 if not df.empty:
                     last_close = float(df.iloc[-1]["close"])
                 else:
