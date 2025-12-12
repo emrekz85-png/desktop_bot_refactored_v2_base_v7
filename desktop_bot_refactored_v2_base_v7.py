@@ -2974,6 +2974,10 @@ class LiveBotWorker(QThread):
 
                                 # --- İndikatör ve Sinyal Hesabı ---
 
+                                # Skip if insufficient data for indicators (need 200+ candles for EMA200)
+                                if len(df) < 250:
+                                    continue
+
                                 df_ind = TradingEngine.calculate_indicators(df.copy())
                                 df_closed = df_ind.iloc[:-1].copy()  # oluşan mumu çıkar
                                 config = load_optimized_config(sym, tf)
