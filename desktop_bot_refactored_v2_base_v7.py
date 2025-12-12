@@ -43,7 +43,7 @@ import plotly.utils
 # ==========================================
 # ⚙️ GENEL AYARLAR VE SABİTLER (MERKEZİ YÖNETİM)
 # ==========================================
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "LINKUSDT", "BNBUSDT", "XRPUSDT", "LTCUSDT", "DOGEUSDT", "SUIUSDT", "ENAUSDT"]
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "LINKUSDT", "BNBUSDT", "XRPUSDT", "LTCUSDT", "DOGEUSDT", "SUIUSDT", "FARTCOINUSDT"]
 # 1m removed - too noisy, inconsistent results across all symbols
 LOWER_TIMEFRAMES = ["5m", "15m", "1h"]
 HTF_TIMEFRAMES = ["4h", "12h", "1d"]
@@ -82,6 +82,7 @@ BEST_CONFIG_WARNING_FLAGS = {
     "signature_mismatch": False,
 }
 BACKTEST_META_FILE = "backtest_meta.json"
+POT_LOG_FILE = "potential_trades.json"  # Persistent storage for potential trade logs
 # Çökme veya kapanma durumlarında otomatik yeniden başlatma gecikmesi (saniye)
 AUTO_RESTART_DELAY_SECONDS = 5
 
@@ -102,183 +103,98 @@ TRADING_CONFIG = {
 }
 
 # ==========================================
-# 🚀 v36.1 - OPTIMIZED BASED ON BACKTEST (Dec 12, 2025)
+# 🚀 v37.0 - DYNAMIC OPTIMIZER CONTROLS DISABLED STATE
 # ==========================================
-# PnL: $488.75 → Target $600+ with optimization
-#
-# DISABLED (poor performers):
-# - HYPEUSDT-5m: -$89.70, 0% WR
-# - LINKUSDT-15m: -$56.08, 21 trades (too active, losing)
-# - SUIUSDT-1h: -$49.64, 20% WR
-# - XRPUSDT-1h: 0 trades (no activity)
-# - ENAUSDT-1h: 0 trades (no activity)
-#
-# TOP PERFORMERS:
-# - BTCUSDT-1h: +$206.64, 45.5% WR ⭐
-# - LINKUSDT-1h: +$122.64, 71.4% WR
-# - ETHUSDT-1h: +$89.19, 76.5% WR
-# - DOGEUSDT-1h: +$86.11, 80% WR
-# - SOLUSDT-5m: +$70.09, 50% WR
+# All hardcoded "disabled: True" removed - optimizer decides at runtime
+# based on whether positive PnL config exists for each stream.
+# This allows streams to be re-enabled when market conditions change.
 # ==========================================
 SYMBOL_PARAMS = {
     "BTCUSDT": {
-        # 5m: DISABLED - losing money
-        "5m": {"rr": 2.4, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False, "disabled": True},
-
-        # 15m: DISABLED - still losing
-        "15m": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False, "disabled": True},
-
-        # 1h: STAR PERFORMER! +$175.28, 42% WR
+        "5m": {"rr": 2.4, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "15m": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False},
         "1h": {"rr": 2.1, "rsi": 45, "slope": 0.2, "at_active": False, "use_trailing": False},
-
-        # 4h: EXCELLENT +$99.14, 50% WR
         "4h": {"rr": 2.1, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
-
-        # HTF: Keep conservative
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
     },
     "ETHUSDT": {
-        # 5m: DISABLED
-        "5m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False, "disabled": True},
-
-        # 15m: GOOD +$45.75, 75% WR
+        "5m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
         "15m": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False},
-
-        # 1h: EXCELLENT +$99.18, 76% WR
         "1h": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": False, "use_trailing": False},
-
-        # HTF: Keep existing
         "4h": {"rr": 2.0, "rsi": 30, "slope": 0.3, "at_active": True, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False},
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False}
     },
     "SOLUSDT": {
-        # 5m: EXCELLENT +$110.22, 56% WR
         "5m": {"rr": 1.5, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": True},
-
-        # 15m: OK +$13.88, 100% WR (1 trade)
         "15m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
-
-        # 1h: Small loss (-$8.35, 43% WR) - keep monitoring
         "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
-
-        # HTF: Keep existing
         "4h": {"rr": 2.0, "rsi": 30, "slope": 0.3, "at_active": True, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.4, "at_active": True, "use_trailing": False},
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.4, "at_active": True, "use_trailing": False}
     },
     "HYPEUSDT": {
-        # 5m: DISABLED -$89.70, 0% WR (v36.1)
-        "5m": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True, "disabled": True},
-
-        # 15m: OK +$16.62, 100% WR (1 trade)
+        "5m": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True},
         "15m": {"rr": 1.5, "rsi": 55, "slope": 0.2, "at_active": True, "use_trailing": False},
-
-        # 1h: DISABLED
-        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False, "disabled": True},
-
-        # 4h+: DISABLED - not enough data
-        "4h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False, "disabled": True},
-        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False, "disabled": True},
-        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False, "disabled": True}
-    },
-    # ==========================================
-    # 🆕 NEW SYMBOLS - OPTIMIZED Dec 11, 2025
-    # ==========================================
-    "LINKUSDT": {
-        # 5m: DISABLED -$124.56, 25% WR
-        "5m": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True, "disabled": True},
-
-        # 15m: DISABLED -$56.08, 61.9% WR but 21 trades losing (v36.1)
-        "15m": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False, "disabled": True},
-
-        # 1h: EXCELLENT +$122.64, 71.4% WR (v36.1)
-        # OPT: RR=1.2, RSI=35, AT=Off
         "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
-
-        # 4h+: Keep conservative
+        "4h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False},
+        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False}
+    },
+    "LINKUSDT": {
+        "5m": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True},
+        "15m": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
         "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
     },
     "BNBUSDT": {
-        # 5m: DISABLED -$44.78, 25% WR
-        "5m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True, "disabled": True},
-
-        # 15m: GOOD +$32.07, 60% WR
-        # OPT: RR=2.4, RSI=35, AT=Off
+        "5m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True},
         "15m": {"rr": 2.4, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
-
-        # 1h: DISABLED -$94.22, 45% WR
-        "1h": {"rr": 1.2, "rsi": 55, "slope": 0.2, "at_active": False, "use_trailing": False, "disabled": True},
-
-        # 4h: EXCELLENT +$69.93, 100% WR
-        # OPT: RR=1.8, RSI=35, AT=Off
+        "1h": {"rr": 1.2, "rsi": 55, "slope": 0.2, "at_active": False, "use_trailing": False},
         "4h": {"rr": 1.8, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
-
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
     },
     "XRPUSDT": {
-        # 5m: DISABLED -$84.10, 21% WR
-        "5m": {"rr": 2.4, "rsi": 35, "slope": 0.4, "at_active": False, "use_trailing": False, "disabled": True},
-
-        # 15m: DISABLED -$13.99, 45% WR
-        "15m": {"rr": 2.4, "rsi": 45, "slope": 0.2, "at_active": False, "use_trailing": False, "disabled": True},
-
-        # 1h: DISABLED - 0 trades in portfolio backtest (v36.1)
-        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False, "disabled": True},
-
-        # 4h: Keep for potential signals
+        "5m": {"rr": 2.4, "rsi": 35, "slope": 0.4, "at_active": False, "use_trailing": False},
+        "15m": {"rr": 2.4, "rsi": 45, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
         "4h": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False},
-
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
     },
-    # ==========================================
-    # 🆕 NEW SYMBOLS BATCH 2 - Dec 12, 2025
-    # LTC, DOGE, SUI, ENA (MKR removed - insufficient trades)
-    # 5m/15m DISABLED to reduce competition for portfolio risk slots
-    # ==========================================
     "LTCUSDT": {
-        # Litecoin - Very established, good liquidity
-        # 5m/15m DISABLED to reduce slot competition
-        "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True, "disabled": True},
-        "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False, "disabled": True},
-        # 1h: OK +$11.93, 25% WR - OPT found RR=1.8, RSI=35 (v36.1)
+        "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True},
+        "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False},
         "1h": {"rr": 1.8, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
         "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
     },
     "DOGEUSDT": {
-        # Dogecoin - EXCELLENT +$86.11, 80% WR (v36.1)
-        # 5m/15m DISABLED to reduce slot competition
-        "5m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True, "disabled": True},
-        "15m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False, "disabled": True},
-        # 1h: OPT RR=1.2, RSI=35, AT=Off
+        "5m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True},
+        "15m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
         "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
         "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
     },
     "SUIUSDT": {
-        # Sui - 1h DISABLED: -$49.64, 20% WR (v36.1)
-        "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True, "disabled": True},
-        "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False, "disabled": True},
-        # 1h: DISABLED - poor performance
-        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False, "disabled": True},
+        "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True},
+        "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
         "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
     },
-    "ENAUSDT": {
-        # Ethena - 1h DISABLED: 0 trades in portfolio backtest (v36.1)
-        "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True, "disabled": True},
-        "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False, "disabled": True},
-        # 1h: DISABLED - no activity
-        "1h": {"rr": 2.1, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False, "disabled": True},
+    "FARTCOINUSDT": {
+        # New memecoin - let optimizer find best params
+        "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True},
+        "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "1h": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
         "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
@@ -1013,7 +929,14 @@ def _optimize_backtest_configs(
         hard_min = max(3, tf_min_trades // 3)
 
         if best_cfg:
-            best_by_pair[(sym, tf)] = {**best_cfg, "_net_pnl": best_pnl, "_trades": best_trades, "_score": best_score}
+            # Explicit disabled=False ensures stream is enabled even if previously disabled
+            best_by_pair[(sym, tf)] = {
+                **best_cfg,
+                "disabled": False,  # Explicitly enable - overwrites any previous disabled state
+                "_net_pnl": best_pnl,
+                "_trades": best_trades,
+                "_score": best_score
+            }
             dyn_tp_str = "Açık" if best_cfg.get('use_dynamic_pbema_tp') else "Kapalı"
 
             # Confidence indicator based on trade count vs min_trades
@@ -3631,7 +3554,7 @@ class MainWindow(QMainWindow):
         self.current_symbol = SYMBOLS[0]
         self.backtest_worker = None
         self.backtest_meta = None
-        self.potential_entries = []
+        self.potential_entries = self._load_potential_entries()
 
         central = QWidget();
         self.setCentralWidget(central);
@@ -3867,7 +3790,17 @@ class MainWindow(QMainWindow):
         # 4. SEKME: Potansiyel İşlemler (detaylı red/şart takibi)
         potential_widget = QWidget();
         pot_layout = QVBoxLayout(potential_widget)
-        pot_group = QGroupBox("Potansiyel İşlemler");
+
+        # Toolbar for potential trades tab
+        pot_toolbar = QHBoxLayout()
+        pot_toolbar.addStretch()
+        self.btn_clear_pot = QPushButton("🗑️ Logları Temizle")
+        self.btn_clear_pot.setStyleSheet("background-color: #8b0000; color: white; padding: 5px 15px;")
+        self.btn_clear_pot.clicked.connect(self.clear_potential_entries)
+        pot_toolbar.addWidget(self.btn_clear_pot)
+        pot_layout.addLayout(pot_toolbar)
+
+        pot_group = QGroupBox("Potansiyel İşlemler (Kalıcı - bot yeniden başlasa da korunur)");
         pot_inner = QVBoxLayout()
 
         self.potential_table = QTableWidget();
@@ -4062,12 +3995,40 @@ class MainWindow(QMainWindow):
     def _fmt_bool(self, value):
         return "✓" if bool(value) else "×"
 
+    def _load_potential_entries(self) -> list:
+        """Load potential trade entries from persistent storage."""
+        try:
+            if os.path.exists(POT_LOG_FILE):
+                with open(POT_LOG_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        return data[-400:]  # Keep last 400
+        except Exception as e:
+            print(f"[POT] Failed to load potential entries: {e}")
+        return []
+
+    def _save_potential_entries(self):
+        """Save potential trade entries to persistent storage."""
+        try:
+            with open(POT_LOG_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.potential_entries[-400:], f, indent=2, default=str)
+        except Exception as e:
+            print(f"[POT] Failed to save potential entries: {e}")
+
+    def clear_potential_entries(self):
+        """Clear all potential trade entries (called by reset button)."""
+        self.potential_entries = []
+        self._save_potential_entries()
+        self.refresh_potential_table()
+        self.append_log("[POT] Potansiyel işlem logları temizlendi.")
+
     def append_potential_trade(self, entry: dict):
         if not isinstance(entry, dict):
             return
         self.potential_entries.append(entry)
         if len(self.potential_entries) > 400:
             self.potential_entries = self.potential_entries[-400:]
+        self._save_potential_entries()  # Persist to disk
         self.refresh_potential_table()
 
     def refresh_potential_table(self):
@@ -5217,7 +5178,8 @@ def run_portfolio_backtest(
         config = best_configs.get((sym, tf)) or load_optimized_config(sym, tf)
 
         # Skip disabled symbol/timeframe combinations in backtest
-        # Check SYMBOL_PARAMS directly since best_configs from optimization doesn't have disabled flag
+        # OPT sets disabled=True for streams with no positive PnL config,
+        # or disabled=False for streams with valid config. SYMBOL_PARAMS no longer has hardcoded disabled.
         sym_params = SYMBOL_PARAMS.get(sym, {})
         tf_params = sym_params.get(tf, {}) if isinstance(sym_params, dict) else {}
         if tf_params.get("disabled", False) or config.get("disabled", False):
