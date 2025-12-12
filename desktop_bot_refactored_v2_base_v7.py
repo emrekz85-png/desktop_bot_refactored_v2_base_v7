@@ -99,19 +99,23 @@ TRADING_CONFIG = {
 }
 
 # ==========================================
-# 🚀 v36.0 - 11 SYMBOLS, REDUCED SLOT COMPETITION (Dec 12, 2025)
+# 🚀 v36.1 - OPTIMIZED BASED ON BACKTEST (Dec 12, 2025)
 # ==========================================
-# Changes from v35.0:
-# - Removed FARTCOINUSDT (poor performer across all TFs)
-# - Removed MKRUSDT (insufficient trades in backtest)
-# - Added LTC, DOGE, SUI, ENA with 5m/15m DISABLED
-# - Only 1h active for new symbols to reduce portfolio risk slot competition
+# PnL: $488.75 → Target $600+ with optimization
 #
-# ACTIVE SYMBOLS (11): BTC, ETH, SOL, HYPE, LINK, BNB, XRP, LTC, DOGE, SUI, ENA
+# DISABLED (poor performers):
+# - HYPEUSDT-5m: -$89.70, 0% WR
+# - LINKUSDT-15m: -$56.08, 21 trades (too active, losing)
+# - SUIUSDT-1h: -$49.64, 20% WR
+# - XRPUSDT-1h: 0 trades (no activity)
+# - ENAUSDT-1h: 0 trades (no activity)
 #
-# STRATEGY: Focus on 1h timeframe for reliability
-# - 5m/15m disabled for most symbols (too noisy, takes risk slots)
-# - 1h/4h provides better signal quality with less competition
+# TOP PERFORMERS:
+# - BTCUSDT-1h: +$206.64, 45.5% WR ⭐
+# - LINKUSDT-1h: +$122.64, 71.4% WR
+# - ETHUSDT-1h: +$89.19, 76.5% WR
+# - DOGEUSDT-1h: +$86.11, 80% WR
+# - SOLUSDT-5m: +$70.09, 50% WR
 # ==========================================
 SYMBOL_PARAMS = {
     "BTCUSDT": {
@@ -162,10 +166,10 @@ SYMBOL_PARAMS = {
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.4, "at_active": True, "use_trailing": False}
     },
     "HYPEUSDT": {
-        # 5m: GOOD +$49.45, 75% WR
-        "5m": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True},
+        # 5m: DISABLED -$89.70, 0% WR (v36.1)
+        "5m": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True, "disabled": True},
 
-        # 15m: OK +$16.46, 100% WR (1 trade)
+        # 15m: OK +$16.62, 100% WR (1 trade)
         "15m": {"rr": 1.5, "rsi": 55, "slope": 0.2, "at_active": True, "use_trailing": False},
 
         # 1h: DISABLED
@@ -183,13 +187,12 @@ SYMBOL_PARAMS = {
         # 5m: DISABLED -$124.56, 25% WR
         "5m": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True, "disabled": True},
 
-        # 15m: OK +$18.52, 56% WR
-        # OPT: RR=1.2, RSI=45, AT=On
-        "15m": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False},
+        # 15m: DISABLED -$56.08, 61.9% WR but 21 trades losing (v36.1)
+        "15m": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False, "disabled": True},
 
-        # 1h: GOOD +$81.04, 67% WR
-        # OPT: RR=2.4, RSI=35, AT=Off
-        "1h": {"rr": 2.4, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
+        # 1h: EXCELLENT +$122.64, 71.4% WR (v36.1)
+        # OPT: RR=1.2, RSI=35, AT=Off
+        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
 
         # 4h+: Keep conservative
         "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
@@ -221,11 +224,10 @@ SYMBOL_PARAMS = {
         # 15m: DISABLED -$13.99, 45% WR
         "15m": {"rr": 2.4, "rsi": 45, "slope": 0.2, "at_active": False, "use_trailing": False, "disabled": True},
 
-        # 1h: Keep but monitor (0 trades in backtest, OPT +$9.88)
-        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
+        # 1h: DISABLED - 0 trades in portfolio backtest (v36.1)
+        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False, "disabled": True},
 
-        # 4h: Potential +$56.91 (1 trade)
-        # OPT: RR=1.2, RSI=45, AT=On
+        # 4h: Keep for potential signals
         "4h": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False},
 
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
@@ -241,37 +243,39 @@ SYMBOL_PARAMS = {
         # 5m/15m DISABLED to reduce slot competition
         "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True, "disabled": True},
         "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False, "disabled": True},
-        "1h": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": False, "use_trailing": False},
+        # 1h: OK +$11.93, 25% WR - OPT found RR=1.8, RSI=35 (v36.1)
+        "1h": {"rr": 1.8, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
         "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
     },
     "DOGEUSDT": {
-        # Dogecoin - Very liquid memecoin, high volatility
+        # Dogecoin - EXCELLENT +$86.11, 80% WR (v36.1)
         # 5m/15m DISABLED to reduce slot competition
         "5m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True, "disabled": True},
         "15m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False, "disabled": True},
+        # 1h: OPT RR=1.2, RSI=35, AT=Off
         "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
         "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
     },
     "SUIUSDT": {
-        # Sui - Newer L1, moderate liquidity
-        # 5m/15m DISABLED to reduce slot competition
+        # Sui - 1h DISABLED: -$49.64, 20% WR (v36.1)
         "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True, "disabled": True},
         "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False, "disabled": True},
-        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
+        # 1h: DISABLED - poor performance
+        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False, "disabled": True},
         "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
     },
     "ENAUSDT": {
-        # Ethena - DeFi token, newer
-        # 5m/15m DISABLED to reduce slot competition
+        # Ethena - 1h DISABLED: 0 trades in portfolio backtest (v36.1)
         "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True, "disabled": True},
         "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False, "disabled": True},
-        "1h": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
+        # 1h: DISABLED - no activity
+        "1h": {"rr": 2.1, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False, "disabled": True},
         "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
