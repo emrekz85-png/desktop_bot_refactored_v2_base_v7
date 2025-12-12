@@ -8,79 +8,37 @@ import ssl
 import base64
 import contextlib
 import threading
-import hashlib
-import traceback
-import tempfile
-import shutil
+import pandas as pd
+import pandas_ta as ta
+import numpy as np
+import requests
+import dateutil.parser
 import itertools
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timedelta
+import traceback
+import tempfile
+import shutil
 from typing import Tuple, Optional
-
-# ==========================================
-# BACKTEST MODE - GUI olmadan hızlı başlatma
-# ==========================================
-# Komut satırından: python script.py --backtest
-# veya environment variable: BACKTEST_MODE=1
-BACKTEST_MODE = "--backtest" in sys.argv or os.environ.get("BACKTEST_MODE") == "1"
-
-if BACKTEST_MODE:
-    print("[MODE] BACKTEST_MODE aktif - GUI yüklenmeyecek")
-
-# Core data işleme - her zaman yükle
-import pandas as pd
-import numpy as np
-import requests
-import dateutil.parser
-
-# pandas_ta lazy load - sadece gerektiğinde
-_pandas_ta = None
-def get_pandas_ta():
-    global _pandas_ta
-    if _pandas_ta is None:
-        import pandas_ta as ta
-        _pandas_ta = ta
-    return _pandas_ta
-
-# Kısayol için modül seviyesinde erişim
-class ta:
-    """Lazy-loaded pandas_ta wrapper"""
-    def __getattr__(self, name):
-        return getattr(get_pandas_ta(), name)
-ta = ta()
-
-# Matplotlib - backtest mode'da bile lazım olabilir (grafik kaydetme için)
 import matplotlib
+import hashlib
+
+# Matplotlib çizimlerini arka planda üretmek için GUI gerektirmeyen backend
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# PyQt5 ve Plotly - sadece GUI mode'da yükle
-if not BACKTEST_MODE:
-    from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                                 QHBoxLayout, QGridLayout, QTabWidget, QTextEdit, QLabel,
-                                 QTableWidget, QTableWidgetItem, QPushButton, QHeaderView,
-                                 QGroupBox, QDoubleSpinBox, QComboBox, QMessageBox, QCheckBox,
-                                 QLineEdit, QSpinBox, QFrame)
-    from PyQt5.QtWebEngineWidgets import QWebEngineView
-    from PyQt5.QtCore import QThread, pyqtSignal, QTimer
-    from PyQt5.QtGui import QColor, QFont
-    import plotly.graph_objects as go
-    import plotly.utils
-else:
-    # Dummy imports for type hints and to prevent NameError
-    QApplication = QMainWindow = QWidget = QVBoxLayout = None
-    QHBoxLayout = QGridLayout = QTabWidget = QTextEdit = QLabel = None
-    QTableWidget = QTableWidgetItem = QPushButton = QHeaderView = None
-    QGroupBox = QDoubleSpinBox = QComboBox = QMessageBox = QCheckBox = None
-    QLineEdit = QSpinBox = QFrame = QWebEngineView = None
-    QThread = pyqtSignal = QTimer = QColor = QFont = None
-    go = None
-    # plotly.utils sadece GUI'de kullanılıyor
-    class plotly:
-        class utils:
-            PlotlyJSONEncoder = None
-    plotly = plotly()
+# PyQt5 Modülleri (QSpinBox EKLENDİ)
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+                             QHBoxLayout, QGridLayout, QTabWidget, QTextEdit, QLabel,
+                             QTableWidget, QTableWidgetItem, QPushButton, QHeaderView,
+                             QGroupBox, QDoubleSpinBox, QComboBox, QMessageBox, QCheckBox,
+                             QLineEdit, QSpinBox, QFrame)  # <--- EKLENDİ
+from PyQt5.QtWebEngineWidgets import QWebEngineView
+from PyQt5.QtCore import QThread, pyqtSignal, QTimer
+from PyQt5.QtGui import QColor, QFont
+import plotly.graph_objects as go
+import plotly.utils
 
 # ==========================================
 # ⚙️ GENEL AYARLAR VE SABİTLER (MERKEZİ YÖNETİM)
@@ -1045,7 +1003,7 @@ def save_best_configs(best_configs: dict):
 # ==========================================
 # 🛠️ TRADE MANAGER (THREAD-SAFE & LOGGING)
 # ==========================================
-# threading zaten dosya başında import edildi
+import threading  # Lock mekanizması için gerekli
 
 
 class TradeManager:
@@ -5673,48 +5631,8 @@ def run_with_auto_restart(restart_delay: int = AUTO_RESTART_DELAY_SECONDS) -> No
         time.sleep(restart_delay)
 
 
-def run_backtest_cli():
-    """Backtest mode - GUI olmadan direkt backtest çalıştır."""
-    print("=" * 60)
-    print("BACKTEST MODE - Hızlı Başlatma")
-    print("=" * 60)
-
-    # Varsayılan ayarlar - komut satırından override edilebilir
-    candles = 3000
-    for arg in sys.argv:
-        if arg.startswith("--candles="):
-            candles = int(arg.split("=")[1])
-
-    print(f"Symbols: {SYMBOLS}")
-    print(f"Timeframes: {TIMEFRAMES}")
-    print(f"Candles: {candles}")
-    print("=" * 60)
-
-    def progress_cb(msg):
-        print(msg)
-
-    run_portfolio_backtest(
-        symbols=SYMBOLS,
-        timeframes=TIMEFRAMES,
-        candles=candles,
-        out_trades_csv="backtest_trades.csv",
-        out_summary_csv="backtest_summary.csv",
-        progress_callback=progress_cb,
-        draw_trades=False,  # Grafik çizme - hız için kapalı
-        max_draw_trades=None
-    )
-
-    print("\n" + "=" * 60)
-    print("Backtest tamamlandı!")
-    print("Sonuçlar: backtest_trades.csv, backtest_summary.csv")
-    print("=" * 60)
-
-
 if __name__ == "__main__":
-    if BACKTEST_MODE:
-        run_backtest_cli()
-    else:
-        run_with_auto_restart()
+    run_with_auto_restart()
 
 
 
