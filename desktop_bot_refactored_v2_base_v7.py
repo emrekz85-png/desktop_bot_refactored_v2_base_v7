@@ -103,6 +103,47 @@ TRADING_CONFIG = {
 }
 
 # ==========================================
+# 🎯 v38.0 - ADVANCED OPTIMIZER GATING
+# ==========================================
+# Multi-layer gating to prevent weak-edge configs from trading:
+# 1. Minimum expectancy per trade ($/trade threshold)
+# 2. Minimum score threshold (varies by timeframe)
+# 3. Confidence-based risk multiplier
+# ==========================================
+
+# Minimum expected profit per trade by timeframe
+# Configs with lower expectancy are considered "barely positive" and rejected
+MIN_EXPECTANCY_PER_TRADE = {
+    "1m": 6.0,   # Very noisy - need strong edge
+    "5m": 4.0,   # Noisy - need decent edge per trade
+    "15m": 3.0,  # Moderate noise
+    "30m": 2.5,
+    "1h": 2.0,   # Cleaner signals
+    "4h": 1.5,   # Low noise
+    "1d": 1.0,   # Very clean
+}
+
+# Minimum optimizer score threshold by timeframe
+# Higher timeframes have lower bars because fewer trades naturally
+MIN_SCORE_THRESHOLD = {
+    "1m": 80.0,
+    "5m": 40.0,   # High bar for noisy timeframe
+    "15m": 15.0,  # Medium bar
+    "30m": 10.0,
+    "1h": 8.0,    # Lower bar
+    "4h": 5.0,    # Lower bar
+    "1d": 3.0,
+}
+
+# Confidence-based risk multiplier
+# Reduces position size for medium-confidence streams
+CONFIDENCE_RISK_MULTIPLIER = {
+    "high": 1.0,    # Full risk
+    "medium": 0.5,  # Half risk - protects against optimizer overfitting
+    "low": 0.0,     # No trades (effectively disabled)
+}
+
+# ==========================================
 # 🚀 v37.0 - DYNAMIC OPTIMIZER CONTROLS DISABLED STATE
 # ==========================================
 # All hardcoded "disabled: True" removed - optimizer decides at runtime
@@ -594,12 +635,13 @@ def _get_min_trades_for_timeframe(tf: str, num_candles: int = 20000) -> int:
 
 def _compute_optimizer_score(net_pnl: float, trades: int, trade_pnls: list,
                               min_trades: int = 40, hard_min_trades: int = 5,
-                              reject_negative_pnl: bool = True) -> float:
+                              reject_negative_pnl: bool = True, tf: str = "15m") -> float:
     """Compute a robust optimizer score that penalizes overfitting.
 
     Uses a modified Sortino-like approach with aggressive anti-overfit measures:
     - HARD REJECT configs with negative net PnL (no edge = no config)
     - HARD REJECT configs with fewer than hard_min_trades
+    - HARD REJECT configs with expectancy below MIN_EXPECTANCY_PER_TRADE threshold
     - Penalizes low trade counts (statistical insignificance)
     - Penalizes high variance in returns (inconsistent edge)
     - Penalizes extreme drawdowns
@@ -612,6 +654,7 @@ def _compute_optimizer_score(net_pnl: float, trades: int, trade_pnls: list,
         min_trades: Trades needed for full confidence (default 40)
         hard_min_trades: Absolute minimum trades, below this = reject (default 5)
         reject_negative_pnl: If True, reject configs with net_pnl <= 0 (default True)
+        tf: Timeframe for looking up expectancy threshold
 
     Returns:
         Composite score (higher is better, -inf for rejected configs)
@@ -625,6 +668,12 @@ def _compute_optimizer_score(net_pnl: float, trades: int, trade_pnls: list,
         return -float("inf")
 
     if trades == 0:
+        return -float("inf")
+
+    # HARD REJECT: Expectancy too low = barely positive, not a real edge
+    expectancy = net_pnl / trades
+    min_expectancy = MIN_EXPECTANCY_PER_TRADE.get(tf, 2.0)
+    if expectancy < min_expectancy:
         return -float("inf")
 
     # Trade count confidence factor - MUCH more aggressive penalty for low counts
@@ -880,7 +929,8 @@ def _optimize_backtest_configs(
                 net_pnl, trades, trade_pnls,
                 min_trades=tf_min_trades,
                 hard_min_trades=hard_min,
-                reject_negative_pnl=True
+                reject_negative_pnl=True,
+                tf=tf
             )
 
             if score > best_score:
@@ -927,36 +977,60 @@ def _optimize_backtest_configs(
         # Get min_trades for this timeframe for logging (using actual num_candles)
         tf_min_trades = _get_min_trades_for_timeframe(tf, num_candles)
         hard_min = max(3, tf_min_trades // 3)
+        min_score = MIN_SCORE_THRESHOLD.get(tf, 10.0)
+        min_expectancy = MIN_EXPECTANCY_PER_TRADE.get(tf, 2.0)
+
+        # Additional gate: score must meet minimum threshold for this timeframe
+        if best_cfg and best_score < min_score:
+            log(
+                f"[OPT][{sym}-{tf}] Score ({best_score:.2f}) < min threshold ({min_score:.2f}) "
+                f"→ Weak edge, DEVRE DIŞI"
+            )
+            best_cfg = None  # Reject weak-edge config
 
         if best_cfg:
-            # Explicit disabled=False ensures stream is enabled even if previously disabled
-            best_by_pair[(sym, tf)] = {
-                **best_cfg,
-                "disabled": False,  # Explicitly enable - overwrites any previous disabled state
-                "_net_pnl": best_pnl,
-                "_trades": best_trades,
-                "_score": best_score
-            }
-            dyn_tp_str = "Açık" if best_cfg.get('use_dynamic_pbema_tp') else "Kapalı"
-
-            # Confidence indicator based on trade count vs min_trades
+            # Confidence level for risk multiplier (stored as string key)
             if best_trades >= tf_min_trades:
-                confidence = "✓ Yüksek"
+                confidence_level = "high"
+                confidence_display = "✓ Yüksek"
             elif best_trades >= tf_min_trades * 0.6:
-                confidence = "~ Orta"
+                confidence_level = "medium"
+                confidence_display = "~ Orta"
             else:
-                confidence = "⚠ Düşük"
+                confidence_level = "low"
+                confidence_display = "⚠ Düşük"
 
-            log(
-                f"[OPT][{sym}-{tf}] En iyi ayar: RR={best_cfg['rr']}, RSI={best_cfg['rsi']}, "
-                f"Slope={best_cfg['slope']}, AT={'Açık' if best_cfg['at_active'] else 'Kapalı'}, "
-                f"DynTP={dyn_tp_str} | Net PnL={best_pnl:.2f}, Trades={best_trades}/{tf_min_trades}, "
-                f"Score={best_score:.2f}, Güven={confidence}"
-            )
+            # Low confidence = no trades (risk multiplier = 0)
+            if confidence_level == "low":
+                log(
+                    f"[OPT][{sym}-{tf}] Düşük güven ({best_trades}/{tf_min_trades} trade) "
+                    f"→ Risk çarpanı=0, DEVRE DIŞI"
+                )
+                best_by_pair[(sym, tf)] = {"disabled": True, "_reason": "low_confidence"}
+            else:
+                # Explicit disabled=False ensures stream is enabled even if previously disabled
+                best_by_pair[(sym, tf)] = {
+                    **best_cfg,
+                    "disabled": False,  # Explicitly enable - overwrites any previous disabled state
+                    "_net_pnl": best_pnl,
+                    "_trades": best_trades,
+                    "_score": best_score,
+                    "_confidence": confidence_level,  # For risk multiplier
+                    "_expectancy": best_pnl / best_trades if best_trades > 0 else 0,
+                }
+                dyn_tp_str = "Açık" if best_cfg.get('use_dynamic_pbema_tp') else "Kapalı"
+                risk_mult = CONFIDENCE_RISK_MULTIPLIER.get(confidence_level, 1.0)
+
+                log(
+                    f"[OPT][{sym}-{tf}] En iyi ayar: RR={best_cfg['rr']}, RSI={best_cfg['rsi']}, "
+                    f"Slope={best_cfg['slope']}, AT={'Açık' if best_cfg['at_active'] else 'Kapalı'}, "
+                    f"DynTP={dyn_tp_str} | Net PnL={best_pnl:.2f}, Trades={best_trades}/{tf_min_trades}, "
+                    f"Score={best_score:.2f}, Güven={confidence_display}, Risk={risk_mult:.0%}"
+                )
         else:
             log(
-                f"[OPT][{sym}-{tf}] Pozitif PnL'li config bulunamadı - ya trade < {hard_min} ya da net PnL <= 0 "
-                f"(istatistiksel güven için {tf_min_trades} trade gerekli) → DEVRE DIŞI"
+                f"[OPT][{sym}-{tf}] Geçerli config bulunamadı - trade<{hard_min} veya PnL<=0 veya "
+                f"expectancy<${min_expectancy:.1f}/trade (min {tf_min_trades} trade) → DEVRE DIŞI"
             )
             # Mark this stream as disabled so backtest skips it
             best_by_pair[(sym, tf)] = {"disabled": True, "_reason": "no_positive_config"}
@@ -1192,6 +1266,13 @@ class TradeManager:
             opt_rr = config_snapshot.get("rr", 3.0)
             opt_rsi = config_snapshot.get("rsi", 60)
 
+            # Confidence-based risk multiplier: reduce position size for medium confidence
+            confidence_level = config_snapshot.get("_confidence", "high")
+            risk_multiplier = CONFIDENCE_RISK_MULTIPLIER.get(confidence_level, 1.0)
+            if risk_multiplier <= 0:
+                print(f"⚠️ [{sym}-{tf}] Düşük güven seviyesi, işlem açılmadı.")
+                return
+
             if self.wallet_balance < 10:
                 print(f"⚠️ Yetersiz Bakiye (${self.wallet_balance:.2f}). İşlem açılamadı.")
                 return
@@ -1207,11 +1288,13 @@ class TradeManager:
 
             sl_price = float(signal_data["sl"])
 
+            # Apply risk multiplier to effective risk per trade
+            effective_risk_pct = self.risk_per_trade_pct * risk_multiplier
             current_portfolio_risk_pct = self._calculate_portfolio_risk_pct(self.wallet_balance)
-            if current_portfolio_risk_pct + self.risk_per_trade_pct > self.max_portfolio_risk_pct:
+            if current_portfolio_risk_pct + effective_risk_pct > self.max_portfolio_risk_pct:
                 print(
                     f"⚠️ Portföy risk limiti aşılıyor: mevcut %{current_portfolio_risk_pct * 100:.2f}, "
-                    f"yeni işlem riski %{self.risk_per_trade_pct * 100:.2f}, limit %{self.max_portfolio_risk_pct * 100:.2f}"
+                    f"yeni işlem riski %{effective_risk_pct * 100:.2f}, limit %{self.max_portfolio_risk_pct * 100:.2f}"
                 )
                 return
 
@@ -1220,7 +1303,7 @@ class TradeManager:
                 print("⚠️ Cüzdan bakiyesi 0 veya negatif, işlem açılamadı.")
                 return
 
-            risk_amount = wallet_balance * self.risk_per_trade_pct
+            risk_amount = wallet_balance * effective_risk_pct
             sl_distance = abs(real_entry - sl_price)
             if sl_distance <= 0:
                 print("⚠️ Geçersiz SL mesafesi, işlem atlandı.")
@@ -1284,8 +1367,8 @@ class TradeManager:
             print(
                 f"📈 İşlem Açıldı | Entry: {real_entry:.4f}, SL: {sl_price:.4f}, "
                 f"Size: {position_size:.6f}, Notional: ${position_notional:.2f}, "
-                f"Margin: ${required_margin:.2f}, Risk%: {self.risk_per_trade_pct * 100:.2f}%, "
-                f"Risk$: ${risk_amount:.2f}, Portföy Risk%: {new_portfolio_risk_pct * 100:.2f}%"
+                f"Margin: ${required_margin:.2f}, Risk%: {effective_risk_pct * 100:.2f}% "
+                f"({confidence_level}), Risk$: ${risk_amount:.2f}, Portföy: {new_portfolio_risk_pct * 100:.2f}%"
             )
 
             self.save_trades()
@@ -4684,6 +4767,13 @@ class SimTradeManager:
         opt_rr = config_snapshot.get("rr", 3.0)
         opt_rsi = config_snapshot.get("rsi", 60)
 
+        # Confidence-based risk multiplier: reduce position size for medium confidence
+        confidence_level = config_snapshot.get("_confidence", "high")
+        risk_multiplier = CONFIDENCE_RISK_MULTIPLIER.get(confidence_level, 1.0)
+        if risk_multiplier <= 0:
+            # Low confidence = no trades
+            return False
+
         if self.wallet_balance < 10:
             return False
 
@@ -4697,15 +4787,17 @@ class SimTradeManager:
 
         sl_price = float(trade_data["sl"])
 
+        # Apply risk multiplier to effective risk per trade
+        effective_risk_pct = self.risk_per_trade_pct * risk_multiplier
         current_portfolio_risk_pct = self._calculate_portfolio_risk_pct(self.wallet_balance)
-        if current_portfolio_risk_pct + self.risk_per_trade_pct > self.max_portfolio_risk_pct:
+        if current_portfolio_risk_pct + effective_risk_pct > self.max_portfolio_risk_pct:
             return False
 
         wallet_balance = self.wallet_balance
         if wallet_balance <= 0:
             return False
 
-        risk_amount = wallet_balance * self.risk_per_trade_pct
+        risk_amount = wallet_balance * effective_risk_pct
         sl_distance = abs(real_entry - sl_price)
         if sl_distance <= 0:
             return False
@@ -4775,8 +4867,8 @@ class SimTradeManager:
         print(
             f"[SIM] İşlem Açıldı | Entry: {real_entry:.4f}, SL: {sl_price:.4f}, "
             f"Size: {position_size:.6f}, Notional: ${position_notional:.2f}, "
-            f"Margin: ${required_margin:.2f}, Risk%: {self.risk_per_trade_pct * 100:.2f}%, "
-            f"Risk$: ${risk_amount:.2f}, Portföy Risk%: {new_portfolio_risk_pct * 100:.2f}%"
+            f"Margin: ${required_margin:.2f}, Risk%: {effective_risk_pct * 100:.2f}% "
+            f"({confidence_level}), Risk$: ${risk_amount:.2f}, Portföy: {new_portfolio_risk_pct * 100:.2f}%"
         )
         return True
 
@@ -5123,6 +5215,26 @@ def run_portfolio_backtest(
         log_to_stdout=False,
     )
 
+    # --- CONFIG SOURCE LOGGING (for debugging optimizer vs backtest divergence) ---
+    enabled_streams = []
+    disabled_streams = []
+    for (sym, tf) in requested_pairs:
+        cfg = best_configs.get((sym, tf), {})
+        if cfg.get("disabled", False):
+            reason = cfg.get("_reason", "unknown")
+            disabled_streams.append(f"{sym}-{tf} ({reason})")
+        else:
+            conf = cfg.get("_confidence", "high")
+            score = cfg.get("_score", 0)
+            exp = cfg.get("_expectancy", 0)
+            risk_mult = CONFIDENCE_RISK_MULTIPLIER.get(conf, 1.0)
+            enabled_streams.append(
+                f"{sym}-{tf}: RR={cfg.get('rr', '-')}, RSI={cfg.get('rsi', '-')}, "
+                f"Score={score:.1f}, Exp=${exp:.2f}, Risk={risk_mult:.0%}"
+            )
+
+    log(f"[CFG] Aktif stream sayısı: {len(enabled_streams)}, Devre dışı: {len(disabled_streams)}", category="summary")
+
     # PERFORMANCE: Pre-extract NumPy arrays for all streams to avoid df.iloc[i] overhead
     streams_arrays = {}
     for (sym, tf), df in streams.items():
@@ -5428,6 +5540,42 @@ def run_portfolio_backtest(
                 )
         if disabled_count > 0:
             log(f"\n[OPT] {disabled_count} stream devre dışı bırakıldı (pozitif PnL'li config bulunamadı)", category="summary")
+
+    # --- OPTIMIZER VS BACKTEST DIVERGENCE DETECTION ---
+    # Compare optimizer predictions with actual backtest results
+    divergent_streams = []
+    for row in summary_rows:
+        sym, tf = row["symbol"], row["timeframe"]
+        actual_pnl = row["net_pnl"]
+        actual_trades = row["trades"]
+
+        opt_cfg = best_configs.get((sym, tf), {})
+        if opt_cfg.get("disabled", False):
+            continue  # Skip disabled streams
+
+        opt_pnl = opt_cfg.get("_net_pnl", 0)
+        opt_trades = opt_cfg.get("_trades", 0)
+
+        # Detect significant divergence: optimizer predicted positive but actual negative
+        if opt_pnl > 0 and actual_pnl < -10:  # Allow some tolerance
+            divergent_streams.append({
+                "stream": f"{sym}-{tf}",
+                "opt_pnl": opt_pnl,
+                "actual_pnl": actual_pnl,
+                "opt_trades": opt_trades,
+                "actual_trades": actual_trades,
+                "divergence": actual_pnl - opt_pnl,
+            })
+
+    if divergent_streams:
+        log(f"\n⚠️ [DIVERGENCE] {len(divergent_streams)} stream optimizer vs backtest uyuşmazlığı:", category="summary")
+        for d in sorted(divergent_streams, key=lambda x: x["divergence"]):
+            log(
+                f"  - {d['stream']}: OPT=${d['opt_pnl']:.0f}({d['opt_trades']}tr) → "
+                f"ACTUAL=${d['actual_pnl']:.0f}({d['actual_trades']}tr) [Δ${d['divergence']:.0f}]",
+                category="summary"
+            )
+        log("  (Nedenler: portfolio constraint'ler, pozisyon çakışmaları, risk limitleri)", category="summary")
 
     log(
         f"Final Wallet (sim): ${tm.wallet_balance:.2f} | Total PnL: ${tm.total_pnl:.2f}",
