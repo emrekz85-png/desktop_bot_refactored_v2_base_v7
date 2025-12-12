@@ -1033,8 +1033,10 @@ def _optimize_backtest_configs(
         else:
             log(
                 f"[OPT][{sym}-{tf}] Pozitif PnL'li config bulunamadı - ya trade < {hard_min} ya da net PnL <= 0 "
-                f"(istatistiksel güven için {tf_min_trades} trade gerekli)"
+                f"(istatistiksel güven için {tf_min_trades} trade gerekli) → DEVRE DIŞI"
             )
+            # Mark this stream as disabled so backtest skips it
+            best_by_pair[(sym, tf)] = {"disabled": True, "_reason": "no_positive_config"}
 
     log("[OPT] Tarama tamamlandı. Bulunan ayarlar backtest'e uygulanacak.")
     return best_by_pair
@@ -5445,14 +5447,21 @@ def run_portfolio_backtest(
         log(summary_df.to_string(index=False), category="summary")
 
     if best_configs:
-        log("\n[OPT] En iyi ayar özeti (Net PnL'e göre):", category="summary")
-        for (sym, tf), cfg in sorted(best_configs.items()):
-            log(
-                f"  - {sym}-{tf}: RR={cfg['rr']}, RSI={cfg['rsi']}, Slope={cfg['slope']}, "
-                f"AT={'Açık' if cfg['at_active'] else 'Kapalı'}, Trailing={cfg.get('use_trailing', False)} | "
-                f"NetPnL={cfg['_net_pnl']:.2f}, Trades={cfg['_trades']}",
-                category="summary",
-            )
+        # Filter out disabled configs for summary
+        active_configs = {k: v for k, v in best_configs.items() if not v.get("disabled", False)}
+        disabled_count = len(best_configs) - len(active_configs)
+
+        if active_configs:
+            log("\n[OPT] En iyi ayar özeti (Net PnL'e göre):", category="summary")
+            for (sym, tf), cfg in sorted(active_configs.items()):
+                log(
+                    f"  - {sym}-{tf}: RR={cfg['rr']}, RSI={cfg['rsi']}, Slope={cfg['slope']}, "
+                    f"AT={'Açık' if cfg['at_active'] else 'Kapalı'}, Trailing={cfg.get('use_trailing', False)} | "
+                    f"NetPnL={cfg['_net_pnl']:.2f}, Trades={cfg['_trades']}",
+                    category="summary",
+                )
+        if disabled_count > 0:
+            log(f"\n[OPT] {disabled_count} stream devre dışı bırakıldı (pozitif PnL'li config bulunamadı)", category="summary")
 
     log(
         f"Final Wallet (sim): ${tm.wallet_balance:.2f} | Total PnL: ${tm.total_pnl:.2f}",
