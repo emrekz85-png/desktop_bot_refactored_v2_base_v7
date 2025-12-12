@@ -55,15 +55,15 @@ REFRESH_RATE = 3
 ENABLE_CHARTS = False
 CSV_FILE = "trades.csv"
 CONFIG_FILE = "config.json"
-# Backtestler için maks. mum sayısı sınırları
+# Backtestler için maks. mum sayısı sınırları (yüksek limit - kullanıcının isteğine göre)
 BACKTEST_CANDLE_LIMITS = {
-    "1m": 4000,
-    "5m": 4000,
-    "15m": 4000,
-    "1h": 4000,
-    "4h": 3000,
-    "12h": 2000,
-    "1d": 1500,
+    "1m": 100000,
+    "5m": 100000,
+    "15m": 100000,
+    "1h": 100000,
+    "4h": 50000,
+    "12h": 30000,
+    "1d": 20000,
 }
 # Günlük raporlar için özel mum sayısı sınırı
 DAILY_REPORT_CANDLE_LIMITS = {
@@ -1108,6 +1108,14 @@ class TradeManager:
 
             setup_type = signal_data.get("setup", "Unknown")
 
+            # Trade açılırken config'i snapshot olarak al ve trade'e göm
+            # Bu sayede trade yaşam döngüsü boyunca aynı kurallar kullanılır
+            config_snapshot = load_optimized_config(sym, tf)
+            use_trailing = config_snapshot.get("use_trailing", False)
+            use_dynamic_pbema_tp = config_snapshot.get("use_dynamic_pbema_tp", True)
+            opt_rr = config_snapshot.get("rr", 3.0)
+            opt_rsi = config_snapshot.get("rsi", 60)
+
             if self.wallet_balance < 10:
                 print(f"⚠️ Yetersiz Bakiye (${self.wallet_balance:.2f}). İşlem açılamadı.")
                 return
@@ -1183,7 +1191,12 @@ class TradeManager:
                 "notional": position_notional, "events": [],
                 "status": "OPEN", "pnl": 0.0,
                 "breakeven": False, "trailing_active": False, "partial_taken": False, "partial_price": None,
-                "has_cash": True, "close_time": "", "close_price": ""
+                "has_cash": True, "close_time": "", "close_price": "",
+                # Trade açılırken snapshot edilen config ayarları (yaşam döngüsü boyunca sabit kalır)
+                "use_trailing": use_trailing,
+                "use_dynamic_pbema_tp": use_dynamic_pbema_tp,
+                "opt_rr": opt_rr,
+                "opt_rsi": opt_rsi,
             }
 
             self.wallet_balance -= required_margin
@@ -1234,10 +1247,17 @@ class TradeManager:
                 t_type = trade["type"]
                 initial_margin = float(trade.get("margin", size / TRADING_CONFIG["leverage"]))
 
-                config = load_optimized_config(symbol, tf)
-                use_trailing = config.get("use_trailing", False)
+                # Config'i trade dict'inden oku (açılışta snapshot edildi)
+                # Eski trade'ler için fallback olarak load_optimized_config kullan
+                if "use_trailing" in trade:
+                    use_trailing = trade.get("use_trailing", False)
+                    use_dynamic_tp = trade.get("use_dynamic_pbema_tp", True)
+                else:
+                    # Backward compatibility: eski trade'ler için config'den oku
+                    config = load_optimized_config(symbol, tf)
+                    use_trailing = config.get("use_trailing", False)
+                    use_dynamic_tp = config.get("use_dynamic_pbema_tp", True)
                 use_partial = not use_trailing
-                use_dynamic_tp = config.get("use_dynamic_pbema_tp", True)
 
                 # --- Fiyatlar ---
                 # Partial TP için conservative fill hesaplaması
@@ -3720,7 +3740,7 @@ class MainWindow(QMainWindow):
         bt_cfg.addLayout(bt_tf_layout)
         bt_cfg.addWidget(QLabel("Mum Sayısı:"));
         self.backtest_candles = QSpinBox();
-        self.backtest_candles.setRange(500, 6000);
+        self.backtest_candles.setRange(500, 100000);  # Maksimum limit kaldırıldı
         self.backtest_candles.setValue(3000);
         bt_cfg.addWidget(self.backtest_candles)
         self.btn_run_backtest = QPushButton("🧪 Backtest Çalıştır");
@@ -4532,6 +4552,14 @@ class SimTradeManager:
 
         setup_type = trade_data.get("setup", "Unknown")
 
+        # Trade açılırken config'i snapshot olarak al ve trade'e göm
+        # Bu sayede trade yaşam döngüsü boyunca aynı kurallar kullanılır
+        config_snapshot = load_optimized_config(sym, tf)
+        use_trailing = config_snapshot.get("use_trailing", False)
+        use_dynamic_pbema_tp = config_snapshot.get("use_dynamic_pbema_tp", True)
+        opt_rr = config_snapshot.get("rr", 3.0)
+        opt_rsi = config_snapshot.get("rsi", 60)
+
         if self.wallet_balance < 10:
             return False
 
@@ -4608,6 +4636,11 @@ class SimTradeManager:
             "close_time": "",
             "close_price": "",
             "events": [],
+            # Trade açılırken snapshot edilen config ayarları (yaşam döngüsü boyunca sabit kalır)
+            "use_trailing": use_trailing,
+            "use_dynamic_pbema_tp": use_dynamic_pbema_tp,
+            "opt_rr": opt_rr,
+            "opt_rsi": opt_rsi,
         }
 
         self.wallet_balance -= required_margin
@@ -4661,10 +4694,17 @@ class SimTradeManager:
             t_type = trade["type"]
             initial_margin = float(trade.get("margin", size / TRADING_CONFIG["leverage"]))
 
-            config = load_optimized_config(symbol, tf)
-            use_trailing = config.get("use_trailing", False)
+            # Config'i trade dict'inden oku (açılışta snapshot edildi)
+            # Eski trade'ler için fallback olarak load_optimized_config kullan
+            if "use_trailing" in trade:
+                use_trailing = trade.get("use_trailing", False)
+                use_dynamic_tp = trade.get("use_dynamic_pbema_tp", True)
+            else:
+                # Backward compatibility: eski trade'ler için config'den oku
+                config = load_optimized_config(symbol, tf)
+                use_trailing = config.get("use_trailing", False)
+                use_dynamic_tp = config.get("use_dynamic_pbema_tp", True)
             use_partial = not use_trailing
-            use_dynamic_tp = config.get("use_dynamic_pbema_tp", True)
 
             # --- Fiyatlar ---
             # Partial TP için conservative fill hesaplaması
