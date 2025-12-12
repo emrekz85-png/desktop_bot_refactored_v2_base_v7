@@ -559,24 +559,29 @@ def _audit_trade_logic_parity() -> dict:
 
 
 def _generate_candidate_configs():
-    """Create a compact grid of configs to search for higher trade density."""
+    """Create a compact grid of configs to search for higher trade density.
+
+    NOT: Slope parametresi artık taranmıyor çünkü:
+    - PBEMA (200 EMA) çok yavaş hareket eder
+    - Mean reversion stratejisinde slope filter mantıksız
+    - Slope taramak sadece zaman kaybı
+    """
 
     rr_vals = np.arange(1.2, 2.6, 0.3)
     rsi_vals = np.arange(35, 76, 10)
-    slope_vals = np.arange(0.2, 0.9, 0.2)
     at_vals = [False, True]
     # Include both dynamic TP options to ensure optimizer matches what live will use
     dyn_tp_vals = [True, False]
 
     candidates = []
-    for rr, rsi, slope, at_active, dyn_tp in itertools.product(
-        rr_vals, rsi_vals, slope_vals, at_vals, dyn_tp_vals
+    for rr, rsi, at_active, dyn_tp in itertools.product(
+        rr_vals, rsi_vals, at_vals, dyn_tp_vals
     ):
         candidates.append(
             {
                 "rr": round(float(rr), 2),
                 "rsi": int(rsi),
-                "slope": round(float(slope), 2),
+                "slope": 0.5,  # Sabit değer - artık kullanılmıyor
                 "at_active": bool(at_active),
                 "use_trailing": False,
                 "use_dynamic_pbema_tp": bool(dyn_tp),
@@ -1971,27 +1976,22 @@ class TradingEngine:
         pb_top = float(curr["pb_ema_top"])
         pb_bot = float(curr["pb_ema_bot"])
 
-        # --- Mean reversion with slope filter ---
+        # --- Mean reversion: Slope filter DEVRE DIŞI ---
+        # PBEMA (200 EMA) çok yavaş hareket eder:
+        # - Slope değişmesini beklemek = trade kaçırmak
+        # - Mean reversion'da fiyat ortalamaya ÇEKİLİR
+        # - Slope değişene kadar hareketin çoğu bitmiş olur
+        # Sonuç: PBEMA için slope filter YANLIŞ yaklaşım
         slope_top = float(curr.get("slope_top", 0.0) or 0.0)
         slope_bot = float(curr.get("slope_bot", 0.0) or 0.0)
-        slope_thresh = slope_thresh or 0.0
 
-        # Trend detection for debug info
-        trend_up_strong = slope_top > slope_thresh and pb_top >= pb_bot and close > pb_top
-        trend_down_strong = slope_bot < -slope_thresh and pb_bot <= pb_top and close < pb_bot
-        debug_info["trend_up_strong"] = trend_up_strong
-        debug_info["trend_down_strong"] = trend_down_strong
+        # Sadece debug için tut, FİLTRELEME YAPMA
         debug_info["slope_top"] = slope_top
         debug_info["slope_bot"] = slope_bot
-        debug_info["slope_thresh"] = slope_thresh
 
-        # Slope filter for mean reversion:
-        # - For LONG: Avoid buying when PBEMA is in strong downtrend (slope_bot < -thresh)
-        #   This prevents catching falling knives in a strong downmove
-        # - For SHORT: Avoid selling when PBEMA is in strong uptrend (slope_top > thresh)
-        #   This prevents shorting into strong momentum
-        long_direction_ok = not (slope_bot < -slope_thresh)
-        short_direction_ok = not (slope_top > slope_thresh)
+        # Mean reversion = yön kısıtı YOK
+        long_direction_ok = True
+        short_direction_ok = True
         debug_info["long_direction_ok"] = long_direction_ok
         debug_info["short_direction_ok"] = short_direction_ok
 
