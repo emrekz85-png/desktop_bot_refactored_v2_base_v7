@@ -24,19 +24,54 @@ from typing import Tuple, Optional
 import matplotlib
 import hashlib
 
+# ==========================================
+# 🚀 GOOGLE COLAB / HEADLESS MODE SUPPORT
+# ==========================================
+# Detect if running in Google Colab or headless environment
+IS_COLAB = 'google.colab' in sys.modules or os.environ.get('COLAB_RELEASE_TAG') is not None
+IS_HEADLESS = os.environ.get('HEADLESS_MODE', '').lower() in ('1', 'true', 'yes') or IS_COLAB
+IS_NOTEBOOK = 'ipykernel' in sys.modules
+
+# Try to import tqdm for progress bars (Colab/Jupyter friendly)
+try:
+    if IS_NOTEBOOK:
+        from tqdm.notebook import tqdm
+    else:
+        from tqdm import tqdm
+    HAS_TQDM = True
+except ImportError:
+    HAS_TQDM = False
+    tqdm = None
+
+# Print Colab status
+if IS_COLAB:
+    print("🚀 Google Colab ortamı tespit edildi - Headless mod aktif")
+elif IS_HEADLESS:
+    print("🖥️ Headless mod aktif - GUI devre dışı")
+
 # Matplotlib çizimlerini arka planda üretmek için GUI gerektirmeyen backend
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# PyQt5 Modülleri (QSpinBox EKLENDİ)
-from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                             QHBoxLayout, QGridLayout, QTabWidget, QTextEdit, QLabel,
-                             QTableWidget, QTableWidgetItem, QPushButton, QHeaderView,
-                             QGroupBox, QDoubleSpinBox, QComboBox, QMessageBox, QCheckBox,
-                             QLineEdit, QSpinBox, QFrame)  # <--- EKLENDİ
-from PyQt5.QtWebEngineWidgets import QWebEngineView
-from PyQt5.QtCore import QThread, pyqtSignal, QTimer, Qt
-from PyQt5.QtGui import QColor, QFont
+# PyQt5 Modülleri - sadece GUI modunda yükle
+if not IS_HEADLESS:
+    try:
+        from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+                                     QHBoxLayout, QGridLayout, QTabWidget, QTextEdit, QLabel,
+                                     QTableWidget, QTableWidgetItem, QPushButton, QHeaderView,
+                                     QGroupBox, QDoubleSpinBox, QComboBox, QMessageBox, QCheckBox,
+                                     QLineEdit, QSpinBox, QFrame)
+        from PyQt5.QtWebEngineWidgets import QWebEngineView
+        from PyQt5.QtCore import QThread, pyqtSignal, QTimer, Qt
+        from PyQt5.QtGui import QColor, QFont
+        HAS_GUI = True
+    except ImportError:
+        print("⚠️ PyQt5 bulunamadı - GUI devre dışı, sadece CLI modu kullanılabilir")
+        HAS_GUI = False
+        IS_HEADLESS = True
+else:
+    HAS_GUI = False
+
 import plotly.graph_objects as go
 import plotly.utils
 
@@ -103,16 +138,38 @@ TRADING_CONFIG = {
 }
 
 # ==========================================
-# 🎯 v38.0 - ADVANCED OPTIMIZER GATING
+# 🎯 v39.0 - R-MULTIPLE BASED OPTIMIZER GATING
 # ==========================================
 # Multi-layer gating to prevent weak-edge configs from trading:
-# 1. Minimum expectancy per trade ($/trade threshold)
+# 1. Minimum E[R] threshold (account-size independent)
 # 2. Minimum score threshold (varies by timeframe)
 # 3. Confidence-based risk multiplier
+# 4. Walk-forward out-of-sample validation
 # ==========================================
 
-# Minimum expected profit per trade by timeframe
-# Configs with lower expectancy are considered "barely positive" and rejected
+# R-Multiple = PnL / Risk Amount
+# E[R] = Expected R-multiple per trade (average R across all trades)
+# - E[R] > 0: Positive expectancy (profitable system)
+# - E[R] = 1.0: Average win equals average risk
+# - E[R] = -1.0: Average loss equals average risk (typical SL hit)
+#
+# Bu metrik hesap büyüklüğünden, kaldıraçtan ve komisyondan bağımsızdır.
+# Modelin gerçek "edge"ini ölçer.
+
+# Minimum E[R] (expected R-multiple) threshold by timeframe
+# Configs with lower E[R] are considered "barely positive" and rejected
+MIN_EXPECTANCY_R_MULTIPLE = {
+    "1m": 0.15,   # Very noisy - need strong edge (avg 0.15R per trade)
+    "5m": 0.10,   # Noisy - need decent edge per trade (avg 0.10R)
+    "15m": 0.08,  # Moderate noise
+    "30m": 0.07,
+    "1h": 0.06,   # Cleaner signals
+    "4h": 0.05,   # Low noise
+    "1d": 0.04,   # Very clean
+}
+
+# DEPRECATED: Eski $/trade eşikleri (geriye uyumluluk için korunuyor)
+# Bu değerler artık kullanılmıyor, E[R] kullanılıyor
 MIN_EXPECTANCY_PER_TRADE = {
     "1m": 6.0,   # Very noisy - need strong edge
     "5m": 4.0,   # Noisy - need decent edge per trade
@@ -633,15 +690,148 @@ def _get_min_trades_for_timeframe(tf: str, num_candles: int = 20000) -> int:
     return min(scaled_min, base_rate)
 
 
+# ==========================================
+# 🔬 WALK-FORWARD / OUT-OF-SAMPLE TESTING
+# ==========================================
+# Overfitting'i önlemek için:
+# 1. Veriyi train (in-sample) ve test (out-of-sample) olarak böl
+# 2. Train verisinde optimize et
+# 3. Test verisinde sadece test et (tekrar optimize etme)
+# 4. Test E[R] / Train E[R] oranı "overfit ratio"
+# 5. Overfit ratio < 0.5 ise config reddedilir
+# ==========================================
+
+WALK_FORWARD_CONFIG = {
+    "train_ratio": 0.70,        # %70 train, %30 test
+    "min_test_trades": 3,       # Test için minimum trade sayısı
+    "min_overfit_ratio": 0.50,  # Test E[R] / Train E[R] minimum oranı
+    "enabled": True,            # Walk-forward testi etkinleştir
+}
+
+
+def _split_data_walk_forward(df: pd.DataFrame, train_ratio: float = 0.70) -> tuple:
+    """Split data into train (in-sample) and test (out-of-sample) periods.
+
+    Args:
+        df: DataFrame with candle data (sorted by timestamp ascending)
+        train_ratio: Ratio of data to use for training (default 0.70 = 70%)
+
+    Returns:
+        (train_df, test_df): Tuple of DataFrames
+    """
+    n = len(df)
+    train_end = int(n * train_ratio)
+
+    # Ensure we have enough data for both periods
+    if train_end < 300 or (n - train_end) < 100:
+        # Not enough data, return full df for both (skip walk-forward)
+        return df, None
+
+    train_df = df.iloc[:train_end].reset_index(drop=True)
+    test_df = df.iloc[train_end:].reset_index(drop=True)
+
+    return train_df, test_df
+
+
+def _validate_config_oos(df_test: pd.DataFrame, sym: str, tf: str, config: dict) -> dict:
+    """Validate a config on out-of-sample test data.
+
+    Args:
+        df_test: Test DataFrame (out-of-sample data)
+        sym: Symbol
+        tf: Timeframe
+        config: The optimized config to test
+
+    Returns:
+        dict with OOS metrics: {
+            'oos_pnl': float,
+            'oos_trades': int,
+            'oos_expected_r': float,
+            'oos_win_rate': float
+        }
+    """
+    if df_test is None or len(df_test) < 100:
+        return None
+
+    try:
+        net_pnl, trades, trade_pnls, trade_r_multiples = _score_config_for_stream(
+            df_test, sym, tf, config
+        )
+    except Exception:
+        return None
+
+    if trades == 0:
+        return {
+            'oos_pnl': 0.0,
+            'oos_trades': 0,
+            'oos_expected_r': 0.0,
+            'oos_win_rate': 0.0
+        }
+
+    expected_r = sum(trade_r_multiples) / len(trade_r_multiples) if trade_r_multiples else 0.0
+    wins = sum(1 for p in trade_pnls if p > 0)
+    win_rate = wins / trades if trades > 0 else 0.0
+
+    return {
+        'oos_pnl': net_pnl,
+        'oos_trades': trades,
+        'oos_expected_r': expected_r,
+        'oos_win_rate': win_rate
+    }
+
+
+def _check_overfit(train_expected_r: float, oos_result: dict, tf: str) -> tuple:
+    """Check if a config is overfitted by comparing train and OOS performance.
+
+    Args:
+        train_expected_r: E[R] from training data (in-sample)
+        oos_result: Dict with OOS metrics from _validate_config_oos
+        tf: Timeframe
+
+    Returns:
+        (is_overfit: bool, overfit_ratio: float, reason: str)
+    """
+    if oos_result is None:
+        return False, 1.0, "no_oos_data"
+
+    min_test_trades = WALK_FORWARD_CONFIG.get("min_test_trades", 3)
+    min_overfit_ratio = WALK_FORWARD_CONFIG.get("min_overfit_ratio", 0.50)
+
+    oos_trades = oos_result.get('oos_trades', 0)
+    oos_expected_r = oos_result.get('oos_expected_r', 0.0)
+
+    # Not enough OOS trades for statistical significance
+    if oos_trades < min_test_trades:
+        return False, 1.0, f"insufficient_oos_trades ({oos_trades}<{min_test_trades})"
+
+    # OOS is negative = clear overfit
+    if oos_expected_r < 0:
+        return True, 0.0, "negative_oos_expected_r"
+
+    # Calculate overfit ratio (how much of IS performance carries to OOS)
+    if train_expected_r > 0:
+        overfit_ratio = oos_expected_r / train_expected_r
+    else:
+        # Train was also bad, can't calculate ratio
+        return False, 1.0, "train_not_positive"
+
+    # Check if OOS degradation is too severe
+    if overfit_ratio < min_overfit_ratio:
+        return True, overfit_ratio, f"oos_degradation ({overfit_ratio:.2f}<{min_overfit_ratio})"
+
+    return False, overfit_ratio, "ok"
+
+
 def _compute_optimizer_score(net_pnl: float, trades: int, trade_pnls: list,
                               min_trades: int = 40, hard_min_trades: int = 5,
-                              reject_negative_pnl: bool = True, tf: str = "15m") -> float:
+                              reject_negative_pnl: bool = True, tf: str = "15m",
+                              trade_r_multiples: list = None) -> float:
     """Compute a robust optimizer score that penalizes overfitting.
 
     Uses a modified Sortino-like approach with aggressive anti-overfit measures:
     - HARD REJECT configs with negative net PnL (no edge = no config)
     - HARD REJECT configs with fewer than hard_min_trades
-    - HARD REJECT configs with expectancy below MIN_EXPECTANCY_PER_TRADE threshold
+    - HARD REJECT configs with E[R] below MIN_EXPECTANCY_R_MULTIPLE threshold
     - Penalizes low trade counts (statistical insignificance)
     - Penalizes high variance in returns (inconsistent edge)
     - Penalizes extreme drawdowns
@@ -655,6 +845,7 @@ def _compute_optimizer_score(net_pnl: float, trades: int, trade_pnls: list,
         hard_min_trades: Absolute minimum trades, below this = reject (default 5)
         reject_negative_pnl: If True, reject configs with net_pnl <= 0 (default True)
         tf: Timeframe for looking up expectancy threshold
+        trade_r_multiples: List of R-multiples per trade (PnL/Risk for each trade)
 
     Returns:
         Composite score (higher is better, -inf for rejected configs)
@@ -670,11 +861,19 @@ def _compute_optimizer_score(net_pnl: float, trades: int, trade_pnls: list,
     if trades == 0:
         return -float("inf")
 
-    # HARD REJECT: Expectancy too low = barely positive, not a real edge
-    expectancy = net_pnl / trades
-    min_expectancy = MIN_EXPECTANCY_PER_TRADE.get(tf, 2.0)
-    if expectancy < min_expectancy:
-        return -float("inf")
+    # HARD REJECT: E[R] too low = barely positive, not a real edge
+    # R-Multiple based threshold (account-size independent)
+    if trade_r_multiples and len(trade_r_multiples) > 0:
+        expected_r = sum(trade_r_multiples) / len(trade_r_multiples)
+        min_expected_r = MIN_EXPECTANCY_R_MULTIPLE.get(tf, 0.08)
+        if expected_r < min_expected_r:
+            return -float("inf")
+    else:
+        # Fallback to old $/trade method if R-multiples not provided
+        expectancy = net_pnl / trades
+        min_expectancy = MIN_EXPECTANCY_PER_TRADE.get(tf, 2.0)
+        if expectancy < min_expectancy:
+            return -float("inf")
 
     # Trade count confidence factor - MUCH more aggressive penalty for low counts
     # Uses logarithmic scaling: need ~min_trades to reach 90% confidence
@@ -856,7 +1055,9 @@ def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) 
 
     unique_trades = len({t.get("id") for t in tm.history}) if tm.history else 0
     trade_pnls = [t.get("pnl", 0.0) for t in tm.history] if tm.history else []
-    return tm.total_pnl, unique_trades, trade_pnls
+    # R-Multiple listesi (E[R] hesabı için)
+    trade_r_multiples = tm.trade_r_multiples if hasattr(tm, 'trade_r_multiples') else []
+    return tm.total_pnl, unique_trades, trade_pnls, trade_r_multiples
 
 
 def _optimize_backtest_configs(
@@ -864,14 +1065,25 @@ def _optimize_backtest_configs(
     requested_pairs: list,
     progress_callback=None,
     log_to_stdout: bool = True,
+    use_walk_forward: bool = None,  # None = WALK_FORWARD_CONFIG["enabled"] kullan
 ):
-    """Brute-force search to find the best config (by net pnl) per symbol/timeframe."""
+    """Brute-force search to find the best config (by net pnl) per symbol/timeframe.
+
+    Walk-forward validation enabled by default:
+    - Splits data 70% train, 30% test
+    - Optimizes on train data
+    - Validates best config on test data
+    - Rejects overfitted configs (OOS E[R] < 50% of train E[R])
+    """
 
     def log(msg: str):
         if log_to_stdout:
             print(msg)
         if progress_callback:
             progress_callback(msg)
+
+    # Walk-forward ayarı
+    walk_forward_enabled = use_walk_forward if use_walk_forward is not None else WALK_FORWARD_CONFIG.get("enabled", True)
 
     candidates = _generate_candidate_configs()
     total_jobs = len([1 for pair in requested_pairs if pair in streams]) * len(candidates)
@@ -883,9 +1095,10 @@ def _optimize_backtest_configs(
     next_progress = 5
 
     max_workers = max(1, (os.cpu_count() or 1) - 1)
+    wf_status = "Açık" if walk_forward_enabled else "Kapalı"
     log(
         f"[OPT] {len(candidates)} farklı ayar taranacak (her zaman dilimi için). "
-        f"Paralel iş parçacığı: {max_workers}"
+        f"Paralel iş parçacığı: {max_workers}, Walk-Forward: {wf_status}"
     )
 
     for sym, tf in requested_pairs:
@@ -899,15 +1112,31 @@ def _optimize_backtest_configs(
             log(f"[OPT][{sym}-{tf}] Atlandı (disabled)")
             continue
 
-        df = streams[(sym, tf)]
+        df_full = streams[(sym, tf)]
+        num_candles_full = len(df_full)
+
+        # Walk-forward: veriyi train/test olarak böl
+        if walk_forward_enabled:
+            train_ratio = WALK_FORWARD_CONFIG.get("train_ratio", 0.70)
+            df_train, df_test = _split_data_walk_forward(df_full, train_ratio)
+            if df_test is not None:
+                log(f"[OPT][{sym}-{tf}] Walk-Forward: Train={len(df_train)} mum, Test={len(df_test)} mum")
+            else:
+                log(f"[OPT][{sym}-{tf}] Walk-Forward: Yetersiz veri, tam veri kullanılacak")
+        else:
+            df_train = df_full
+            df_test = None
+
+        df = df_train  # Optimizasyon için train verisini kullan
         num_candles = len(df)
         best_cfg = None
         best_score = -float("inf")
         best_pnl = -float("inf")
         best_trades = 0
+        best_expected_r = 0.0  # E[R] değeri
 
-        def handle_result(cfg, net_pnl, trades, trade_pnls):
-            nonlocal completed, next_progress, best_cfg, best_score, best_pnl, best_trades
+        def handle_result(cfg, net_pnl, trades, trade_pnls, trade_r_multiples=None):
+            nonlocal completed, next_progress, best_cfg, best_score, best_pnl, best_trades, best_expected_r
 
             completed += 1
             progress = (completed / total_jobs) * 100
@@ -925,12 +1154,14 @@ def _optimize_backtest_configs(
 
             # Use the new composite score with anti-overfit measures
             # reject_negative_pnl=True means configs with net_pnl <= 0 are rejected
+            # trade_r_multiples enables R-multiple based E[R] threshold
             score = _compute_optimizer_score(
                 net_pnl, trades, trade_pnls,
                 min_trades=tf_min_trades,
                 hard_min_trades=hard_min,
                 reject_negative_pnl=True,
-                tf=tf
+                tf=tf,
+                trade_r_multiples=trade_r_multiples
             )
 
             if score > best_score:
@@ -938,6 +1169,11 @@ def _optimize_backtest_configs(
                 best_pnl = net_pnl
                 best_cfg = cfg
                 best_trades = trades
+                # E[R] hesapla
+                if trade_r_multiples and len(trade_r_multiples) > 0:
+                    best_expected_r = sum(trade_r_multiples) / len(trade_r_multiples)
+                else:
+                    best_expected_r = 0.0
 
         try:
             with ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -949,7 +1185,7 @@ def _optimize_backtest_configs(
                 for future in as_completed(futures):
                     cfg = futures[future]
                     try:
-                        net_pnl, trades, trade_pnls = future.result()
+                        net_pnl, trades, trade_pnls, trade_r_multiples = future.result()
                     except BrokenProcessPool:
                         # Havuza ait iş parçacığı çöktüyse seri moda düş.
                         raise
@@ -957,7 +1193,7 @@ def _optimize_backtest_configs(
                         log(f"[OPT][{sym}-{tf}] Skorlama hatası (cfg={cfg}): {exc}")
                         continue
 
-                    handle_result(cfg, net_pnl, trades, trade_pnls)
+                    handle_result(cfg, net_pnl, trades, trade_pnls, trade_r_multiples)
 
         except BrokenProcessPool as exc:
             log(
@@ -967,18 +1203,18 @@ def _optimize_backtest_configs(
 
             for cfg in candidates:
                 try:
-                    net_pnl, trades, trade_pnls = _score_config_for_stream(df, sym, tf, cfg)
+                    net_pnl, trades, trade_pnls, trade_r_multiples = _score_config_for_stream(df, sym, tf, cfg)
                 except Exception as exc:
                     log(f"[OPT][{sym}-{tf}] Seri skorlama hatası (cfg={cfg}): {exc}")
                     continue
 
-                handle_result(cfg, net_pnl, trades, trade_pnls)
+                handle_result(cfg, net_pnl, trades, trade_pnls, trade_r_multiples)
 
         # Get min_trades for this timeframe for logging (using actual num_candles)
         tf_min_trades = _get_min_trades_for_timeframe(tf, num_candles)
         hard_min = max(3, tf_min_trades // 3)
         min_score = MIN_SCORE_THRESHOLD.get(tf, 10.0)
-        min_expectancy = MIN_EXPECTANCY_PER_TRADE.get(tf, 2.0)
+        min_expected_r = MIN_EXPECTANCY_R_MULTIPLE.get(tf, 0.08)
 
         # Additional gate: score must meet minimum threshold for this timeframe
         if best_cfg and best_score < min_score:
@@ -987,6 +1223,37 @@ def _optimize_backtest_configs(
                 f"→ Weak edge, DEVRE DIŞI"
             )
             best_cfg = None  # Reject weak-edge config
+
+        # Walk-Forward OOS Validation
+        oos_result = None
+        overfit_ratio = 1.0
+        if best_cfg and walk_forward_enabled and df_test is not None:
+            log(f"[OPT][{sym}-{tf}] Walk-Forward: Out-of-Sample test yapılıyor...")
+            oos_result = _validate_config_oos(df_test, sym, tf, best_cfg)
+
+            if oos_result:
+                is_overfit, overfit_ratio, overfit_reason = _check_overfit(
+                    best_expected_r, oos_result, tf
+                )
+
+                oos_expected_r = oos_result.get('oos_expected_r', 0)
+                oos_trades = oos_result.get('oos_trades', 0)
+                oos_pnl = oos_result.get('oos_pnl', 0)
+
+                if is_overfit:
+                    log(
+                        f"[OPT][{sym}-{tf}] ❌ OVERFIT TESPİT EDİLDİ! "
+                        f"Train E[R]={best_expected_r:.3f}, OOS E[R]={oos_expected_r:.3f}, "
+                        f"Ratio={overfit_ratio:.2f} | Sebep: {overfit_reason} → DEVRE DIŞI"
+                    )
+                    best_cfg = None  # Reject overfitted config
+                else:
+                    log(
+                        f"[OPT][{sym}-{tf}] ✓ OOS Doğrulandı: "
+                        f"Train E[R]={best_expected_r:.3f}, OOS E[R]={oos_expected_r:.3f}, "
+                        f"OOS PnL=${oos_pnl:.2f}, OOS Trades={oos_trades}, "
+                        f"Ratio={overfit_ratio:.2f}"
+                    )
 
         if best_cfg:
             # Confidence level for risk multiplier (stored as string key)
@@ -1009,7 +1276,7 @@ def _optimize_backtest_configs(
                 best_by_pair[(sym, tf)] = {"disabled": True, "_reason": "low_confidence"}
             else:
                 # Explicit disabled=False ensures stream is enabled even if previously disabled
-                best_by_pair[(sym, tf)] = {
+                config_result = {
                     **best_cfg,
                     "disabled": False,  # Explicitly enable - overwrites any previous disabled state
                     "_net_pnl": best_pnl,
@@ -1017,20 +1284,40 @@ def _optimize_backtest_configs(
                     "_score": best_score,
                     "_confidence": confidence_level,  # For risk multiplier
                     "_expectancy": best_pnl / best_trades if best_trades > 0 else 0,
+                    "_expected_r": best_expected_r,  # E[R] - R-multiple bazlı expectancy (train)
                 }
+
+                # Walk-Forward OOS metrikleri ekle (varsa)
+                if oos_result:
+                    config_result["_oos_expected_r"] = oos_result.get('oos_expected_r', 0)
+                    config_result["_oos_pnl"] = oos_result.get('oos_pnl', 0)
+                    config_result["_oos_trades"] = oos_result.get('oos_trades', 0)
+                    config_result["_overfit_ratio"] = overfit_ratio
+                    config_result["_walk_forward_validated"] = True
+                else:
+                    config_result["_walk_forward_validated"] = False
+
+                best_by_pair[(sym, tf)] = config_result
+
                 dyn_tp_str = "Açık" if best_cfg.get('use_dynamic_pbema_tp') else "Kapalı"
                 risk_mult = CONFIDENCE_RISK_MULTIPLIER.get(confidence_level, 1.0)
+
+                # OOS bilgisi log'a ekle (varsa)
+                oos_info = ""
+                if oos_result and overfit_ratio > 0:
+                    oos_info = f", OOS Ratio={overfit_ratio:.2f}"
 
                 log(
                     f"[OPT][{sym}-{tf}] En iyi ayar: RR={best_cfg['rr']}, RSI={best_cfg['rsi']}, "
                     f"Slope={best_cfg['slope']}, AT={'Açık' if best_cfg['at_active'] else 'Kapalı'}, "
-                    f"DynTP={dyn_tp_str} | Net PnL={best_pnl:.2f}, Trades={best_trades}/{tf_min_trades}, "
-                    f"Score={best_score:.2f}, Güven={confidence_display}, Risk={risk_mult:.0%}"
+                    f"DynTP={dyn_tp_str} | Net PnL=${best_pnl:.2f}, E[R]={best_expected_r:.3f}{oos_info}, "
+                    f"Trades={best_trades}/{tf_min_trades}, Score={best_score:.2f}, "
+                    f"Güven={confidence_display}, Risk={risk_mult:.0%}"
                 )
         else:
             log(
                 f"[OPT][{sym}-{tf}] Geçerli config bulunamadı - trade<{hard_min} veya PnL<=0 veya "
-                f"expectancy<${min_expectancy:.1f}/trade (min {tf_min_trades} trade) → DEVRE DIŞI"
+                f"E[R]<{min_expected_r:.2f} (min {tf_min_trades} trade) → DEVRE DIŞI"
             )
             # Mark this stream as disabled so backtest skips it
             best_by_pair[(sym, tf)] = {"disabled": True, "_reason": "no_positive_config"}
@@ -4684,6 +4971,9 @@ class SimTradeManager:
         self.risk_per_trade_pct = TRADING_CONFIG.get("risk_per_trade_pct", 0.01)
         self.max_portfolio_risk_pct = TRADING_CONFIG.get("max_portfolio_risk_pct", 0.03)
         self._id = 1
+        # R-Multiple tracking: PnL / Risk Amount per trade
+        # E[R] = sum(r_multiples) / len(r_multiples)
+        self.trade_r_multiples = []
 
     def check_cooldown(self, symbol, tf, now_utc) -> bool:
         """
@@ -4857,6 +5147,8 @@ class SimTradeManager:
             "use_dynamic_pbema_tp": use_dynamic_pbema_tp,
             "opt_rr": opt_rr,
             "opt_rsi": opt_rsi,
+            # R-multiple hesaplaması için risk tutarı (trade açılırken kaydedilir)
+            "risk_amount": risk_amount,
         }
 
         self.wallet_balance -= required_margin
@@ -4986,6 +5278,15 @@ class SimTradeManager:
                     net_partial_pnl = partial_pnl - commission
                     margin_release = initial_margin / 2.0
 
+                    # Partial TP için R-Multiple hesaplama (yarı risk tutarına göre)
+                    trade_risk_amount = float(trade.get("risk_amount", 0))
+                    partial_risk = trade_risk_amount / 2.0  # Partial = yarı pozisyon, yarı risk
+                    if partial_risk > 0:
+                        partial_r_multiple = net_partial_pnl / partial_risk
+                        self.trade_r_multiples.append(partial_r_multiple)
+                    else:
+                        partial_r_multiple = 0.0
+
                     self.wallet_balance += margin_release + net_partial_pnl
                     self.locked_margin -= margin_release
                     self.total_pnl += net_partial_pnl
@@ -4993,6 +5294,7 @@ class SimTradeManager:
                     partial_record = trade.copy()
                     partial_record["size"] = partial_size
                     partial_record["pnl"] = net_partial_pnl
+                    partial_record["r_multiple"] = partial_r_multiple
                     partial_record["status"] = "PARTIAL TP (50%)"
                     partial_record["close_time"] = (
                         pd.Timestamp(candle_time_utc) + pd.Timedelta(hours=3)
@@ -5010,6 +5312,8 @@ class SimTradeManager:
                     self.open_trades[i]["partial_price"] = float(partial_fill)
                     self.open_trades[i]["sl"] = entry
                     self.open_trades[i]["breakeven"] = True
+                    # Kalan pozisyon için risk tutarını güncelle (yarıya düştü)
+                    self.open_trades[i]["risk_amount"] = partial_risk
                     _append_trade_event(self.open_trades[i], "PARTIAL", candle_time_utc, partial_fill)
                     _append_trade_event(self.open_trades[i], "BE_SET", candle_time_utc, entry)
 
@@ -5093,6 +5397,17 @@ class SimTradeManager:
                 funding_cost = 0.0
 
             final_net_pnl = gross_pnl - commission - funding_cost
+
+            # R-Multiple hesaplaması: PnL / Risk Amount
+            # R = 1.0 demek: Riske ettiğiniz kadar kazandınız
+            # R = -1.0 demek: Riske ettiğiniz kadar kaybettiniz (tipik SL)
+            trade_risk_amount = float(trade.get("risk_amount", 0))
+            if trade_risk_amount > 0:
+                r_multiple = final_net_pnl / trade_risk_amount
+                self.trade_r_multiples.append(r_multiple)
+                trade["r_multiple"] = r_multiple
+            else:
+                trade["r_multiple"] = 0.0
 
             self.wallet_balance += margin_release + final_net_pnl
             self.locked_margin -= margin_release
@@ -6062,8 +6377,233 @@ def run_with_auto_restart(restart_delay: int = AUTO_RESTART_DELAY_SECONDS) -> No
         time.sleep(restart_delay)
 
 
+# ==========================================
+# 🚀 GOOGLE COLAB / CLI BACKTEST FUNCTIONS
+# ==========================================
+# These functions allow running backtests without GUI (for Colab, servers, etc.)
+
+def run_cli_backtest(
+    symbols: list = None,
+    timeframes: list = None,
+    candles: int = 50000,
+    optimize: bool = True,
+    walk_forward: bool = True,
+    save_results: bool = True,
+    verbose: bool = True,
+) -> dict:
+    """Run a complete backtest from CLI/Colab without GUI.
+
+    Args:
+        symbols: List of symbols to test (default: SYMBOLS)
+        timeframes: List of timeframes to test (default: TIMEFRAMES)
+        candles: Number of candles per timeframe (default: 50000)
+        optimize: Whether to run optimization first (default: True)
+        walk_forward: Enable walk-forward OOS validation (default: True)
+        save_results: Save results to CSV and JSON (default: True)
+        verbose: Print progress messages (default: True)
+
+    Returns:
+        dict with:
+        - 'summary': DataFrame with backtest summary
+        - 'trades': DataFrame with all trades
+        - 'configs': dict of best configs per stream
+        - 'metrics': dict of aggregate metrics
+
+    Example usage in Colab:
+        >>> from desktop_bot_refactored_v2_base_v7 import run_cli_backtest
+        >>> results = run_cli_backtest(
+        ...     symbols=['BTCUSDT', 'ETHUSDT'],
+        ...     timeframes=['5m', '15m', '1h'],
+        ...     candles=30000,
+        ...     optimize=True
+        ... )
+        >>> print(results['summary'])
+    """
+    symbols = symbols or SYMBOLS
+    timeframes = timeframes or TIMEFRAMES
+
+    def log(msg):
+        if verbose:
+            print(msg)
+
+    log("=" * 60)
+    log("🚀 CLI/Colab Backtest Başlatılıyor")
+    log(f"   Symbols: {symbols}")
+    log(f"   Timeframes: {timeframes}")
+    log(f"   Candles: {candles}")
+    log(f"   Optimize: {optimize}")
+    log(f"   Walk-Forward: {walk_forward}")
+    log("=" * 60)
+
+    # Step 1: Fetch data for all symbol/timeframe pairs
+    log("\n📊 Veri indiriliyor...")
+    streams = {}
+    pairs = [(s, tf) for s in symbols for tf in timeframes]
+
+    # Use tqdm if available for progress bar
+    iterator = tqdm(pairs, desc="Veri indirme") if HAS_TQDM else pairs
+
+    for sym, tf in iterator:
+        try:
+            limit = BACKTEST_CANDLE_LIMITS.get(tf, candles)
+            limit = min(limit, candles)
+
+            # Fetch data using the existing TradingEngine method
+            df = TradingEngine.fetch_historical_data_paginated(sym, tf, limit)
+            if df is not None and len(df) > 300:
+                # Calculate indicators
+                df = TradingEngine.calculate_indicators(df)
+                streams[(sym, tf)] = df
+                if not HAS_TQDM:
+                    log(f"   ✓ {sym}-{tf}: {len(df)} mum")
+            else:
+                if not HAS_TQDM:
+                    log(f"   ✗ {sym}-{tf}: Yetersiz veri")
+        except Exception as e:
+            log(f"   ✗ {sym}-{tf}: Hata - {e}")
+
+    if not streams:
+        log("❌ Hiç veri indirilemedi!")
+        return {"summary": None, "trades": None, "configs": {}, "metrics": {}}
+
+    log(f"\n✓ {len(streams)} stream hazır")
+
+    # Step 2: Run optimization if enabled
+    best_configs = {}
+    if optimize:
+        log("\n⚙️ Optimizasyon başlatılıyor...")
+
+        def opt_progress(msg):
+            if verbose and not HAS_TQDM:
+                print(f"   {msg}")
+
+        best_configs = _optimize_backtest_configs(
+            streams=streams,
+            requested_pairs=list(streams.keys()),
+            progress_callback=opt_progress,
+            log_to_stdout=verbose,
+            use_walk_forward=walk_forward,
+        )
+
+        # Save configs
+        if save_results and best_configs:
+            save_best_configs(best_configs)
+            log("   ✓ En iyi ayarlar kaydedildi: best_configs.json")
+
+    # Step 3: Run final backtest with optimized configs
+    log("\n🔬 Final backtest çalıştırılıyor...")
+
+    result = run_portfolio_backtest(
+        symbols=symbols,
+        timeframes=timeframes,
+        candles=candles,
+        out_trades_csv="backtest_trades.csv" if save_results else None,
+        out_summary_csv="backtest_summary.csv" if save_results else None,
+        progress_callback=lambda msg: log(f"   {msg}") if verbose else None,
+        draw_trades=False,  # Don't draw charts in CLI mode
+    )
+
+    # Extract results
+    summary_rows = result.get("summary_rows", [])
+    all_trades = result.get("all_trades", [])
+
+    # Convert to DataFrames
+    summary_df = pd.DataFrame(summary_rows) if summary_rows else pd.DataFrame()
+    trades_df = pd.DataFrame(all_trades) if all_trades else pd.DataFrame()
+
+    # Calculate aggregate metrics
+    metrics = {}
+    if not trades_df.empty:
+        pnl_col = 'pnl' if 'pnl' in trades_df.columns else None
+        if pnl_col:
+            metrics['total_pnl'] = trades_df[pnl_col].sum()
+            metrics['total_trades'] = len(trades_df)
+            metrics['winning_trades'] = len(trades_df[trades_df[pnl_col] > 0])
+            metrics['losing_trades'] = len(trades_df[trades_df[pnl_col] < 0])
+            metrics['win_rate'] = metrics['winning_trades'] / max(1, metrics['total_trades'])
+            metrics['avg_pnl'] = metrics['total_pnl'] / max(1, metrics['total_trades'])
+
+            # R-Multiple metrics
+            if 'r_multiple' in trades_df.columns:
+                metrics['total_r'] = trades_df['r_multiple'].sum()
+                metrics['avg_r'] = trades_df['r_multiple'].mean()
+                metrics['expected_r'] = metrics['avg_r']
+
+    # Print summary
+    log("\n" + "=" * 60)
+    log("📈 BACKTEST SONUÇLARI")
+    log("=" * 60)
+    if metrics:
+        log(f"   Toplam PnL: ${metrics.get('total_pnl', 0):.2f}")
+        log(f"   Toplam Trade: {metrics.get('total_trades', 0)}")
+        log(f"   Win Rate: {metrics.get('win_rate', 0)*100:.1f}%")
+        log(f"   E[R]: {metrics.get('expected_r', 0):.3f}")
+    log("=" * 60)
+
+    return {
+        "summary": summary_df,
+        "trades": trades_df,
+        "configs": best_configs,
+        "metrics": metrics,
+    }
+
+
+def colab_quick_test(
+    symbol: str = "BTCUSDT",
+    timeframe: str = "15m",
+    candles: int = 10000,
+) -> dict:
+    """Quick single-stream test for Colab experimentation.
+
+    Args:
+        symbol: Symbol to test (default: BTCUSDT)
+        timeframe: Timeframe to test (default: 15m)
+        candles: Number of candles (default: 10000)
+
+    Returns:
+        dict with test results
+    """
+    return run_cli_backtest(
+        symbols=[symbol],
+        timeframes=[timeframe],
+        candles=candles,
+        optimize=True,
+        walk_forward=True,
+        verbose=True,
+    )
+
+
 if __name__ == "__main__":
-    run_with_auto_restart()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Trading Bot v39.0 - R-Multiple Based with Walk-Forward")
+    parser.add_argument('--headless', action='store_true', help='Run in headless mode (CLI backtest)')
+    parser.add_argument('--symbols', nargs='+', help='Symbols to test (e.g., BTCUSDT ETHUSDT)')
+    parser.add_argument('--timeframes', nargs='+', help='Timeframes to test (e.g., 5m 15m 1h)')
+    parser.add_argument('--candles', type=int, default=50000, help='Number of candles (default: 50000)')
+    parser.add_argument('--no-optimize', action='store_true', help='Skip optimization')
+    parser.add_argument('--no-walk-forward', action='store_true', help='Disable walk-forward validation')
+
+    args = parser.parse_args()
+
+    # Determine run mode
+    if args.headless or IS_HEADLESS or not HAS_GUI:
+        # CLI/Colab mode
+        print("\n🖥️ CLI/Colab Mod - GUI olmadan çalışıyor\n")
+        results = run_cli_backtest(
+            symbols=args.symbols,
+            timeframes=args.timeframes,
+            candles=args.candles,
+            optimize=not args.no_optimize,
+            walk_forward=not args.no_walk_forward,
+        )
+        print("\n✅ Backtest tamamlandı!")
+        if results['metrics']:
+            print(f"   Total PnL: ${results['metrics'].get('total_pnl', 0):.2f}")
+            print(f"   E[R]: {results['metrics'].get('expected_r', 0):.3f}")
+    else:
+        # GUI mode
+        run_with_auto_restart()
 
 
 
