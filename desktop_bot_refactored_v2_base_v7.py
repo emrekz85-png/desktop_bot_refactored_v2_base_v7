@@ -6025,10 +6025,13 @@ def run_portfolio_backtest(
         if active_configs:
             log("\n[OPT] En iyi ayar özeti (Net PnL'e göre):", category="summary")
             for (sym, tf), cfg in sorted(active_configs.items()):
+                # skip_optimization modunda _net_pnl/_trades olmayabilir
+                net_pnl = cfg.get('_net_pnl', 0)
+                trades = cfg.get('_trades', 0)
                 log(
-                    f"  - {sym}-{tf}: RR={cfg['rr']}, RSI={cfg['rsi']}, Slope={cfg['slope']}, "
-                    f"AT={'Açık' if cfg['at_active'] else 'Kapalı'}, Trailing={cfg.get('use_trailing', False)} | "
-                    f"NetPnL={cfg['_net_pnl']:.2f}, Trades={cfg['_trades']}",
+                    f"  - {sym}-{tf}: RR={cfg.get('rr', '-')}, RSI={cfg.get('rsi', '-')}, Slope={cfg.get('slope', '-')}, "
+                    f"AT={'Açık' if cfg.get('at_active') else 'Kapalı'}, Trailing={cfg.get('use_trailing', False)} | "
+                    f"NetPnL={net_pnl:.2f}, Trades={trades}",
                     category="summary",
                 )
         if disabled_count > 0:
