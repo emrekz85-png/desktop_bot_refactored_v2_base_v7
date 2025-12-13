@@ -159,13 +159,13 @@ TRADING_CONFIG = {
 # Minimum E[R] (expected R-multiple) threshold by timeframe
 # Configs with lower E[R] are considered "barely positive" and rejected
 MIN_EXPECTANCY_R_MULTIPLE = {
-    "1m": 0.15,   # Very noisy - need strong edge (avg 0.15R per trade)
-    "5m": 0.10,   # Noisy - need decent edge per trade (avg 0.10R)
-    "15m": 0.08,  # Moderate noise
-    "30m": 0.07,
-    "1h": 0.06,   # Cleaner signals
-    "4h": 0.05,   # Low noise
-    "1d": 0.04,   # Very clean
+    "1m": 0.10,   # Very noisy - need strong edge (avg 0.10R per trade)
+    "5m": 0.06,   # Noisy - need decent edge per trade (avg 0.06R)
+    "15m": 0.05,  # Moderate noise (walk-forward catches overfit)
+    "30m": 0.04,
+    "1h": 0.04,   # Cleaner signals
+    "4h": 0.03,   # Low noise
+    "1d": 0.02,   # Very clean
 }
 
 # DEPRECATED: Eski $/trade eşikleri (geriye uyumluluk için korunuyor)
@@ -1214,6 +1214,11 @@ def _optimize_backtest_configs(
         tf_min_trades = _get_min_trades_for_timeframe(tf, num_candles)
         hard_min = max(3, tf_min_trades // 3)
         min_score = MIN_SCORE_THRESHOLD.get(tf, 10.0)
+        # Walk-Forward kullanılıyorsa, score eşiğini train_ratio ile ayarla
+        # (Training seti daha küçük olduğu için daha az trade ve daha düşük score olur)
+        if walk_forward_enabled:
+            train_ratio = WALK_FORWARD_CONFIG.get("train_ratio", 0.70)
+            min_score = min_score * train_ratio
         min_expected_r = MIN_EXPECTANCY_R_MULTIPLE.get(tf, 0.08)
 
         # Additional gate: score must meet minimum threshold for this timeframe
