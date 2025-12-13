@@ -79,8 +79,20 @@ import plotly.utils
 # ⚙️ GENEL AYARLAR VE SABİTLER (MERKEZİ YÖNETİM)
 # ==========================================
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "LINKUSDT", "BNBUSDT", "XRPUSDT", "LTCUSDT", "DOGEUSDT", "SUIUSDT", "FARTCOINUSDT"]
+
+# ==========================================
+# 🛡️ HTF ONLY MODE (Opsiyonel)
+# ==========================================
+# True = Sadece 1h+ timeframe kullan (daha az trade, daha az gürültü)
+# False = Tüm timeframe'leri kullan (5m, 15m, 1h, 4h, 12h, 1d)
+# NOT: Problem timeframe değil, optimizasyon periyodu. Canlı trading'de
+# düzenli re-optimizasyon (her 1-2 haftada) yapılması önerilir.
+HTF_ONLY_MODE = False
+
 # 1m removed - too noisy, inconsistent results across all symbols
-LOWER_TIMEFRAMES = ["5m", "15m", "1h"]
+# 5m, 15m - Eğer HTF_ONLY_MODE aktifse devre dışı kalır
+_ALL_LOWER_TIMEFRAMES = ["5m", "15m", "1h"]
+LOWER_TIMEFRAMES = ["1h"] if HTF_ONLY_MODE else _ALL_LOWER_TIMEFRAMES
 HTF_TIMEFRAMES = ["4h", "12h", "1d"]
 TIMEFRAMES = LOWER_TIMEFRAMES + HTF_TIMEFRAMES
 candles = 50000
@@ -159,9 +171,9 @@ TRADING_CONFIG = {
 # Minimum E[R] (expected R-multiple) threshold by timeframe
 # Configs with lower E[R] are considered "barely positive" and rejected
 MIN_EXPECTANCY_R_MULTIPLE = {
-    "1m": 0.10,   # Very noisy - need strong edge (avg 0.10R per trade)
-    "5m": 0.06,   # Noisy - need decent edge per trade (avg 0.06R)
-    "15m": 0.05,  # Moderate noise (walk-forward catches overfit)
+    "1m": 0.10,   # Very noisy - need strong edge
+    "5m": 0.06,   # Noisy - need decent edge per trade
+    "15m": 0.05,  # Moderate noise
     "30m": 0.04,
     "1h": 0.04,   # Cleaner signals
     "4h": 0.03,   # Low noise
