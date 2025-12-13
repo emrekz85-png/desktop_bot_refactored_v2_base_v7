@@ -3697,6 +3697,8 @@ class LiveBotWorker(QThread):
         self.last_signals = {sym: {tf: None for tf in TIMEFRAMES} for sym in SYMBOLS}
         self.last_potential = {sym: {tf: None for tf in TIMEFRAMES} for sym in SYMBOLS}
         self.ws_stream = BinanceWebSocketKlineStream(SYMBOLS, TIMEFRAMES, max_candles=1200)
+        # Startup protection: İlk döngüde eski sinyalleri işleme, sadece timestamp'leri kaydet
+        self._startup_warmup_done = False
 
     def update_settings(self, symbol, tf, rr, rsi, slope):
         if symbol in SYMBOL_PARAMS:
@@ -3886,7 +3888,17 @@ class LiveBotWorker(QThread):
                                         self.update_ui_signal.emit(sym, tf, json_data, log_msg)
 
                                     elif self.last_signals[sym][tf] != closed_ts_utc:
-                                        if trade_manager.check_cooldown(sym, tf, forming_ts_utc):
+                                        # STARTUP PROTECTION: İlk döngüde eski sinyalleri işleme
+                                        # last_signals None ise bu ilk döngü demek - sadece timestamp kaydet
+                                        if self.last_signals[sym][tf] is None:
+                                            self.last_signals[sym][tf] = closed_ts_utc
+                                            decision = "Rejected"
+                                            reject_reason = "Startup Sync"
+                                            log_msg = f"{tf} | {curr_price} | 🔄 Başlangıç senkronizasyonu"
+                                            json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
+                                                                                             active_trades if self.show_rr else [])
+                                            self.update_ui_signal.emit(sym, tf, json_data, log_msg)
+                                        elif trade_manager.check_cooldown(sym, tf, forming_ts_utc):
                                             decision = "Rejected"
                                             reject_reason = "Cooldown"
                                             log_msg = f"{tf} | {curr_price} | ❄️ SOĞUMA SÜRECİNDE"
