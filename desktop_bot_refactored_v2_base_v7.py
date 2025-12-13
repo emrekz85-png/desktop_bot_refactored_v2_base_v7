@@ -69,156 +69,7 @@ if not IS_HEADLESS:
         print("⚠️ PyQt5 bulunamadı - GUI devre dışı, sadece CLI modu kullanılabilir")
         HAS_GUI = False
         IS_HEADLESS = True
-
-# Headless/Colab modunda PyQt5 sınıflarını taklit et (Mock classes)
-# Bu sayede class tanımları hata vermez
-if IS_HEADLESS or not HAS_GUI:
-    print("⚠️ Colab Modu: GUI sınıfları taklit ediliyor (Mocking)...")
-
-    # Mock pyqtSignal
-    def pyqtSignal(*args, **kwargs):
-        """Mock pyqtSignal that does nothing."""
-        class MockSignal:
-            def emit(self, *args, **kwargs): pass
-            def connect(self, *args, **kwargs): pass
-            def disconnect(self, *args, **kwargs): pass
-        return MockSignal()
-
-    # Mock QThread
-    class QThread:
-        """Mock QThread for headless mode."""
-        def __init__(self, *args, **kwargs): pass
-        def start(self): pass
-        def quit(self): pass
-        def wait(self): pass
-        def isRunning(self): return False
-        def terminate(self): pass
-        def requestInterruption(self): pass
-        def isInterruptionRequested(self): return False
-
-    # Mock QTimer
-    class QTimer:
-        """Mock QTimer for headless mode."""
-        def __init__(self, *args, **kwargs): pass
-        def start(self, *args): pass
-        def stop(self): pass
-        def setInterval(self, *args): pass
-        timeout = pyqtSignal()
-
-    # Mock Qt namespace
-    class Qt:
-        AlignCenter = 0
-        AlignLeft = 0
-        AlignRight = 0
-        Horizontal = 0
-        Vertical = 0
-        white = 0
-        black = 0
-        red = 0
-        green = 0
-        blue = 0
-
-    # Mock QColor
-    class QColor:
-        def __init__(self, *args, **kwargs): pass
-
-    # Mock QFont
-    class QFont:
-        def __init__(self, *args, **kwargs): pass
-        def setPointSize(self, *args): pass
-        def setBold(self, *args): pass
-
-    # Mock QWidget and related classes
-    class QWidget:
-        def __init__(self, *args, **kwargs): pass
-        def setLayout(self, *args): pass
-        def show(self): pass
-        def hide(self): pass
-        def close(self): pass
-        def setStyleSheet(self, *args): pass
-        def setFont(self, *args): pass
-
-    class QMainWindow(QWidget): pass
-    class QFrame(QWidget): pass
-    class QGroupBox(QWidget): pass
-    class QLabel(QWidget): pass
-    class QTextEdit(QWidget):
-        def append(self, *args): pass
-        def clear(self): pass
-        def toPlainText(self): return ""
-    class QPushButton(QWidget):
-        clicked = pyqtSignal()
-        def setText(self, *args): pass
-        def setEnabled(self, *args): pass
-    class QCheckBox(QWidget):
-        stateChanged = pyqtSignal()
-        def isChecked(self): return False
-        def setChecked(self, *args): pass
-    class QComboBox(QWidget):
-        currentIndexChanged = pyqtSignal()
-        def addItems(self, *args): pass
-        def currentText(self): return ""
-        def setCurrentText(self, *args): pass
-    class QLineEdit(QWidget):
-        def text(self): return ""
-        def setText(self, *args): pass
-    class QSpinBox(QWidget):
-        valueChanged = pyqtSignal()
-        def value(self): return 0
-        def setValue(self, *args): pass
-    class QDoubleSpinBox(QWidget):
-        valueChanged = pyqtSignal()
-        def value(self): return 0.0
-        def setValue(self, *args): pass
-
-    # Layout classes
-    class QVBoxLayout:
-        def __init__(self, *args, **kwargs): pass
-        def addWidget(self, *args): pass
-        def addLayout(self, *args): pass
-    class QHBoxLayout(QVBoxLayout): pass
-    class QGridLayout(QVBoxLayout):
-        def addWidget(self, *args): pass
-
-    # Table classes
-    class QTableWidget(QWidget):
-        def setRowCount(self, *args): pass
-        def setColumnCount(self, *args): pass
-        def setItem(self, *args): pass
-        def setHorizontalHeaderLabels(self, *args): pass
-        def horizontalHeader(self): return QHeaderView()
-        def rowCount(self): return 0
-    class QTableWidgetItem:
-        def __init__(self, *args, **kwargs): pass
-        def setForeground(self, *args): pass
-        def setBackground(self, *args): pass
-    class QHeaderView:
-        def setSectionResizeMode(self, *args): pass
-        def setStretchLastSection(self, *args): pass
-        Stretch = 0
-
-    # Tab and other widgets
-    class QTabWidget(QWidget):
-        def addTab(self, *args): pass
-        def currentIndex(self): return 0
-    class QWebEngineView(QWidget):
-        def setHtml(self, *args): pass
-
-    # Application and MessageBox
-    class QApplication:
-        def __init__(self, *args, **kwargs): pass
-        def exec_(self): return 0
-        def quit(self): pass
-        @staticmethod
-        def instance(): return None
-    class QMessageBox:
-        @staticmethod
-        def information(*args): pass
-        @staticmethod
-        def warning(*args): pass
-        @staticmethod
-        def critical(*args): pass
-
+else:
     HAS_GUI = False
 
 import plotly.graph_objects as go
@@ -2219,7 +2070,7 @@ class TradeManager:
 
                 # Fetch current price
                 try:
-                    url = f"{TradingEngine.API_BASE_URL}/ticker/price?symbol={symbol}"
+                    url = f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={symbol}"
                     resp = requests.get(url, timeout=5)
                     current_price = float(resp.json()["price"])
                 except Exception as e:
@@ -2332,10 +2183,6 @@ class TradingEngine:
     # Ağ çökmelerinde tekrar tekrar DNS denemelerini önlemek için kısa süreli kilit
     _network_cooldown_until = 0
 
-    # API Endpoint seçimi - Colab'da Binance US kullan (bölgesel kısıtlama yok)
-    # Değiştirmek için: TradingEngine.API_BASE_URL = "https://fapi.binance.com/fapi/v1"
-    API_BASE_URL = "https://api.binance.us/api/v3" if IS_COLAB else "https://fapi.binance.com/fapi/v1"
-
     @staticmethod
     def send_telegram(token, chat_id, message):
         if not token or not chat_id: return
@@ -2396,7 +2243,7 @@ class TradingEngine:
     @staticmethod
     def get_data(symbol, interval, limit=500):
         try:
-            url = f"{TradingEngine.API_BASE_URL}/klines"
+            url = "https://fapi.binance.com/fapi/v1/klines"
             params = {'symbol': symbol, 'interval': interval, 'limit': limit}
 
             # Eski requests.get yerine yeni akıllı fonksiyonu kullanıyoruz
@@ -2450,7 +2297,7 @@ class TradingEngine:
         """Lightweight ticker fetcher to refresh UI prices without heavy kline calls."""
 
         prices = {}
-        url = f"{TradingEngine.API_BASE_URL}/ticker/price"
+        url = "https://fapi.binance.com/fapi/v1/ticker/price"
 
         for sym in symbols:
             try:
@@ -2472,42 +2319,22 @@ class TradingEngine:
         limit_per_req = 1000
         loops = int(np.ceil(total_candles / limit_per_req))
 
-        for loop_idx in range(loops):
+        for _ in range(loops):
             try:
-                url = f"{TradingEngine.API_BASE_URL}/klines"
+                url = "https://fapi.binance.com/fapi/v1/klines"
                 params = {'symbol': symbol, 'interval': interval, 'limit': limit_per_req, 'endTime': end_time}
 
                 # Burada da akıllı retry kullanıyoruz
                 res = TradingEngine.http_get_with_retry(url, params)
-                if res is None:
-                    if IS_COLAB:
-                        print(f"[DATA] {symbol}-{interval}: API yanıt vermedi (loop {loop_idx+1})")
-                    break
-
-                # Status 451 veya diğer hatalar için kontrol
-                if res.status_code == 451:
-                    print(f"[DATA] {symbol}-{interval}: Bölgesel kısıtlama (451). Binance US deneyin.")
-                    break
-                if res.status_code != 200:
-                    print(f"[DATA] {symbol}-{interval}: HTTP {res.status_code}")
-                    break
+                if res is None: break
 
                 data = res.json()
-
-                # Hata mesajı kontrolü
-                if isinstance(data, dict) and 'code' in data:
-                    print(f"[DATA] {symbol}-{interval}: API hatası - {data.get('msg', data)}")
-                    break
-
-                if not data or not isinstance(data, list):
-                    break
+                if not data or not isinstance(data, list): break
 
                 all_data = data + all_data  # Eskiden yeniye doğru birleştir
                 end_time = data[0][0] - 1
                 time.sleep(0.1)  # Kısa bir mola (Rate limit nezaketi)
-            except Exception as e:
-                if IS_COLAB:
-                    print(f"[DATA] {symbol}-{interval}: Exception - {e}")
+            except:
                 break
 
         if not all_data: return pd.DataFrame()
@@ -6612,48 +6439,28 @@ def run_cli_backtest(
     log("\n📊 Veri indiriliyor...")
     streams = {}
     pairs = [(s, tf) for s in symbols for tf in timeframes]
-    fetch_errors = []
 
-    for sym, tf in pairs:
+    # Use tqdm if available for progress bar
+    iterator = tqdm(pairs, desc="Veri indirme") if HAS_TQDM else pairs
+
+    for sym, tf in iterator:
         try:
             limit = BACKTEST_CANDLE_LIMITS.get(tf, candles)
             limit = min(limit, candles)
 
-            log(f"   📥 {sym}-{tf}: {limit} mum indiriliyor...")
-
             # Fetch data using the existing TradingEngine method
-            df = TradingEngine.get_historical_data_pagination(sym, tf, total_candles=limit)
-
-            if df is None:
-                err_msg = f"{sym}-{tf}: API None döndü"
-                fetch_errors.append(err_msg)
-                log(f"   ✗ {err_msg}")
-                continue
-
-            if isinstance(df, pd.DataFrame) and df.empty:
-                err_msg = f"{sym}-{tf}: Boş DataFrame"
-                fetch_errors.append(err_msg)
-                log(f"   ✗ {err_msg}")
-                continue
-
-            if len(df) <= 300:
-                err_msg = f"{sym}-{tf}: Yetersiz veri ({len(df)} mum < 300)"
-                fetch_errors.append(err_msg)
-                log(f"   ✗ {err_msg}")
-                continue
-
-            # Calculate indicators
-            df = TradingEngine.calculate_indicators(df)
-            streams[(sym, tf)] = df
-            log(f"   ✓ {sym}-{tf}: {len(df)} mum hazır")
-
+            df = TradingEngine.fetch_historical_data_paginated(sym, tf, limit)
+            if df is not None and len(df) > 300:
+                # Calculate indicators
+                df = TradingEngine.calculate_indicators(df)
+                streams[(sym, tf)] = df
+                if not HAS_TQDM:
+                    log(f"   ✓ {sym}-{tf}: {len(df)} mum")
+            else:
+                if not HAS_TQDM:
+                    log(f"   ✗ {sym}-{tf}: Yetersiz veri")
         except Exception as e:
-            import traceback
-            err_msg = f"{sym}-{tf}: {type(e).__name__} - {e}"
-            fetch_errors.append(err_msg)
-            log(f"   ✗ {err_msg}")
-            if verbose:
-                log(f"      Traceback: {traceback.format_exc()[:200]}")
+            log(f"   ✗ {sym}-{tf}: Hata - {e}")
 
     if not streams:
         log("❌ Hiç veri indirilemedi!")
