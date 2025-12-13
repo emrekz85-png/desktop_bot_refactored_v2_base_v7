@@ -90,8 +90,8 @@ SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "LINKUSDT", "BNBUSDT", "
 HTF_ONLY_MODE = False
 
 # 1m removed - too noisy, inconsistent results across all symbols
-# 5m, 15m - Eğer HTF_ONLY_MODE aktifse devre dışı kalır
-_ALL_LOWER_TIMEFRAMES = ["5m", "15m", "1h"]
+# 5m, 15m, 30m - Eğer HTF_ONLY_MODE aktifse devre dışı kalır
+_ALL_LOWER_TIMEFRAMES = ["5m", "15m", "30m", "1h"]
 LOWER_TIMEFRAMES = ["1h"] if HTF_ONLY_MODE else _ALL_LOWER_TIMEFRAMES
 HTF_TIMEFRAMES = ["4h", "12h", "1d"]
 TIMEFRAMES = LOWER_TIMEFRAMES + HTF_TIMEFRAMES
@@ -107,6 +107,7 @@ BACKTEST_CANDLE_LIMITS = {
     "1m": 100000,
     "5m": 100000,
     "15m": 100000,
+    "30m": 100000,
     "1h": 100000,
     "4h": 50000,
     "12h": 30000,
@@ -117,6 +118,7 @@ DAILY_REPORT_CANDLE_LIMITS = {
     "1m": 15000,
     "5m": 15000,
     "15m": 15000,
+    "30m": 15000,
     "1h": 15000,
     "4h": 8000,
     "12h": 5000,
@@ -223,6 +225,7 @@ SYMBOL_PARAMS = {
     "BTCUSDT": {
         "5m": {"rr": 2.4, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
         "15m": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
         "1h": {"rr": 2.1, "rsi": 45, "slope": 0.2, "at_active": False, "use_trailing": False},
         "4h": {"rr": 2.1, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
@@ -231,6 +234,7 @@ SYMBOL_PARAMS = {
     "ETHUSDT": {
         "5m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
         "15m": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
         "1h": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": False, "use_trailing": False},
         "4h": {"rr": 2.0, "rsi": 30, "slope": 0.3, "at_active": True, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False},
@@ -239,6 +243,7 @@ SYMBOL_PARAMS = {
     "SOLUSDT": {
         "5m": {"rr": 1.5, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": True},
         "15m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
         "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
         "4h": {"rr": 2.0, "rsi": 30, "slope": 0.3, "at_active": True, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.4, "at_active": True, "use_trailing": False},
@@ -247,6 +252,7 @@ SYMBOL_PARAMS = {
     "HYPEUSDT": {
         "5m": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True},
         "15m": {"rr": 1.5, "rsi": 55, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
         "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
         "4h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False},
@@ -255,6 +261,7 @@ SYMBOL_PARAMS = {
     "LINKUSDT": {
         "5m": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True},
         "15m": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
         "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
         "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
@@ -263,6 +270,7 @@ SYMBOL_PARAMS = {
     "BNBUSDT": {
         "5m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True},
         "15m": {"rr": 2.4, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
         "1h": {"rr": 1.2, "rsi": 55, "slope": 0.2, "at_active": False, "use_trailing": False},
         "4h": {"rr": 1.8, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
@@ -271,6 +279,7 @@ SYMBOL_PARAMS = {
     "XRPUSDT": {
         "5m": {"rr": 2.4, "rsi": 35, "slope": 0.4, "at_active": False, "use_trailing": False},
         "15m": {"rr": 2.4, "rsi": 45, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
         "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
         "4h": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
@@ -279,6 +288,7 @@ SYMBOL_PARAMS = {
     "LTCUSDT": {
         "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True},
         "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
         "1h": {"rr": 1.8, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
         "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
@@ -287,6 +297,7 @@ SYMBOL_PARAMS = {
     "DOGEUSDT": {
         "5m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True},
         "15m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
         "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
         "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
@@ -295,6 +306,7 @@ SYMBOL_PARAMS = {
     "SUIUSDT": {
         "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True},
         "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
         "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
         "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
@@ -304,6 +316,7 @@ SYMBOL_PARAMS = {
         # New memecoin - let optimizer find best params
         "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True},
         "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
         "1h": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
         "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
         "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
@@ -380,9 +393,14 @@ DEFAULT_STRATEGY_CONFIG = {
     "tp_min_dist_ratio": 0.0008,     # Was 0.0010 - allow closer TPs
     "tp_max_dist_ratio": 0.040,      # Was 0.035 - allow further TPs
     "adx_min": 8.0,                  # Was 10.0 - less strict ADX requirement
+    # Strategy mode: "keltner_bounce" (default) or "pbema_reaction"
+    "strategy_mode": "keltner_bounce",
+    # PBEMA reaction strategy parameters (used when strategy_mode="pbema_reaction")
+    "pbema_approach_tolerance": 0.003,  # 0.3% tolerance for PBEMA approach/touch
+    "pbema_frontrun_margin": 0.002,     # 0.2% margin for frontrunning
 }
 
-PARTIAL_STOP_PROTECTION_TFS = {"5m", "15m", "1h"}
+PARTIAL_STOP_PROTECTION_TFS = {"5m", "15m", "30m", "1h"}
 
 
 def _strategy_signature() -> str:
@@ -636,6 +654,10 @@ def _generate_candidate_configs():
     - PBEMA (200 EMA) çok yavaş hareket eder
     - Mean reversion stratejisinde slope filter mantıksız
     - Slope taramak sadece zaman kaybı
+
+    İki strateji modu test edilir:
+    - keltner_bounce: Keltner band bounce (mevcut)
+    - pbema_reaction: PBEMA tepki stratejisi (yeni)
     """
 
     rr_vals = np.arange(1.2, 2.6, 0.3)
@@ -643,8 +665,12 @@ def _generate_candidate_configs():
     at_vals = [False, True]
     # Include both dynamic TP options to ensure optimizer matches what live will use
     dyn_tp_vals = [True, False]
+    # Test both strategy modes
+    strategy_modes = ["keltner_bounce", "pbema_reaction"]
 
     candidates = []
+
+    # Keltner bounce strategy configs
     for rr, rsi, at_active, dyn_tp in itertools.product(
         rr_vals, rsi_vals, at_vals, dyn_tp_vals
     ):
@@ -656,12 +682,36 @@ def _generate_candidate_configs():
                 "at_active": bool(at_active),
                 "use_trailing": False,
                 "use_dynamic_pbema_tp": bool(dyn_tp),
+                "strategy_mode": "keltner_bounce",
             }
         )
 
-    # Birkaç agresif trailing seçeneği ekle
+    # PBEMA reaction strategy configs
+    # PBEMA stratejisi için farklı parametre kombinasyonları
+    pbema_approach_vals = [0.002, 0.003, 0.004]  # PBEMA yaklaşım toleransı
+    pbema_frontrun_vals = [0.0015, 0.002, 0.003]  # Frontrun marjı
+
+    for rr, rsi, approach_tol, frontrun_margin in itertools.product(
+        rr_vals, rsi_vals, pbema_approach_vals, pbema_frontrun_vals
+    ):
+        candidates.append(
+            {
+                "rr": round(float(rr), 2),
+                "rsi": int(rsi),
+                "slope": 0.5,
+                "at_active": False,  # PBEMA stratejisinde AT kullanılmıyor
+                "use_trailing": False,
+                "use_dynamic_pbema_tp": False,  # PBEMA stratejisinde dinamik TP yok
+                "strategy_mode": "pbema_reaction",
+                "pbema_approach_tolerance": approach_tol,
+                "pbema_frontrun_margin": frontrun_margin,
+            }
+        )
+
+    # Birkaç agresif trailing seçeneği ekle (sadece keltner bounce için)
     trailing_extras = []
-    for base in candidates[:: max(1, len(candidates) // 20)]:  # toplamı şişirmeden örnekle
+    keltner_configs = [c for c in candidates if c.get("strategy_mode") == "keltner_bounce"]
+    for base in keltner_configs[:: max(1, len(keltner_configs) // 20)]:  # toplamı şişirmeden örnekle
         cfg = dict(base)
         cfg["use_trailing"] = True
         trailing_extras.append(cfg)
@@ -674,6 +724,7 @@ def _generate_quick_candidate_configs():
 
     Used when quick_mode=True for faster backtest iterations.
     Covers key combinations without exhaustive search.
+    Both strategy modes (keltner_bounce and pbema_reaction) are tested.
     """
     # Sadece en önemli RR ve RSI değerlerini kullan
     rr_vals = [1.2, 1.8, 2.4]  # 3 değer (vs 5)
@@ -682,6 +733,8 @@ def _generate_quick_candidate_configs():
     dyn_tp_vals = [True]       # Sadece 1 değer (dinamik TP genelde daha iyi)
 
     candidates = []
+
+    # Keltner bounce strategy configs
     for rr, rsi, at_active, dyn_tp in itertools.product(
         rr_vals, rsi_vals, at_vals, dyn_tp_vals
     ):
@@ -693,15 +746,37 @@ def _generate_quick_candidate_configs():
                 "at_active": bool(at_active),
                 "use_trailing": False,
                 "use_dynamic_pbema_tp": bool(dyn_tp),
+                "strategy_mode": "keltner_bounce",
             }
         )
 
-    # 1 trailing config ekle
+    # PBEMA reaction strategy configs (minimal grid)
+    pbema_approach_vals = [0.003]  # Sadece 1 değer
+    pbema_frontrun_vals = [0.002]  # Sadece 1 değer
+
+    for rr, rsi, approach_tol, frontrun_margin in itertools.product(
+        rr_vals, rsi_vals, pbema_approach_vals, pbema_frontrun_vals
+    ):
+        candidates.append(
+            {
+                "rr": round(float(rr), 2),
+                "rsi": int(rsi),
+                "slope": 0.5,
+                "at_active": False,
+                "use_trailing": False,
+                "use_dynamic_pbema_tp": False,
+                "strategy_mode": "pbema_reaction",
+                "pbema_approach_tolerance": approach_tol,
+                "pbema_frontrun_margin": frontrun_margin,
+            }
+        )
+
+    # 1 trailing config ekle (sadece keltner bounce için)
     trailing_cfg = dict(candidates[0])
     trailing_cfg["use_trailing"] = True
     candidates.append(trailing_cfg)
 
-    return candidates  # ~13 config (vs ~120)
+    return candidates  # ~19 config (vs ~120)
 
 
 def _get_min_trades_for_timeframe(tf: str, num_candles: int = 20000) -> int:
@@ -1039,21 +1114,12 @@ def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) 
             pb_bot=float(pb_bots[i]),
         )
 
-        s_type, s_entry, s_tp, s_sl, s_reason = TradingEngine.check_signal_diagnostic(
+        # Use wrapper function to support both keltner_bounce and pbema_reaction strategies
+        s_type, s_entry, s_tp, s_sl, s_reason = TradingEngine.check_signal(
             df,
+            config=config,
             index=i,
-            min_rr=config["rr"],
-            rsi_limit=config["rsi"],
-            slope_thresh=config["slope"],
-            use_alphatrend=config.get("at_active", False),
-            hold_n=config.get("hold_n", DEFAULT_STRATEGY_CONFIG["hold_n"]),
-            min_hold_frac=config.get("min_hold_frac", DEFAULT_STRATEGY_CONFIG["min_hold_frac"]),
-            pb_touch_tolerance=config.get("pb_touch_tolerance", DEFAULT_STRATEGY_CONFIG["pb_touch_tolerance"]),
-            body_tolerance=config.get("body_tolerance", DEFAULT_STRATEGY_CONFIG["body_tolerance"]),
-            cloud_keltner_gap_min=config.get("cloud_keltner_gap_min", DEFAULT_STRATEGY_CONFIG["cloud_keltner_gap_min"]),
-            tp_min_dist_ratio=config.get("tp_min_dist_ratio", DEFAULT_STRATEGY_CONFIG["tp_min_dist_ratio"]),
-            tp_max_dist_ratio=config.get("tp_max_dist_ratio", DEFAULT_STRATEGY_CONFIG["tp_max_dist_ratio"]),
-            adx_min=config.get("adx_min", DEFAULT_STRATEGY_CONFIG["adx_min"]),
+            return_debug=False,
         )
 
         if not (s_type and "ACCEPTED" in s_reason):
@@ -2888,6 +2954,323 @@ class TradingEngine:
 
         return _ret(None, None, None, None, "No Signal")
 
+    @staticmethod
+    def check_pbema_reaction_signal(
+            df: pd.DataFrame,
+            index: int = -2,
+            min_rr: float = 2.0,
+            rsi_limit: float = 60.0,
+            slope_thresh: float = 0.5,
+            use_alphatrend: bool = False,
+            pbema_approach_tolerance: float = 0.003,
+            pbema_frontrun_margin: float = 0.002,
+            tp_min_dist_ratio: float = 0.0015,
+            tp_max_dist_ratio: float = 0.04,
+            adx_min: float = 8.0,
+            return_debug: bool = False,
+    ) -> Tuple:
+        """
+        PBEMA Reaction Strategy - Fiyat PBEMA bulutuna yaklaştığında/değdiğinde işlem aç.
+
+        Konsept:
+        - PBEMA bulutu güçlü bir destek/direnç bölgesi olarak çalışıyor
+        - Fiyat PBEMA'ya yaklaştığında oradan tepki alması bekleniyor
+        - SHORT: Fiyat aşağıdan PBEMA'ya yaklaşıyor → satış baskısı bekleniyor
+        - LONG: Fiyat yukarıdan PBEMA'ya yaklaşıyor → alış baskısı bekleniyor
+
+        Parametreler:
+        - pbema_approach_tolerance: PBEMA'ya ne kadar yaklaşınca sinyal üret (örn. 0.003 = %0.3)
+        - pbema_frontrun_margin: Frontrun marjı (SL için PBEMA + bu marj)
+        """
+
+        debug_info = {
+            "adx_ok": None,
+            "price_near_pbema_top": None,
+            "price_near_pbema_bot": None,
+            "approaching_from_below": None,
+            "approaching_from_above": None,
+            "short_rsi_ok": None,
+            "long_rsi_ok": None,
+            "tp_dist_ratio": None,
+            "rr_value": None,
+        }
+
+        def _ret(s_type, entry, tp, sl, reason):
+            if return_debug:
+                return s_type, entry, tp, sl, reason, debug_info
+            return s_type, entry, tp, sl, reason
+
+        if df is None or df.empty:
+            return _ret(None, None, None, None, "No Data")
+
+        required_cols = [
+            "open", "high", "low", "close",
+            "rsi", "adx",
+            "pb_ema_top", "pb_ema_bot",
+            "keltner_upper", "keltner_lower",
+        ]
+        for col in required_cols:
+            if col not in df.columns:
+                return _ret(None, None, None, None, f"Missing {col}")
+
+        try:
+            curr = df.iloc[index]
+        except Exception:
+            return _ret(None, None, None, None, "Index Error")
+
+        abs_index = index if index >= 0 else (len(df) + index)
+        if abs_index < 30:  # Need enough history for swing detection
+            return _ret(None, None, None, None, "Not Enough Data")
+
+        # Extract current values
+        open_ = float(curr["open"])
+        high = float(curr["high"])
+        low = float(curr["low"])
+        close = float(curr["close"])
+        pb_top = float(curr["pb_ema_top"])
+        pb_bot = float(curr["pb_ema_bot"])
+        lower_band = float(curr["keltner_lower"])
+        upper_band = float(curr["keltner_upper"])
+        adx_val = float(curr["adx"])
+        rsi_val = float(curr["rsi"])
+
+        # Check for NaN values
+        if any(pd.isna([open_, high, low, close, pb_top, pb_bot, lower_band, upper_band, adx_val, rsi_val])):
+            return _ret(None, None, None, None, "NaN Values")
+
+        # ADX filter - need some volatility
+        adx_ok = adx_val >= adx_min
+        debug_info["adx_ok"] = adx_ok
+        if not adx_ok:
+            return _ret(None, None, None, None, f"ADX Too Low ({adx_val:.1f})")
+
+        # Calculate distances to PBEMA cloud
+        dist_to_pb_top = abs(high - pb_top) / pb_top if pb_top > 0 else 1.0
+        dist_to_pb_bot = abs(low - pb_bot) / pb_bot if pb_bot > 0 else 1.0
+
+        # Check if price is approaching PBEMA from below (for SHORT)
+        # Conditions: Price was below PBEMA and now touching/near it
+        price_below_pbema = close < pb_bot
+        price_near_pbema_top = (high >= pb_top * (1 - pbema_approach_tolerance)) and (high <= pb_top * (1 + pbema_frontrun_margin))
+        approaching_from_below = (
+            not price_below_pbema and  # Currently at or above PBEMA
+            (dist_to_pb_top <= pbema_approach_tolerance or high >= pb_top)  # Near or touched pb_top
+        )
+
+        # Check if price is approaching PBEMA from above (for LONG)
+        # Conditions: Price was above PBEMA and now touching/near it
+        price_above_pbema = close > pb_top
+        price_near_pbema_bot = (low <= pb_bot * (1 + pbema_approach_tolerance)) and (low >= pb_bot * (1 - pbema_frontrun_margin))
+        approaching_from_above = (
+            not price_above_pbema and  # Currently at or below PBEMA
+            (dist_to_pb_bot <= pbema_approach_tolerance or low <= pb_bot)  # Near or touched pb_bot
+        )
+
+        debug_info.update({
+            "price_near_pbema_top": price_near_pbema_top,
+            "price_near_pbema_bot": price_near_pbema_bot,
+            "approaching_from_below": approaching_from_below,
+            "approaching_from_above": approaching_from_above,
+        })
+
+        # ================= SHORT (PBEMA Resistance) =================
+        # Price approached PBEMA from below - expecting rejection
+        is_short = price_near_pbema_top and close < pb_top
+
+        # Rejection candle check: wick into PBEMA but closed below
+        if is_short:
+            rejection_wick_short = (high >= pb_top * (1 - pbema_approach_tolerance)) and (close < pb_top)
+            candle_body_below = max(open_, close) < pb_top
+            is_short = rejection_wick_short and candle_body_below
+
+        # RSI filter for SHORT - not too oversold
+        short_rsi_limit = 100.0 - (rsi_limit + 10.0)
+        short_rsi_ok = rsi_val >= short_rsi_limit
+        debug_info["short_rsi_ok"] = short_rsi_ok
+        if is_short and not short_rsi_ok:
+            is_short = False
+
+        # Slope filter - PBEMA should be sloping down or flat for SHORT
+        if is_short and "slope_top" in curr.index:
+            slope_val = float(curr["slope_top"])
+            if slope_val > slope_thresh:  # Strong uptrend - skip SHORT
+                is_short = False
+
+        if is_short:
+            # Find swing low for TP
+            swing_n = 20
+            start = max(0, abs_index - swing_n)
+            swing_low = float(df["low"].iloc[start:abs_index].min())
+
+            # TP options: swing low or Keltner lower band (whichever is closer)
+            tp_swing = swing_low * 0.998
+            tp_keltner = lower_band * 0.998
+            tp = max(tp_swing, tp_keltner)  # Choose closer TP
+
+            # Entry at close
+            entry = close
+
+            # SL above PBEMA with frontrun margin
+            sl = pb_top * (1 + pbema_frontrun_margin + 0.002)
+
+            if tp >= entry:
+                return _ret(None, None, None, None, "TP Above Entry (SHORT)")
+            if sl <= entry:
+                sl = pb_top * (1 + pbema_frontrun_margin + 0.005)
+
+            risk = sl - entry
+            reward = entry - tp
+            if risk <= 0 or reward <= 0:
+                return _ret(None, None, None, None, "Invalid RR (SHORT)")
+
+            rr = reward / risk
+            tp_dist_ratio = reward / entry
+
+            debug_info.update({
+                "tp_dist_ratio": tp_dist_ratio,
+                "rr_value": rr,
+            })
+
+            if tp_dist_ratio < tp_min_dist_ratio:
+                return _ret(None, None, None, None, f"TP Too Close ({tp_dist_ratio:.4f})")
+            if tp_dist_ratio > tp_max_dist_ratio:
+                return _ret(None, None, None, None, f"TP Too Far ({tp_dist_ratio:.4f})")
+            if rr < min_rr:
+                return _ret(None, None, None, None, f"RR Too Low ({rr:.2f})")
+
+            reason = f"ACCEPTED(PBEMA_Reaction,R:{rr:.2f})"
+            return _ret("SHORT", entry, tp, sl, reason)
+
+        # ================= LONG (PBEMA Support) =================
+        # Price approached PBEMA from above - expecting bounce
+        is_long = price_near_pbema_bot and close > pb_bot
+
+        # Rejection candle check: wick into PBEMA but closed above
+        if is_long:
+            rejection_wick_long = (low <= pb_bot * (1 + pbema_approach_tolerance)) and (close > pb_bot)
+            candle_body_above = min(open_, close) > pb_bot
+            is_long = rejection_wick_long and candle_body_above
+
+        # RSI filter for LONG - not too overbought
+        long_rsi_limit = rsi_limit + 10.0
+        long_rsi_ok = rsi_val <= long_rsi_limit
+        debug_info["long_rsi_ok"] = long_rsi_ok
+        if is_long and not long_rsi_ok:
+            is_long = False
+
+        # Slope filter - PBEMA should be sloping up or flat for LONG
+        if is_long and "slope_bot" in curr.index:
+            slope_val = float(curr["slope_bot"])
+            if slope_val < -slope_thresh:  # Strong downtrend - skip LONG
+                is_long = False
+
+        if is_long:
+            # Find swing high for TP
+            swing_n = 20
+            start = max(0, abs_index - swing_n)
+            swing_high = float(df["high"].iloc[start:abs_index].max())
+
+            # TP options: swing high or Keltner upper band (whichever is closer)
+            tp_swing = swing_high * 1.002
+            tp_keltner = upper_band * 1.002
+            tp = min(tp_swing, tp_keltner)  # Choose closer TP
+
+            # Entry at close
+            entry = close
+
+            # SL below PBEMA with frontrun margin
+            sl = pb_bot * (1 - pbema_frontrun_margin - 0.002)
+
+            if tp <= entry:
+                return _ret(None, None, None, None, "TP Below Entry (LONG)")
+            if sl >= entry:
+                sl = pb_bot * (1 - pbema_frontrun_margin - 0.005)
+
+            risk = entry - sl
+            reward = tp - entry
+            if risk <= 0 or reward <= 0:
+                return _ret(None, None, None, None, "Invalid RR (LONG)")
+
+            rr = reward / risk
+            tp_dist_ratio = reward / entry
+
+            debug_info.update({
+                "tp_dist_ratio": tp_dist_ratio,
+                "rr_value": rr,
+            })
+
+            if tp_dist_ratio < tp_min_dist_ratio:
+                return _ret(None, None, None, None, f"TP Too Close ({tp_dist_ratio:.4f})")
+            if tp_dist_ratio > tp_max_dist_ratio:
+                return _ret(None, None, None, None, f"TP Too Far ({tp_dist_ratio:.4f})")
+            if rr < min_rr:
+                return _ret(None, None, None, None, f"RR Too Low ({rr:.2f})")
+
+            reason = f"ACCEPTED(PBEMA_Reaction,R:{rr:.2f})"
+            return _ret("LONG", entry, tp, sl, reason)
+
+        return _ret(None, None, None, None, "No Signal")
+
+    @staticmethod
+    def check_signal(
+            df: pd.DataFrame,
+            config: dict,
+            index: int = -2,
+            return_debug: bool = False,
+    ) -> Tuple:
+        """
+        Wrapper fonksiyon - strategy_mode'a göre uygun strateji fonksiyonunu çağırır.
+
+        strategy_mode değerleri:
+        - "keltner_bounce" (default): Keltner band bounce stratejisi
+        - "pbema_reaction": PBEMA tepki stratejisi
+
+        Args:
+            df: OHLCV + indikatör dataframe
+            config: Strateji konfigürasyonu (rr, rsi, slope, strategy_mode, vs.)
+            index: Sinyal kontrol edilecek mum indeksi
+            return_debug: Debug bilgisi döndür
+
+        Returns:
+            (s_type, entry, tp, sl, reason) veya debug ile birlikte
+        """
+        strategy_mode = config.get("strategy_mode", DEFAULT_STRATEGY_CONFIG.get("strategy_mode", "keltner_bounce"))
+
+        if strategy_mode == "pbema_reaction":
+            return TradingEngine.check_pbema_reaction_signal(
+                df,
+                index=index,
+                min_rr=config.get("rr", DEFAULT_STRATEGY_CONFIG["rr"]),
+                rsi_limit=config.get("rsi", DEFAULT_STRATEGY_CONFIG["rsi"]),
+                slope_thresh=config.get("slope", DEFAULT_STRATEGY_CONFIG["slope"]),
+                use_alphatrend=config.get("at_active", DEFAULT_STRATEGY_CONFIG["at_active"]),
+                pbema_approach_tolerance=config.get("pbema_approach_tolerance", DEFAULT_STRATEGY_CONFIG["pbema_approach_tolerance"]),
+                pbema_frontrun_margin=config.get("pbema_frontrun_margin", DEFAULT_STRATEGY_CONFIG["pbema_frontrun_margin"]),
+                tp_min_dist_ratio=config.get("tp_min_dist_ratio", DEFAULT_STRATEGY_CONFIG["tp_min_dist_ratio"]),
+                tp_max_dist_ratio=config.get("tp_max_dist_ratio", DEFAULT_STRATEGY_CONFIG["tp_max_dist_ratio"]),
+                adx_min=config.get("adx_min", DEFAULT_STRATEGY_CONFIG["adx_min"]),
+                return_debug=return_debug,
+            )
+        else:
+            # Default: keltner_bounce strategy
+            return TradingEngine.check_signal_diagnostic(
+                df,
+                index=index,
+                min_rr=config.get("rr", DEFAULT_STRATEGY_CONFIG["rr"]),
+                rsi_limit=config.get("rsi", DEFAULT_STRATEGY_CONFIG["rsi"]),
+                slope_thresh=config.get("slope", DEFAULT_STRATEGY_CONFIG["slope"]),
+                use_alphatrend=config.get("at_active", DEFAULT_STRATEGY_CONFIG["at_active"]),
+                hold_n=config.get("hold_n", DEFAULT_STRATEGY_CONFIG["hold_n"]),
+                min_hold_frac=config.get("min_hold_frac", DEFAULT_STRATEGY_CONFIG["min_hold_frac"]),
+                pb_touch_tolerance=config.get("pb_touch_tolerance", DEFAULT_STRATEGY_CONFIG["pb_touch_tolerance"]),
+                body_tolerance=config.get("body_tolerance", DEFAULT_STRATEGY_CONFIG["body_tolerance"]),
+                cloud_keltner_gap_min=config.get("cloud_keltner_gap_min", DEFAULT_STRATEGY_CONFIG["cloud_keltner_gap_min"]),
+                tp_min_dist_ratio=config.get("tp_min_dist_ratio", DEFAULT_STRATEGY_CONFIG["tp_min_dist_ratio"]),
+                tp_max_dist_ratio=config.get("tp_max_dist_ratio", DEFAULT_STRATEGY_CONFIG["tp_max_dist_ratio"]),
+                adx_min=config.get("adx_min", DEFAULT_STRATEGY_CONFIG["adx_min"]),
+                return_debug=return_debug,
+            )
+
     def debug_plot_backtest_trade(symbol: str,
                                   timeframe: str,
                                   trade_id: int,
@@ -3432,22 +3815,14 @@ class LiveBotWorker(QThread):
                                 rr, rsi, slope = config['rr'], config['rsi'], config['slope']
                                 use_at = config['at_active']
                                 at_status_log = "AT:ON" if use_at else "AT:OFF"
+                                strategy_mode = config.get("strategy_mode", "keltner_bounce")
+                                strategy_log = f"Mode:{strategy_mode[:7]}"
 
-                                s_type, s_entry, s_tp, s_sl, s_reason, s_debug = TradingEngine.check_signal_diagnostic(
+                                # Use wrapper function to support both strategies
+                                s_type, s_entry, s_tp, s_sl, s_reason, s_debug = TradingEngine.check_signal(
                                     df_closed,
+                                    config=config,
                                     index=-1,
-                                    min_rr=rr,
-                                    rsi_limit=rsi,
-                                    slope_thresh=slope,
-                                    use_alphatrend=use_at,
-                                    hold_n=config.get("hold_n"),
-                                    min_hold_frac=config.get("min_hold_frac"),
-                                    pb_touch_tolerance=config.get("pb_touch_tolerance"),
-                                    body_tolerance=config.get("body_tolerance"),
-                                    cloud_keltner_gap_min=config.get("cloud_keltner_gap_min"),
-                                    tp_min_dist_ratio=config.get("tp_min_dist_ratio"),
-                                    tp_max_dist_ratio=config.get("tp_max_dist_ratio"),
-                                    adx_min=config.get("adx_min"),
                                     return_debug=True,
                                 )
 
@@ -3672,22 +4047,21 @@ class OptimizerWorker(QThread):
                     limit_idx = len(df) - 1
                     cooldown = 0
 
+                    # Build config for wrapper function
+                    loop_config = {
+                        **DEFAULT_STRATEGY_CONFIG,
+                        "rr": rr,
+                        "rsi": rsi,
+                        "slope": slope,
+                        "at_active": at_active,
+                    }
+
                     for i in range(start_idx, limit_idx):
-                        s_type, _, s_tp_raw, s_sl_raw, s_reason = TradingEngine.check_signal_diagnostic(
+                        s_type, _, s_tp_raw, s_sl_raw, s_reason = TradingEngine.check_signal(
                             df,
+                            config=loop_config,
                             index=i,
-                            min_rr=rr,
-                            rsi_limit=rsi,
-                            slope_thresh=slope,
-                            use_alphatrend=at_active,
-                            hold_n=DEFAULT_STRATEGY_CONFIG["hold_n"],
-                            min_hold_frac=DEFAULT_STRATEGY_CONFIG["min_hold_frac"],
-                            pb_touch_tolerance=DEFAULT_STRATEGY_CONFIG["pb_touch_tolerance"],
-                            body_tolerance=DEFAULT_STRATEGY_CONFIG["body_tolerance"],
-                            cloud_keltner_gap_min=DEFAULT_STRATEGY_CONFIG["cloud_keltner_gap_min"],
-                            tp_min_dist_ratio=DEFAULT_STRATEGY_CONFIG["tp_min_dist_ratio"],
-                            tp_max_dist_ratio=DEFAULT_STRATEGY_CONFIG["tp_max_dist_ratio"],
-                            adx_min=DEFAULT_STRATEGY_CONFIG["adx_min"],
+                            return_debug=False,
                         )
 
                         if s_type and "ACCEPTED" in s_reason:
@@ -5766,22 +6140,12 @@ def run_portfolio_backtest(
         rr, rsi, slope = config["rr"], config["rsi"], config["slope"]
         use_at = config.get("at_active", False)
 
-        # Sinyal kontrolü (Base setup mantığı burada)
-        s_type, s_entry, s_tp, s_sl, s_reason = TradingEngine.check_signal_diagnostic(
+        # Sinyal kontrolü (wrapper ile - keltner_bounce veya pbema_reaction destekler)
+        s_type, s_entry, s_tp, s_sl, s_reason = TradingEngine.check_signal(
             df,
+            config=config,
             index=i,
-            min_rr=rr,
-            rsi_limit=rsi,
-            slope_thresh=slope,
-            use_alphatrend=use_at,
-            hold_n=config.get("hold_n"),
-            min_hold_frac=config.get("min_hold_frac"),
-            pb_touch_tolerance=config.get("pb_touch_tolerance"),
-            body_tolerance=config.get("body_tolerance"),
-            cloud_keltner_gap_min=config.get("cloud_keltner_gap_min"),
-            tp_min_dist_ratio=config.get("tp_min_dist_ratio"),
-            tp_max_dist_ratio=config.get("tp_max_dist_ratio"),
-            adx_min=config.get("adx_min"),
+            return_debug=False,
         )
 
         if s_type and "ACCEPTED" in str(s_reason):
