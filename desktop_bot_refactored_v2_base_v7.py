@@ -1934,16 +1934,27 @@ class TradeManager:
                         self.open_trades[i]["partial_price"] = float(partial_fill)
                         self.open_trades[i]["partial_taken"] = True
                         _append_trade_event(self.open_trades[i], "PARTIAL", candle_time_utc, partial_fill)
-                        # Breakeven'e çek
-                        self.open_trades[i]["sl"] = entry
+                        # Breakeven'e çek - küçük buffer ile (spread/slippage koruması)
+                        be_buffer = 0.0003  # %0.03 buffer
+                        if t_type == "LONG":
+                            be_sl = entry * (1 + be_buffer)
+                        else:
+                            be_sl = entry * (1 - be_buffer)
+                        self.open_trades[i]["sl"] = be_sl
                         self.open_trades[i]["breakeven"] = True
-                        _append_trade_event(self.open_trades[i], "BE_SET", candle_time_utc, entry)
+                        _append_trade_event(self.open_trades[i], "BE_SET", candle_time_utc, be_sl)
                         trades_updated = True
 
                     elif (not trade.get("breakeven")) and progress >= 0.40:
-                        self.open_trades[i]["sl"] = entry
+                        # Breakeven'e çek - küçük buffer ile
+                        be_buffer = 0.0003  # %0.03 buffer
+                        if t_type == "LONG":
+                            be_sl = entry * (1 + be_buffer)
+                        else:
+                            be_sl = entry * (1 - be_buffer)
+                        self.open_trades[i]["sl"] = be_sl
                         self.open_trades[i]["breakeven"] = True
-                        _append_trade_event(self.open_trades[i], "BE_SET", candle_time_utc, entry)
+                        _append_trade_event(self.open_trades[i], "BE_SET", candle_time_utc, be_sl)
                         trades_updated = True
 
                 # 1m için fiyat TP'ye çok yaklaşınca SL'i kâra çek
@@ -1954,9 +1965,15 @@ class TradeManager:
                 # ---------- TRAILING SL ----------
                 if in_profit and use_trailing:
                     if (not trade.get("breakeven")) and progress >= 0.40:
-                        self.open_trades[i]["sl"] = entry
+                        # Breakeven'e çek - küçük buffer ile
+                        be_buffer = 0.0003  # %0.03 buffer
+                        if t_type == "LONG":
+                            be_sl = entry * (1 + be_buffer)
+                        else:
+                            be_sl = entry * (1 - be_buffer)
+                        self.open_trades[i]["sl"] = be_sl
                         self.open_trades[i]["breakeven"] = True
-                        _append_trade_event(self.open_trades[i], "BE_SET", candle_time_utc, entry)
+                        _append_trade_event(self.open_trades[i], "BE_SET", candle_time_utc, be_sl)
                         trades_updated = True
 
                     if progress >= 0.50:
@@ -2205,6 +2222,14 @@ class TradeManager:
                 sl = float(trade.get("sl", 0))
 
                 if not all([symbol, t_type, entry, tp, sl]):
+                    continue
+
+                # Breakeven trade kontrolü: SL entry'ye çok yakınsa (breakeven durumu)
+                # bu trade'i hemen kapatma, normal update döngüsünde işlensin
+                sl_entry_diff_pct = abs(sl - entry) / entry
+                is_breakeven_trade = sl_entry_diff_pct < 0.001  # %0.1'den küçükse breakeven
+                if is_breakeven_trade:
+                    print(f"[CLEANUP] {symbol}-{tf} breakeven trade, normal döngüde işlenecek (SL: {sl:.4f}, Entry: {entry:.4f})")
                     continue
 
                 # Fetch current price
@@ -5780,26 +5805,44 @@ class SimTradeManager:
                     self.open_trades[i]["margin"] = margin_release
                     self.open_trades[i]["partial_taken"] = True
                     self.open_trades[i]["partial_price"] = float(partial_fill)
-                    self.open_trades[i]["sl"] = entry
+                    # Breakeven'e çek - küçük buffer ile (spread/slippage koruması)
+                    be_buffer = 0.0003  # %0.03 buffer
+                    if t_type == "LONG":
+                        be_sl = entry * (1 + be_buffer)
+                    else:
+                        be_sl = entry * (1 - be_buffer)
+                    self.open_trades[i]["sl"] = be_sl
                     self.open_trades[i]["breakeven"] = True
                     # Kalan pozisyon için risk tutarını güncelle (yarıya düştü)
                     self.open_trades[i]["risk_amount"] = partial_risk
                     _append_trade_event(self.open_trades[i], "PARTIAL", candle_time_utc, partial_fill)
-                    _append_trade_event(self.open_trades[i], "BE_SET", candle_time_utc, entry)
+                    _append_trade_event(self.open_trades[i], "BE_SET", candle_time_utc, be_sl)
 
                 elif (not trade.get("breakeven")) and progress >= 0.40:
-                    self.open_trades[i]["sl"] = entry
+                    # Breakeven'e çek - küçük buffer ile
+                    be_buffer = 0.0003  # %0.03 buffer
+                    if t_type == "LONG":
+                        be_sl = entry * (1 + be_buffer)
+                    else:
+                        be_sl = entry * (1 - be_buffer)
+                    self.open_trades[i]["sl"] = be_sl
                     self.open_trades[i]["breakeven"] = True
-                    _append_trade_event(self.open_trades[i], "BE_SET", candle_time_utc, entry)
+                    _append_trade_event(self.open_trades[i], "BE_SET", candle_time_utc, be_sl)
 
             if _apply_1m_profit_lock(self.open_trades[i], tf, t_type, entry, dyn_tp, progress):
                 _append_trade_event(self.open_trades[i], "PROFIT_LOCK", candle_time_utc, self.open_trades[i].get("sl"))
 
             if in_profit and use_trailing:
                 if (not trade.get("breakeven")) and progress >= 0.40:
-                    self.open_trades[i]["sl"] = entry
+                    # Breakeven'e çek - küçük buffer ile
+                    be_buffer = 0.0003  # %0.03 buffer
+                    if t_type == "LONG":
+                        be_sl = entry * (1 + be_buffer)
+                    else:
+                        be_sl = entry * (1 - be_buffer)
+                    self.open_trades[i]["sl"] = be_sl
                     self.open_trades[i]["breakeven"] = True
-                    _append_trade_event(self.open_trades[i], "BE_SET", candle_time_utc, entry)
+                    _append_trade_event(self.open_trades[i], "BE_SET", candle_time_utc, be_sl)
 
                 if progress >= 0.50:
                     trail_buffer = total_dist * 0.40
