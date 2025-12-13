@@ -2219,7 +2219,7 @@ class TradeManager:
 
                 # Fetch current price
                 try:
-                    url = f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={symbol}"
+                    url = f"{TradingEngine.API_BASE_URL}/ticker/price?symbol={symbol}"
                     resp = requests.get(url, timeout=5)
                     current_price = float(resp.json()["price"])
                 except Exception as e:
@@ -2332,6 +2332,10 @@ class TradingEngine:
     # Ağ çökmelerinde tekrar tekrar DNS denemelerini önlemek için kısa süreli kilit
     _network_cooldown_until = 0
 
+    # API Endpoint seçimi - Colab'da Binance US kullan (bölgesel kısıtlama yok)
+    # Değiştirmek için: TradingEngine.API_BASE_URL = "https://fapi.binance.com/fapi/v1"
+    API_BASE_URL = "https://api.binance.us/api/v3" if IS_COLAB else "https://fapi.binance.com/fapi/v1"
+
     @staticmethod
     def send_telegram(token, chat_id, message):
         if not token or not chat_id: return
@@ -2392,7 +2396,7 @@ class TradingEngine:
     @staticmethod
     def get_data(symbol, interval, limit=500):
         try:
-            url = "https://fapi.binance.com/fapi/v1/klines"
+            url = f"{TradingEngine.API_BASE_URL}/klines"
             params = {'symbol': symbol, 'interval': interval, 'limit': limit}
 
             # Eski requests.get yerine yeni akıllı fonksiyonu kullanıyoruz
@@ -2446,7 +2450,7 @@ class TradingEngine:
         """Lightweight ticker fetcher to refresh UI prices without heavy kline calls."""
 
         prices = {}
-        url = "https://fapi.binance.com/fapi/v1/ticker/price"
+        url = f"{TradingEngine.API_BASE_URL}/ticker/price"
 
         for sym in symbols:
             try:
@@ -2468,22 +2472,42 @@ class TradingEngine:
         limit_per_req = 1000
         loops = int(np.ceil(total_candles / limit_per_req))
 
-        for _ in range(loops):
+        for loop_idx in range(loops):
             try:
-                url = "https://fapi.binance.com/fapi/v1/klines"
+                url = f"{TradingEngine.API_BASE_URL}/klines"
                 params = {'symbol': symbol, 'interval': interval, 'limit': limit_per_req, 'endTime': end_time}
 
                 # Burada da akıllı retry kullanıyoruz
                 res = TradingEngine.http_get_with_retry(url, params)
-                if res is None: break
+                if res is None:
+                    if IS_COLAB:
+                        print(f"[DATA] {symbol}-{interval}: API yanıt vermedi (loop {loop_idx+1})")
+                    break
+
+                # Status 451 veya diğer hatalar için kontrol
+                if res.status_code == 451:
+                    print(f"[DATA] {symbol}-{interval}: Bölgesel kısıtlama (451). Binance US deneyin.")
+                    break
+                if res.status_code != 200:
+                    print(f"[DATA] {symbol}-{interval}: HTTP {res.status_code}")
+                    break
 
                 data = res.json()
-                if not data or not isinstance(data, list): break
+
+                # Hata mesajı kontrolü
+                if isinstance(data, dict) and 'code' in data:
+                    print(f"[DATA] {symbol}-{interval}: API hatası - {data.get('msg', data)}")
+                    break
+
+                if not data or not isinstance(data, list):
+                    break
 
                 all_data = data + all_data  # Eskiden yeniye doğru birleştir
                 end_time = data[0][0] - 1
                 time.sleep(0.1)  # Kısa bir mola (Rate limit nezaketi)
-            except:
+            except Exception as e:
+                if IS_COLAB:
+                    print(f"[DATA] {symbol}-{interval}: Exception - {e}")
                 break
 
         if not all_data: return pd.DataFrame()
