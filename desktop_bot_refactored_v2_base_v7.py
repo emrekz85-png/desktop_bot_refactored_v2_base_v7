@@ -172,14 +172,15 @@ TRADING_CONFIG = {
 
 # Minimum E[R] (expected R-multiple) threshold by timeframe
 # Configs with lower E[R] are considered "barely positive" and rejected
+# Increased thresholds for problematic timeframes to demand stronger edge
 MIN_EXPECTANCY_R_MULTIPLE = {
-    "1m": 0.10,   # Very noisy - need strong edge
-    "5m": 0.06,   # Noisy - need decent edge per trade
-    "15m": 0.05,  # Moderate noise
-    "30m": 0.04,
-    "1h": 0.04,   # Cleaner signals
-    "4h": 0.03,   # Low noise
-    "1d": 0.02,   # Very clean
+    "1m": 0.12,   # Very noisy - need strong edge (was 0.10)
+    "5m": 0.07,   # Noisy - need decent edge per trade (was 0.06)
+    "15m": 0.06,  # Increased from 0.05 - 15m generated big losses
+    "30m": 0.05,  # Increased from 0.04
+    "1h": 0.05,   # Cleaner signals - increased from 0.04
+    "4h": 0.04,   # Low noise - increased from 0.03
+    "1d": 0.03,   # Very clean - increased from 0.02
 }
 
 # DEPRECATED: Eski $/trade eşikleri (geriye uyumluluk için korunuyor)
@@ -196,14 +197,15 @@ MIN_EXPECTANCY_PER_TRADE = {
 
 # Minimum optimizer score threshold by timeframe
 # Higher timeframes have lower bars because fewer trades naturally
+# Increased thresholds for problematic timeframes to filter weak edges
 MIN_SCORE_THRESHOLD = {
     "1m": 80.0,
-    "5m": 40.0,   # High bar for noisy timeframe
-    "15m": 15.0,  # Medium bar
-    "30m": 10.0,
-    "1h": 8.0,    # Lower bar
-    "4h": 5.0,    # Lower bar
-    "1d": 3.0,
+    "5m": 45.0,   # High bar for noisy timeframe (was 40)
+    "15m": 20.0,  # Increased from 15.0 - 15m was biggest loser
+    "30m": 12.0,  # Increased from 10.0
+    "1h": 10.0,   # Increased from 8.0
+    "4h": 6.0,    # Increased from 5.0
+    "1d": 4.0,    # Increased from 3.0
 }
 
 # Confidence-based risk multiplier
@@ -212,6 +214,20 @@ CONFIDENCE_RISK_MULTIPLIER = {
     "high": 1.0,    # Full risk
     "medium": 0.5,  # Half risk - protects against optimizer overfitting
     "low": 0.0,     # No trades (effectively disabled)
+}
+
+# Timeframe-based risk multiplier
+# Lower timeframes are noisier and have higher variance
+# Reduce position size for problematic timeframes
+TIMEFRAME_RISK_MULTIPLIER = {
+    "1m": 0.50,   # Very noisy - half position size
+    "5m": 0.75,   # Noisy - 75% position size
+    "15m": 0.75,  # 15m was biggest loser - reduce risk
+    "30m": 0.90,  # Moderate
+    "1h": 1.0,    # Full size
+    "4h": 1.0,    # Full size
+    "12h": 1.0,   # Full size
+    "1d": 1.0,    # Full size
 }
 
 # ==========================================
@@ -826,7 +842,7 @@ def _get_min_trades_for_timeframe(tf: str, num_candles: int = 20000) -> int:
 WALK_FORWARD_CONFIG = {
     "train_ratio": 0.70,        # %70 train, %30 test
     "min_test_trades": 3,       # Test için minimum trade sayısı
-    "min_overfit_ratio": 0.50,  # Test E[R] / Train E[R] minimum oranı
+    "min_overfit_ratio": 0.65,  # Test E[R] / Train E[R] minimum oranı (was 0.50 - too loose)
     "enabled": True,            # Walk-forward testi etkinleştir
 }
 
@@ -1052,14 +1068,17 @@ def _compute_optimizer_score(net_pnl: float, trades: int, trade_pnls: list,
         consistency_factor = 0.5  # Single trade = very unreliable
         dd_penalty = 0.5  # Heavy penalty for single trade
 
-    # Win rate bonus (slight preference for higher win rates at equal PnL)
+    # Win rate penalty/bonus (stricter thresholds for quality control)
     if trade_pnls:
         win_rate = sum(1 for p in trade_pnls if p > 0) / len(trade_pnls)
-        # Penalize very low win rates even with good RR
-        if win_rate < 0.25:
-            win_rate_factor = 0.7  # Too low WR = high variance
-        elif win_rate < 0.35:
-            win_rate_factor = 0.85
+        # HARD REJECT: Win rate too low = unreliable, high variance system
+        if win_rate < 0.28:
+            return -float("inf")  # Reject configs with <28% win rate
+        # Penalize low win rates even with good RR
+        elif win_rate < 0.32:
+            win_rate_factor = 0.65  # Heavy penalty (was 0.7 at 0.25)
+        elif win_rate < 0.40:
+            win_rate_factor = 0.80  # Medium penalty (was 0.85 at 0.35)
         else:
             win_rate_factor = 0.9 + win_rate * 0.2  # 0.9 to 1.1
     else:
@@ -1694,7 +1713,10 @@ class TradeManager:
 
             # Confidence-based risk multiplier: reduce position size for medium confidence
             confidence_level = config_snapshot.get("_confidence", "high")
-            risk_multiplier = CONFIDENCE_RISK_MULTIPLIER.get(confidence_level, 1.0)
+            confidence_risk_mult = CONFIDENCE_RISK_MULTIPLIER.get(confidence_level, 1.0)
+            # Timeframe-based risk multiplier: reduce position size for noisy timeframes
+            tf_risk_mult = TIMEFRAME_RISK_MULTIPLIER.get(tf, 1.0)
+            risk_multiplier = confidence_risk_mult * tf_risk_mult
             if risk_multiplier <= 0:
                 print(f"⚠️ [{sym}-{tf}] Düşük güven seviyesi, işlem açılmadı.")
                 return
@@ -2573,9 +2595,9 @@ class TradingEngine:
         adx_res = ta.adx(df["high"], df["low"], df["close"], length=14)
         df["adx"] = adx_res["ADX_14"] if adx_res is not None and "ADX_14" in adx_res.columns else 0.0
 
-        # PBEMA cloud
-        df["pb_ema_top"] = ta.ema(df["high"], length=200)
-        df["pb_ema_bot"] = ta.ema(df["close"], length=200)
+        # PBEMA cloud - EMA 150 for faster mean reversion response (was 200 - too slow)
+        df["pb_ema_top"] = ta.ema(df["high"], length=150)
+        df["pb_ema_bot"] = ta.ema(df["close"], length=150)
 
         # Slope (şimdilik sadece bilgi amaçlı)
         df["slope_top"] = (df["pb_ema_top"].diff(5) / df["pb_ema_top"]) * 1000
@@ -2991,7 +3013,7 @@ class TradingEngine:
             pbema_frontrun_margin: float = 0.002,
             tp_min_dist_ratio: float = 0.0015,
             tp_max_dist_ratio: float = 0.04,
-            adx_min: float = 8.0,
+            adx_min: float = 12.0,  # Increased from 8.0 - PBEMA needs more volatility
             return_debug: bool = False,
     ) -> Tuple:
         """
@@ -3069,6 +3091,23 @@ class TradingEngine:
         if not adx_ok:
             return _ret(None, None, None, None, f"ADX Too Low ({adx_val:.1f})")
 
+        # ================= WICK REJECTION QUALITY =================
+        # Require meaningful wick for quality rejection signal
+        candle_range = high - low
+        if candle_range > 0:
+            upper_wick = high - max(open_, close)
+            lower_wick = min(open_, close) - low
+            upper_wick_ratio = upper_wick / candle_range
+            lower_wick_ratio = lower_wick / candle_range
+        else:
+            upper_wick_ratio = 0.0
+            lower_wick_ratio = 0.0
+
+        # Minimum wick ratio for PBEMA rejection (0.12 = 12% of candle is wick)
+        min_wick_ratio_pbema = 0.12
+        debug_info["upper_wick_ratio"] = upper_wick_ratio
+        debug_info["lower_wick_ratio"] = lower_wick_ratio
+
         # Calculate distances to PBEMA cloud
         dist_to_pb_top = abs(high - pb_top) / pb_top if pb_top > 0 else 1.0
         dist_to_pb_bot = abs(low - pb_bot) / pb_bot if pb_bot > 0 else 1.0
@@ -3106,7 +3145,9 @@ class TradingEngine:
         if is_short:
             rejection_wick_short = (high >= pb_top * (1 - pbema_approach_tolerance)) and (close < pb_top)
             candle_body_below = max(open_, close) < pb_top
-            is_short = rejection_wick_short and candle_body_below
+            # Require meaningful upper wick for quality SHORT rejection
+            wick_quality_short = upper_wick_ratio >= min_wick_ratio_pbema
+            is_short = rejection_wick_short and candle_body_below and wick_quality_short
 
         # RSI filter for SHORT - not too oversold
         short_rsi_limit = 100.0 - (rsi_limit + 10.0)
@@ -3174,7 +3215,9 @@ class TradingEngine:
         if is_long:
             rejection_wick_long = (low <= pb_bot * (1 + pbema_approach_tolerance)) and (close > pb_bot)
             candle_body_above = min(open_, close) > pb_bot
-            is_long = rejection_wick_long and candle_body_above
+            # Require meaningful lower wick for quality LONG rejection
+            wick_quality_long = lower_wick_ratio >= min_wick_ratio_pbema
+            is_long = rejection_wick_long and candle_body_above and wick_quality_long
 
         # RSI filter for LONG - not too overbought
         long_rsi_limit = rsi_limit + 10.0
@@ -5566,7 +5609,10 @@ class SimTradeManager:
 
         # Confidence-based risk multiplier: reduce position size for medium confidence
         confidence_level = config_snapshot.get("_confidence", "high")
-        risk_multiplier = CONFIDENCE_RISK_MULTIPLIER.get(confidence_level, 1.0)
+        confidence_risk_mult = CONFIDENCE_RISK_MULTIPLIER.get(confidence_level, 1.0)
+        # Timeframe-based risk multiplier: reduce position size for noisy timeframes
+        tf_risk_mult = TIMEFRAME_RISK_MULTIPLIER.get(tf, 1.0)
+        risk_multiplier = confidence_risk_mult * tf_risk_mult
         if risk_multiplier <= 0:
             # Low confidence = no trades
             return False
