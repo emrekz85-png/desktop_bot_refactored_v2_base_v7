@@ -69,7 +69,156 @@ if not IS_HEADLESS:
         print("⚠️ PyQt5 bulunamadı - GUI devre dışı, sadece CLI modu kullanılabilir")
         HAS_GUI = False
         IS_HEADLESS = True
-else:
+
+# Headless/Colab modunda PyQt5 sınıflarını taklit et (Mock classes)
+# Bu sayede class tanımları hata vermez
+if IS_HEADLESS or not HAS_GUI:
+    print("⚠️ Colab Modu: GUI sınıfları taklit ediliyor (Mocking)...")
+
+    # Mock pyqtSignal
+    def pyqtSignal(*args, **kwargs):
+        """Mock pyqtSignal that does nothing."""
+        class MockSignal:
+            def emit(self, *args, **kwargs): pass
+            def connect(self, *args, **kwargs): pass
+            def disconnect(self, *args, **kwargs): pass
+        return MockSignal()
+
+    # Mock QThread
+    class QThread:
+        """Mock QThread for headless mode."""
+        def __init__(self, *args, **kwargs): pass
+        def start(self): pass
+        def quit(self): pass
+        def wait(self): pass
+        def isRunning(self): return False
+        def terminate(self): pass
+        def requestInterruption(self): pass
+        def isInterruptionRequested(self): return False
+
+    # Mock QTimer
+    class QTimer:
+        """Mock QTimer for headless mode."""
+        def __init__(self, *args, **kwargs): pass
+        def start(self, *args): pass
+        def stop(self): pass
+        def setInterval(self, *args): pass
+        timeout = pyqtSignal()
+
+    # Mock Qt namespace
+    class Qt:
+        AlignCenter = 0
+        AlignLeft = 0
+        AlignRight = 0
+        Horizontal = 0
+        Vertical = 0
+        white = 0
+        black = 0
+        red = 0
+        green = 0
+        blue = 0
+
+    # Mock QColor
+    class QColor:
+        def __init__(self, *args, **kwargs): pass
+
+    # Mock QFont
+    class QFont:
+        def __init__(self, *args, **kwargs): pass
+        def setPointSize(self, *args): pass
+        def setBold(self, *args): pass
+
+    # Mock QWidget and related classes
+    class QWidget:
+        def __init__(self, *args, **kwargs): pass
+        def setLayout(self, *args): pass
+        def show(self): pass
+        def hide(self): pass
+        def close(self): pass
+        def setStyleSheet(self, *args): pass
+        def setFont(self, *args): pass
+
+    class QMainWindow(QWidget): pass
+    class QFrame(QWidget): pass
+    class QGroupBox(QWidget): pass
+    class QLabel(QWidget): pass
+    class QTextEdit(QWidget):
+        def append(self, *args): pass
+        def clear(self): pass
+        def toPlainText(self): return ""
+    class QPushButton(QWidget):
+        clicked = pyqtSignal()
+        def setText(self, *args): pass
+        def setEnabled(self, *args): pass
+    class QCheckBox(QWidget):
+        stateChanged = pyqtSignal()
+        def isChecked(self): return False
+        def setChecked(self, *args): pass
+    class QComboBox(QWidget):
+        currentIndexChanged = pyqtSignal()
+        def addItems(self, *args): pass
+        def currentText(self): return ""
+        def setCurrentText(self, *args): pass
+    class QLineEdit(QWidget):
+        def text(self): return ""
+        def setText(self, *args): pass
+    class QSpinBox(QWidget):
+        valueChanged = pyqtSignal()
+        def value(self): return 0
+        def setValue(self, *args): pass
+    class QDoubleSpinBox(QWidget):
+        valueChanged = pyqtSignal()
+        def value(self): return 0.0
+        def setValue(self, *args): pass
+
+    # Layout classes
+    class QVBoxLayout:
+        def __init__(self, *args, **kwargs): pass
+        def addWidget(self, *args): pass
+        def addLayout(self, *args): pass
+    class QHBoxLayout(QVBoxLayout): pass
+    class QGridLayout(QVBoxLayout):
+        def addWidget(self, *args): pass
+
+    # Table classes
+    class QTableWidget(QWidget):
+        def setRowCount(self, *args): pass
+        def setColumnCount(self, *args): pass
+        def setItem(self, *args): pass
+        def setHorizontalHeaderLabels(self, *args): pass
+        def horizontalHeader(self): return QHeaderView()
+        def rowCount(self): return 0
+    class QTableWidgetItem:
+        def __init__(self, *args, **kwargs): pass
+        def setForeground(self, *args): pass
+        def setBackground(self, *args): pass
+    class QHeaderView:
+        def setSectionResizeMode(self, *args): pass
+        def setStretchLastSection(self, *args): pass
+        Stretch = 0
+
+    # Tab and other widgets
+    class QTabWidget(QWidget):
+        def addTab(self, *args): pass
+        def currentIndex(self): return 0
+    class QWebEngineView(QWidget):
+        def setHtml(self, *args): pass
+
+    # Application and MessageBox
+    class QApplication:
+        def __init__(self, *args, **kwargs): pass
+        def exec_(self): return 0
+        def quit(self): pass
+        @staticmethod
+        def instance(): return None
+    class QMessageBox:
+        @staticmethod
+        def information(*args): pass
+        @staticmethod
+        def warning(*args): pass
+        @staticmethod
+        def critical(*args): pass
+
     HAS_GUI = False
 
 import plotly.graph_objects as go
