@@ -6449,7 +6449,7 @@ def run_cli_backtest(
             limit = min(limit, candles)
 
             # Fetch data using the existing TradingEngine method
-            df = TradingEngine.fetch_historical_data_paginated(sym, tf, limit)
+            df = TradingEngine.get_historical_data_pagination(sym, tf, total_candles=limit)
             if df is not None and len(df) > 300:
                 # Calculate indicators
                 df = TradingEngine.calculate_indicators(df)
