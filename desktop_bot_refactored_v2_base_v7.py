@@ -172,15 +172,14 @@ TRADING_CONFIG = {
 
 # Minimum E[R] (expected R-multiple) threshold by timeframe
 # Configs with lower E[R] are considered "barely positive" and rejected
-# Increased thresholds for problematic timeframes to demand stronger edge
 MIN_EXPECTANCY_R_MULTIPLE = {
-    "1m": 0.12,   # Very noisy - need strong edge (was 0.10)
-    "5m": 0.07,   # Noisy - need decent edge per trade (was 0.06)
-    "15m": 0.06,  # Increased from 0.05 - 15m generated big losses
-    "30m": 0.05,  # Increased from 0.04
-    "1h": 0.05,   # Cleaner signals - increased from 0.04
-    "4h": 0.04,   # Low noise - increased from 0.03
-    "1d": 0.03,   # Very clean - increased from 0.02
+    "1m": 0.10,   # Very noisy - need strong edge
+    "5m": 0.06,   # Noisy - need decent edge per trade
+    "15m": 0.05,  # Moderate noise
+    "30m": 0.04,
+    "1h": 0.04,   # Cleaner signals
+    "4h": 0.03,   # Low noise
+    "1d": 0.02,   # Very clean
 }
 
 # DEPRECATED: Eski $/trade eşikleri (geriye uyumluluk için korunuyor)
@@ -197,15 +196,14 @@ MIN_EXPECTANCY_PER_TRADE = {
 
 # Minimum optimizer score threshold by timeframe
 # Higher timeframes have lower bars because fewer trades naturally
-# Increased thresholds for problematic timeframes to filter weak edges
 MIN_SCORE_THRESHOLD = {
     "1m": 80.0,
-    "5m": 45.0,   # High bar for noisy timeframe (was 40)
-    "15m": 20.0,  # Increased from 15.0 - 15m was biggest loser
-    "30m": 12.0,  # Increased from 10.0
-    "1h": 10.0,   # Increased from 8.0
-    "4h": 6.0,    # Increased from 5.0
-    "1d": 4.0,    # Increased from 3.0
+    "5m": 40.0,   # High bar for noisy timeframe
+    "15m": 15.0,  # Medium bar
+    "30m": 10.0,
+    "1h": 8.0,    # Lower bar
+    "4h": 5.0,    # Lower bar
+    "1d": 3.0,
 }
 
 # Confidence-based risk multiplier
@@ -216,18 +214,13 @@ CONFIDENCE_RISK_MULTIPLIER = {
     "low": 0.0,     # No trades (effectively disabled)
 }
 
-# Timeframe-based risk multiplier
-# Lower timeframes are noisier and have higher variance
-# Reduce position size for problematic timeframes
-TIMEFRAME_RISK_MULTIPLIER = {
-    "1m": 0.50,   # Very noisy - half position size
-    "5m": 0.75,   # Noisy - 75% position size
-    "15m": 0.75,  # 15m was biggest loser - reduce risk
-    "30m": 0.90,  # Moderate
-    "1h": 1.0,    # Full size
-    "4h": 1.0,    # Full size
-    "12h": 1.0,   # Full size
-    "1d": 1.0,    # Full size
+# Post-portfolio pruning: Streams that consistently lose money
+# These are auto-populated after first backtest run based on net_pnl < 0
+# Format: {(symbol, timeframe): True}
+POST_PORTFOLIO_BLACKLIST = {
+    # Will be populated dynamically, but manual overrides can be added here:
+    # ("HYPEUSDT", "15m"): True,
+    # ("BNBUSDT", "15m"): True,
 }
 
 # ==========================================
@@ -841,9 +834,21 @@ def _get_min_trades_for_timeframe(tf: str, num_candles: int = 20000) -> int:
 
 WALK_FORWARD_CONFIG = {
     "train_ratio": 0.70,        # %70 train, %30 test
-    "min_test_trades": 3,       # Test için minimum trade sayısı
-    "min_overfit_ratio": 0.65,  # Test E[R] / Train E[R] minimum oranı (was 0.50 - too loose)
+    "min_test_trades": 3,       # Test için minimum trade sayısı (base)
+    "min_overfit_ratio": 0.50,  # Test E[R] / Train E[R] minimum oranı
     "enabled": True,            # Walk-forward testi etkinleştir
+}
+
+# Timeframe-based minimum OOS trades (quant trader recommendation)
+# Lower timeframes need more OOS trades to be statistically significant
+MIN_OOS_TRADES_BY_TF = {
+    "1m": 15,
+    "5m": 10,
+    "15m": 8,   # Higher bar for noisy 15m
+    "30m": 6,
+    "1h": 5,
+    "4h": 3,
+    "1d": 2,
 }
 
 
@@ -936,7 +941,9 @@ def _check_overfit(train_expected_r: float, oos_result: dict, tf: str) -> tuple:
     if oos_result is None:
         return False, 1.0, "no_oos_data"
 
-    min_test_trades = WALK_FORWARD_CONFIG.get("min_test_trades", 3)
+    # Use timeframe-specific min OOS trades (quant trader recommendation)
+    # Lower timeframes need more OOS trades to be statistically significant
+    min_test_trades = MIN_OOS_TRADES_BY_TF.get(tf, WALK_FORWARD_CONFIG.get("min_test_trades", 3))
     min_overfit_ratio = WALK_FORWARD_CONFIG.get("min_overfit_ratio", 0.50)
 
     oos_trades = oos_result.get('oos_trades', 0)
@@ -1068,17 +1075,14 @@ def _compute_optimizer_score(net_pnl: float, trades: int, trade_pnls: list,
         consistency_factor = 0.5  # Single trade = very unreliable
         dd_penalty = 0.5  # Heavy penalty for single trade
 
-    # Win rate penalty/bonus (stricter thresholds for quality control)
+    # Win rate bonus (slight preference for higher win rates at equal PnL)
     if trade_pnls:
         win_rate = sum(1 for p in trade_pnls if p > 0) / len(trade_pnls)
-        # HARD REJECT: Win rate too low = unreliable, high variance system
-        if win_rate < 0.28:
-            return -float("inf")  # Reject configs with <28% win rate
-        # Penalize low win rates even with good RR
-        elif win_rate < 0.32:
-            win_rate_factor = 0.65  # Heavy penalty (was 0.7 at 0.25)
-        elif win_rate < 0.40:
-            win_rate_factor = 0.80  # Medium penalty (was 0.85 at 0.35)
+        # Penalize very low win rates even with good RR
+        if win_rate < 0.25:
+            win_rate_factor = 0.7  # Too low WR = high variance
+        elif win_rate < 0.35:
+            win_rate_factor = 0.85
         else:
             win_rate_factor = 0.9 + win_rate * 0.2  # 0.9 to 1.1
     else:
@@ -1675,8 +1679,41 @@ class TradeManager:
         del self.cooldowns[k]
         return False
 
+    def _calculate_equity(self, current_prices: dict = None) -> float:
+        """Calculate total equity = wallet_balance + locked_margin + unrealized_pnl.
+
+        This is the proper base for risk calculations (quant trader recommendation).
+        Using wallet_balance alone causes risk % to inflate as margin is locked.
+        """
+        equity = self.wallet_balance + self.locked_margin
+
+        # Add unrealized PnL if current prices available
+        if current_prices and self.open_trades:
+            for trade in self.open_trades:
+                sym = trade.get("symbol")
+                if sym not in current_prices:
+                    continue
+                current_price = current_prices[sym]
+                entry = float(trade.get("entry", 0))
+                size = float(trade.get("size", 0))
+                trade_type = trade.get("type")
+                if trade_type == "LONG":
+                    unrealized = (current_price - entry) * size
+                else:
+                    unrealized = (entry - current_price) * size
+                equity += unrealized
+
+        return equity
+
     def _calculate_portfolio_risk_pct(self, wallet_balance: float) -> float:
-        if wallet_balance <= 0:
+        """Calculate portfolio risk as percentage of EQUITY (not wallet_balance).
+
+        Fix: Using equity instead of wallet_balance prevents risk % from
+        inflating as margin is locked (quant trader recommendation).
+        """
+        # Use equity for proper risk calculation
+        equity = self._calculate_equity()
+        if equity <= 0:
             return 0.0
 
         total_open_risk = 0.0
@@ -1690,7 +1727,7 @@ class TradeManager:
             open_risk_amount = sl_fraction * size * entry_price
             total_open_risk += open_risk_amount
 
-        return total_open_risk / wallet_balance
+        return total_open_risk / equity
 
     def open_trade(self, signal_data):
         with self.lock:
@@ -1713,10 +1750,7 @@ class TradeManager:
 
             # Confidence-based risk multiplier: reduce position size for medium confidence
             confidence_level = config_snapshot.get("_confidence", "high")
-            confidence_risk_mult = CONFIDENCE_RISK_MULTIPLIER.get(confidence_level, 1.0)
-            # Timeframe-based risk multiplier: reduce position size for noisy timeframes
-            tf_risk_mult = TIMEFRAME_RISK_MULTIPLIER.get(tf, 1.0)
-            risk_multiplier = confidence_risk_mult * tf_risk_mult
+            risk_multiplier = CONFIDENCE_RISK_MULTIPLIER.get(confidence_level, 1.0)
             if risk_multiplier <= 0:
                 print(f"⚠️ [{sym}-{tf}] Düşük güven seviyesi, işlem açılmadı.")
                 return
@@ -1777,6 +1811,9 @@ class TradeManager:
                 position_notional = max_notional
                 position_size = position_notional / real_entry
                 required_margin = position_notional / leverage
+                # CRITICAL FIX: Recalculate risk_amount after scale-down
+                # Otherwise R-multiple and optimizer scoring will be wrong
+                risk_amount = sl_fraction * position_notional
                 print(
                     f"⚠️ Gerekli marjin bakiyeyi aşıyor, pozisyon {scale_factor:.2f} oranında düşürüldü."
                 )
@@ -1795,7 +1832,8 @@ class TradeManager:
                 "entry": real_entry,
                 "tp": float(signal_data["tp"]), "sl": sl_price,
                 "size": position_size, "margin": required_margin,
-                "notional": position_notional, "events": [],
+                "notional": position_notional, "risk_amount": risk_amount,  # For R-multiple calculation
+                "events": [],
                 "status": "OPEN", "pnl": 0.0,
                 "breakeven": False, "trailing_active": False, "partial_taken": False, "partial_price": None,
                 "has_cash": True, "close_time": "", "close_price": "",
@@ -2595,9 +2633,9 @@ class TradingEngine:
         adx_res = ta.adx(df["high"], df["low"], df["close"], length=14)
         df["adx"] = adx_res["ADX_14"] if adx_res is not None and "ADX_14" in adx_res.columns else 0.0
 
-        # PBEMA cloud - EMA 150 for faster mean reversion response (was 200 - too slow)
-        df["pb_ema_top"] = ta.ema(df["high"], length=150)
-        df["pb_ema_bot"] = ta.ema(df["close"], length=150)
+        # PBEMA cloud
+        df["pb_ema_top"] = ta.ema(df["high"], length=200)
+        df["pb_ema_bot"] = ta.ema(df["close"], length=200)
 
         # Slope (şimdilik sadece bilgi amaçlı)
         df["slope_top"] = (df["pb_ema_top"].diff(5) / df["pb_ema_top"]) * 1000
@@ -3013,7 +3051,7 @@ class TradingEngine:
             pbema_frontrun_margin: float = 0.002,
             tp_min_dist_ratio: float = 0.0015,
             tp_max_dist_ratio: float = 0.04,
-            adx_min: float = 12.0,  # Increased from 8.0 - PBEMA needs more volatility
+            adx_min: float = 8.0,
             return_debug: bool = False,
     ) -> Tuple:
         """
@@ -3091,23 +3129,6 @@ class TradingEngine:
         if not adx_ok:
             return _ret(None, None, None, None, f"ADX Too Low ({adx_val:.1f})")
 
-        # ================= WICK REJECTION QUALITY =================
-        # Require meaningful wick for quality rejection signal
-        candle_range = high - low
-        if candle_range > 0:
-            upper_wick = high - max(open_, close)
-            lower_wick = min(open_, close) - low
-            upper_wick_ratio = upper_wick / candle_range
-            lower_wick_ratio = lower_wick / candle_range
-        else:
-            upper_wick_ratio = 0.0
-            lower_wick_ratio = 0.0
-
-        # Minimum wick ratio for PBEMA rejection (0.12 = 12% of candle is wick)
-        min_wick_ratio_pbema = 0.12
-        debug_info["upper_wick_ratio"] = upper_wick_ratio
-        debug_info["lower_wick_ratio"] = lower_wick_ratio
-
         # Calculate distances to PBEMA cloud
         dist_to_pb_top = abs(high - pb_top) / pb_top if pb_top > 0 else 1.0
         dist_to_pb_bot = abs(low - pb_bot) / pb_bot if pb_bot > 0 else 1.0
@@ -3145,9 +3166,7 @@ class TradingEngine:
         if is_short:
             rejection_wick_short = (high >= pb_top * (1 - pbema_approach_tolerance)) and (close < pb_top)
             candle_body_below = max(open_, close) < pb_top
-            # Require meaningful upper wick for quality SHORT rejection
-            wick_quality_short = upper_wick_ratio >= min_wick_ratio_pbema
-            is_short = rejection_wick_short and candle_body_below and wick_quality_short
+            is_short = rejection_wick_short and candle_body_below
 
         # RSI filter for SHORT - not too oversold
         short_rsi_limit = 100.0 - (rsi_limit + 10.0)
@@ -3215,9 +3234,7 @@ class TradingEngine:
         if is_long:
             rejection_wick_long = (low <= pb_bot * (1 + pbema_approach_tolerance)) and (close > pb_bot)
             candle_body_above = min(open_, close) > pb_bot
-            # Require meaningful lower wick for quality LONG rejection
-            wick_quality_long = lower_wick_ratio >= min_wick_ratio_pbema
-            is_long = rejection_wick_long and candle_body_above and wick_quality_long
+            is_long = rejection_wick_long and candle_body_above
 
         # RSI filter for LONG - not too overbought
         long_rsi_limit = rsi_limit + 10.0
@@ -5558,8 +5575,27 @@ class SimTradeManager:
         del self.cooldowns[k]
         return False
 
+    def _calculate_equity(self, current_prices: dict = None) -> float:
+        """Calculate total equity = wallet_balance + locked_margin + unrealized_pnl.
+
+        This is the proper base for risk calculations (quant trader recommendation).
+        Using wallet_balance alone causes risk % to inflate as margin is locked.
+        """
+        equity = self.wallet_balance + self.locked_margin
+
+        # Note: For SimTradeManager, we don't have current prices readily available
+        # during backtest, so we just use wallet_balance + locked_margin
+        return equity
+
     def _calculate_portfolio_risk_pct(self, wallet_balance: float) -> float:
-        if wallet_balance <= 0:
+        """Calculate portfolio risk as percentage of EQUITY (not wallet_balance).
+
+        Fix: Using equity instead of wallet_balance prevents risk % from
+        inflating as margin is locked (quant trader recommendation).
+        """
+        # Use equity for proper risk calculation
+        equity = self._calculate_equity()
+        if equity <= 0:
             return 0.0
 
         total_open_risk = 0.0
@@ -5573,7 +5609,7 @@ class SimTradeManager:
             open_risk_amount = sl_fraction * size * entry_price
             total_open_risk += open_risk_amount
 
-        return total_open_risk / wallet_balance
+        return total_open_risk / equity
 
     def _next_id(self):
         tid = self._id
@@ -5609,10 +5645,7 @@ class SimTradeManager:
 
         # Confidence-based risk multiplier: reduce position size for medium confidence
         confidence_level = config_snapshot.get("_confidence", "high")
-        confidence_risk_mult = CONFIDENCE_RISK_MULTIPLIER.get(confidence_level, 1.0)
-        # Timeframe-based risk multiplier: reduce position size for noisy timeframes
-        tf_risk_mult = TIMEFRAME_RISK_MULTIPLIER.get(tf, 1.0)
-        risk_multiplier = confidence_risk_mult * tf_risk_mult
+        risk_multiplier = CONFIDENCE_RISK_MULTIPLIER.get(confidence_level, 1.0)
         if risk_multiplier <= 0:
             # Low confidence = no trades
             return False
@@ -5662,6 +5695,9 @@ class SimTradeManager:
             position_notional = max_notional
             position_size = position_notional / real_entry
             required_margin = position_notional / leverage
+            # CRITICAL FIX: Recalculate risk_amount after scale-down
+            # Otherwise R-multiple and optimizer scoring will be wrong
+            risk_amount = sl_fraction * position_notional
 
         open_time_val = trade_data.get("open_time_utc") or datetime.utcnow()
         # numpy.datetime64, pd.Timestamp veya datetime olabilir - hepsini datetime'a çevir
