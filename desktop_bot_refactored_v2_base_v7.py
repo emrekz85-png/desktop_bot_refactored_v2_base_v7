@@ -6295,19 +6295,29 @@ def run_portfolio_backtest(
         trades_df.to_csv(out_trades_csv, index=False)
 
     summary_rows = []
+    strategy_summary_rows = []  # Strateji bazlı özet için
     if not trades_df.empty:
         # Aynı id'ye ait tüm bacakları (partial + final) toplayıp
         # trade başına net sonucu hesapla
         # Walk-Forward aktifse, sadece OOS dönemindeki trade'leri say
         grouped_by_trade = {}
         grouped_by_trade_all = {}  # Tüm trade'ler (karşılaştırma için)
+        grouped_by_strategy = {}  # Strateji bazlı gruplandırma
 
         for (sym, tf, tid), g in trades_df.groupby(["symbol", "timeframe", "id"]):
             net = g["pnl"].astype(float).sum()
             key = (sym, tf)
 
+            # Setup/strategy bilgisini al (örn: "Base,R:2.5" -> "Base" veya "PBEMA_Reaction,R:2.5" -> "PBEMA_Reaction")
+            setup_raw = g["setup"].iloc[0] if "setup" in g.columns else "Unknown"
+            strategy = setup_raw.split(",")[0] if "," in str(setup_raw) else str(setup_raw)
+
             # Tüm trade'leri kaydet (karşılaştırma için)
             grouped_by_trade_all.setdefault(key, []).append(net)
+
+            # Strateji bazlı gruplandırma
+            strategy_key = (sym, tf, strategy)
+            grouped_by_strategy.setdefault(strategy_key, []).append(net)
 
             # OOS filtreleme: Eğer bu stream için OOS start time varsa, sadece OOS trade'leri say
             opt_cfg = best_configs.get((sym, tf), {})
@@ -6356,6 +6366,23 @@ def run_portfolio_backtest(
                 }
             )
 
+        # Strateji bazlı özet oluştur
+        for (sym, tf, strategy), pnl_list in grouped_by_strategy.items():
+            total = len(pnl_list)
+            wins = sum(1 for x in pnl_list if x > 0)
+            pnl = sum(pnl_list)
+            wr = (wins / total * 100.0) if total else 0.0
+            strategy_summary_rows.append(
+                {
+                    "strategy": strategy,
+                    "symbol": sym,
+                    "timeframe": tf,
+                    "trades": total,
+                    "win_rate_pct": wr,
+                    "net_pnl": pnl,
+                }
+            )
+
     # Eksik kalan sembol/zaman dilimlerini 0 trade ile rapora ekle
     existing_pairs = {(row["symbol"], row["timeframe"]) for row in summary_rows}
     for sym, tf in requested_pairs:
@@ -6379,6 +6406,16 @@ def run_portfolio_backtest(
     if not summary_df.empty:
         summary_df.to_csv(out_summary_csv, index=False)
 
+    # Strateji bazlı özet DataFrame oluştur ve kaydet
+    strategy_summary_df = (
+        pd.DataFrame(strategy_summary_rows).sort_values(["strategy", "symbol", "timeframe"])
+        if strategy_summary_rows
+        else pd.DataFrame()
+    )
+    strategy_summary_csv = out_summary_csv.replace(".csv", "_by_strategy.csv")
+    if not strategy_summary_df.empty:
+        strategy_summary_df.to_csv(strategy_summary_csv, index=False)
+
     log("Backtest bitti.", category="summary")
 
     # OOS filtreleme yapıldıysa bilgi ver
@@ -6393,6 +6430,29 @@ def run_portfolio_backtest(
     if not summary_df.empty:
         log(summary_df.to_string(index=False), category="summary")
 
+    # Strateji bazlı özet tablosu yazdır
+    if not strategy_summary_df.empty:
+        log("\n" + "=" * 60, category="summary")
+        log("📊 STRATEJİ BAZLI ÖZET (Keltner Bounce vs PBEMA Reaction)", category="summary")
+        log("=" * 60, category="summary")
+        log(strategy_summary_df.to_string(index=False), category="summary")
+
+        # Strateji toplamları
+        log("\n📈 STRATEJİ TOPLAMLARI:", category="summary")
+        for strategy in strategy_summary_df["strategy"].unique():
+            strat_data = strategy_summary_df[strategy_summary_df["strategy"] == strategy]
+            total_trades = strat_data["trades"].sum()
+            total_pnl = strat_data["net_pnl"].sum()
+            avg_wr = strat_data["win_rate_pct"].mean()
+            streams_count = len(strat_data)
+            pnl_sign = "+" if total_pnl >= 0 else ""
+            log(
+                f"  [{strategy}] Streams: {streams_count}, Trades: {total_trades}, "
+                f"Net PnL: {pnl_sign}${total_pnl:.2f}, Avg WR: {avg_wr:.1f}%",
+                category="summary"
+            )
+        log("=" * 60 + "\n", category="summary")
+
     if best_configs:
         # Filter out disabled configs for summary
         active_configs = {k: v for k, v in best_configs.items() if not v.get("disabled", False)}
@@ -6404,8 +6464,10 @@ def run_portfolio_backtest(
                 # skip_optimization modunda _net_pnl/_trades olmayabilir
                 net_pnl = cfg.get('_net_pnl', 0)
                 trades = cfg.get('_trades', 0)
+                strategy_mode = cfg.get('strategy_mode', 'keltner_bounce')
+                strategy_tag = "KB" if strategy_mode == "keltner_bounce" else "PR"  # KB=Keltner Bounce, PR=PBEMA Reaction
                 log(
-                    f"  - {sym}-{tf}: RR={cfg.get('rr', '-')}, RSI={cfg.get('rsi', '-')}, Slope={cfg.get('slope', '-')}, "
+                    f"  - {sym}-{tf} [{strategy_tag}]: RR={cfg.get('rr', '-')}, RSI={cfg.get('rsi', '-')}, "
                     f"AT={'Açık' if cfg.get('at_active') else 'Kapalı'}, Trailing={cfg.get('use_trailing', False)} | "
                     f"NetPnL={net_pnl:.2f}, Trades={trades}",
                     category="summary",
