@@ -6588,28 +6588,48 @@ def run_cli_backtest(
     log("\n📊 Veri indiriliyor...")
     streams = {}
     pairs = [(s, tf) for s in symbols for tf in timeframes]
+    fetch_errors = []
 
-    # Use tqdm if available for progress bar
-    iterator = tqdm(pairs, desc="Veri indirme") if HAS_TQDM else pairs
-
-    for sym, tf in iterator:
+    for sym, tf in pairs:
         try:
             limit = BACKTEST_CANDLE_LIMITS.get(tf, candles)
             limit = min(limit, candles)
 
+            log(f"   📥 {sym}-{tf}: {limit} mum indiriliyor...")
+
             # Fetch data using the existing TradingEngine method
             df = TradingEngine.get_historical_data_pagination(sym, tf, total_candles=limit)
-            if df is not None and len(df) > 300:
-                # Calculate indicators
-                df = TradingEngine.calculate_indicators(df)
-                streams[(sym, tf)] = df
-                if not HAS_TQDM:
-                    log(f"   ✓ {sym}-{tf}: {len(df)} mum")
-            else:
-                if not HAS_TQDM:
-                    log(f"   ✗ {sym}-{tf}: Yetersiz veri")
+
+            if df is None:
+                err_msg = f"{sym}-{tf}: API None döndü"
+                fetch_errors.append(err_msg)
+                log(f"   ✗ {err_msg}")
+                continue
+
+            if isinstance(df, pd.DataFrame) and df.empty:
+                err_msg = f"{sym}-{tf}: Boş DataFrame"
+                fetch_errors.append(err_msg)
+                log(f"   ✗ {err_msg}")
+                continue
+
+            if len(df) <= 300:
+                err_msg = f"{sym}-{tf}: Yetersiz veri ({len(df)} mum < 300)"
+                fetch_errors.append(err_msg)
+                log(f"   ✗ {err_msg}")
+                continue
+
+            # Calculate indicators
+            df = TradingEngine.calculate_indicators(df)
+            streams[(sym, tf)] = df
+            log(f"   ✓ {sym}-{tf}: {len(df)} mum hazır")
+
         except Exception as e:
-            log(f"   ✗ {sym}-{tf}: Hata - {e}")
+            import traceback
+            err_msg = f"{sym}-{tf}: {type(e).__name__} - {e}"
+            fetch_errors.append(err_msg)
+            log(f"   ✗ {err_msg}")
+            if verbose:
+                log(f"      Traceback: {traceback.format_exc()[:200]}")
 
     if not streams:
         log("❌ Hiç veri indirilemedi!")
