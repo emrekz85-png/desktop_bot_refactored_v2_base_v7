@@ -657,6 +657,41 @@ def _generate_candidate_configs():
     return candidates + trailing_extras
 
 
+def _generate_quick_candidate_configs():
+    """Create a minimal config grid for quick testing (~24 configs instead of ~120).
+
+    Used when quick_mode=True for faster backtest iterations.
+    Covers key combinations without exhaustive search.
+    """
+    # Sadece en önemli RR ve RSI değerlerini kullan
+    rr_vals = [1.2, 1.8, 2.4]  # 3 değer (vs 5)
+    rsi_vals = [35, 55]        # 2 değer (vs 5)
+    at_vals = [False, True]    # 2 değer
+    dyn_tp_vals = [True]       # Sadece 1 değer (dinamik TP genelde daha iyi)
+
+    candidates = []
+    for rr, rsi, at_active, dyn_tp in itertools.product(
+        rr_vals, rsi_vals, at_vals, dyn_tp_vals
+    ):
+        candidates.append(
+            {
+                "rr": round(float(rr), 2),
+                "rsi": int(rsi),
+                "slope": 0.5,
+                "at_active": bool(at_active),
+                "use_trailing": False,
+                "use_dynamic_pbema_tp": bool(dyn_tp),
+            }
+        )
+
+    # 1 trailing config ekle
+    trailing_cfg = dict(candidates[0])
+    trailing_cfg["use_trailing"] = True
+    candidates.append(trailing_cfg)
+
+    return candidates  # ~13 config (vs ~120)
+
+
 def _get_min_trades_for_timeframe(tf: str, num_candles: int = 20000) -> int:
     """Return minimum trade count for statistical significance based on timeframe AND data size.
 
@@ -1070,6 +1105,7 @@ def _optimize_backtest_configs(
     progress_callback=None,
     log_to_stdout: bool = True,
     use_walk_forward: bool = None,  # None = WALK_FORWARD_CONFIG["enabled"] kullan
+    quick_mode: bool = False,  # True = azaltılmış config grid (daha hızlı)
 ):
     """Brute-force search to find the best config (by net pnl) per symbol/timeframe.
 
@@ -1078,6 +1114,10 @@ def _optimize_backtest_configs(
     - Optimizes on train data
     - Validates best config on test data
     - Rejects overfitted configs (OOS E[R] < 50% of train E[R])
+
+    Quick mode (quick_mode=True):
+    - Uses reduced config grid (24 instead of 120 configs)
+    - ~5x faster optimization
     """
 
     def log(msg: str):
@@ -1089,7 +1129,14 @@ def _optimize_backtest_configs(
     # Walk-forward ayarı
     walk_forward_enabled = use_walk_forward if use_walk_forward is not None else WALK_FORWARD_CONFIG.get("enabled", True)
 
-    candidates = _generate_candidate_configs()
+    # Quick mode: Azaltılmış config grid kullan
+    if quick_mode:
+        candidates = _generate_quick_candidate_configs()
+        mode_str = "HIZLI"
+    else:
+        candidates = _generate_candidate_configs()
+        mode_str = "TAM"
+
     total_jobs = len([1 for pair in requested_pairs if pair in streams]) * len(candidates)
     if total_jobs == 0:
         return {}
@@ -1100,9 +1147,10 @@ def _optimize_backtest_configs(
 
     max_workers = max(1, (os.cpu_count() or 1) - 1)
     wf_status = "Açık" if walk_forward_enabled else "Kapalı"
+    quick_icon = "⚡" if quick_mode else ""
     log(
-        f"[OPT] {len(candidates)} farklı ayar taranacak (her zaman dilimi için). "
-        f"Paralel iş parçacığı: {max_workers}, Walk-Forward: {wf_status}"
+        f"[OPT]{quick_icon} {len(candidates)} farklı ayar taranacak ({mode_str}). "
+        f"Paralel: {max_workers}, Walk-Forward: {wf_status}"
     )
 
     for sym, tf in requested_pairs:
@@ -3864,11 +3912,13 @@ class BacktestWorker(QThread):
     log_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(dict)
 
-    def __init__(self, symbols, timeframes, candles):
+    def __init__(self, symbols, timeframes, candles, skip_optimization=False, quick_mode=False):
         super().__init__()
         self.symbols = symbols
         self.timeframes = timeframes
         self.candles = candles
+        self.skip_optimization = skip_optimization
+        self.quick_mode = quick_mode
         self._last_log_time = 0.0
         self._pending_log = None
 
@@ -3900,6 +3950,8 @@ class BacktestWorker(QThread):
                 progress_callback=self._throttled_log,
                 draw_trades=True,
                 max_draw_trades=30,
+                skip_optimization=self.skip_optimization,
+                quick_mode=self.quick_mode,
             ) or {}
             # Ensure the last status arrives even if throttled
             self._flush_pending_log()
@@ -4222,6 +4274,17 @@ class MainWindow(QMainWindow):
         self.backtest_candles.setRange(500, 100000);  # Maksimum limit kaldırıldı
         self.backtest_candles.setValue(3000);
         bt_cfg.addWidget(self.backtest_candles)
+
+        # Hız ayarları
+        speed_layout = QHBoxLayout()
+        self.chk_skip_optimization = QCheckBox("⚡ Optimizer Atla (Kayıtlı Config)")
+        self.chk_skip_optimization.setToolTip("Optimizer çalıştırmadan, önceden kaydedilmiş config'leri kullanır. ÇOK HIZLI!")
+        speed_layout.addWidget(self.chk_skip_optimization)
+        self.chk_quick_mode = QCheckBox("🚀 Hızlı Mod (13 config)")
+        self.chk_quick_mode.setToolTip("Azaltılmış config grid kullanır (120 yerine 13). ~5x daha hızlı.")
+        speed_layout.addWidget(self.chk_quick_mode)
+        bt_cfg.addLayout(speed_layout)
+
         self.btn_run_backtest = QPushButton("🧪 Backtest Çalıştır");
         self.btn_run_backtest.clicked.connect(self.start_backtest);
         bt_cfg.addWidget(self.btn_run_backtest)
@@ -4754,7 +4817,15 @@ class MainWindow(QMainWindow):
         candles = self.backtest_candles.value()
         selected_tfs = self.get_selected_timeframes(getattr(self, "backtest_tf_checks", {}))
 
-        self.backtest_worker = BacktestWorker(SYMBOLS, selected_tfs, candles)
+        # Hız ayarlarını oku
+        skip_opt = self.chk_skip_optimization.isChecked()
+        quick = self.chk_quick_mode.isChecked()
+        if skip_opt:
+            self.backtest_logs.append("⚡ Optimizer atlanıyor (kayıtlı config kullanılacak)")
+        elif quick:
+            self.backtest_logs.append("🚀 Hızlı mod aktif (13 config)")
+
+        self.backtest_worker = BacktestWorker(SYMBOLS, selected_tfs, candles, skip_opt, quick)
         self.backtest_worker.log_signal.connect(self.append_backtest_log)
         self.backtest_worker.finished_signal.connect(self.on_backtest_finished)
         self.btn_run_backtest.setEnabled(False)
@@ -5464,6 +5535,8 @@ def run_portfolio_backtest(
     progress_callback=None,
     draw_trades: bool = True,
     max_draw_trades: Optional[int] = None,
+    skip_optimization: bool = False,  # True = cached config kullan, optimizer atla (HIZLI)
+    quick_mode: bool = False,  # True = azaltılmış config grid (daha hızlı optimizer)
 ):
     allowed_log_categories = {"progress", "potential", "summary"}
     strategy_sig = _strategy_signature()
@@ -5535,13 +5608,36 @@ def run_portfolio_backtest(
         return
 
     # --- 1) Her sembol/zaman dilimi için en iyi ayarı tara ---
-    opt_streams = build_streams(target_candles=1500, write_prices=False)
-    best_configs = _optimize_backtest_configs(
-        opt_streams,
-        requested_pairs,
-        progress_callback=progress_callback,
-        log_to_stdout=False,
-    )
+    if skip_optimization:
+        # HIZLI MOD: Kayıtlı config'leri kullan, optimizer'ı atla
+        log("⚡ [HIZLI MOD] Optimizer atlanıyor, kayıtlı config'ler kullanılıyor...", category="summary")
+        best_configs = {}
+        if os.path.exists(BEST_CONFIGS_FILE):
+            try:
+                with open(BEST_CONFIGS_FILE, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                # JSON formatından tuple key formatına dönüştür
+                for sym, tf_dict in raw.items():
+                    if isinstance(tf_dict, dict):
+                        for tf, cfg in tf_dict.items():
+                            if isinstance(cfg, dict):
+                                best_configs[(sym, tf)] = cfg
+                log(f"   ✓ {len(best_configs)} config yüklendi: {BEST_CONFIGS_FILE}", category="summary")
+            except Exception as e:
+                log(f"   ⚠️ Config yükleme hatası: {e}", category="summary")
+        if not best_configs:
+            log("   ⚠️ Kayıtlı config bulunamadı, optimizer çalıştırılıyor...", category="summary")
+            skip_optimization = False  # Fallback to optimizer
+
+    if not skip_optimization:
+        opt_streams = build_streams(target_candles=1500, write_prices=False)
+        best_configs = _optimize_backtest_configs(
+            opt_streams,
+            requested_pairs,
+            progress_callback=progress_callback,
+            log_to_stdout=False,
+            quick_mode=quick_mode,  # Hızlı mod için azaltılmış config grid
+        )
 
     # --- CONFIG SOURCE LOGGING (for debugging optimizer vs backtest divergence) ---
     enabled_streams = []
@@ -5821,10 +5917,17 @@ def run_portfolio_backtest(
                 # Trade'in açılış zamanını al
                 trade_time = g["timestamp"].iloc[0] if "timestamp" in g.columns else None
                 if trade_time is not None:
-                    # Trade OOS döneminde mi?
-                    if trade_time >= oos_start:
+                    # Timestamp tiplerini eşitle (string vs Timestamp uyumsuzluğunu çöz)
+                    try:
+                        trade_time_ts = pd.to_datetime(trade_time)
+                        oos_start_ts = pd.to_datetime(oos_start)
+                        # Trade OOS döneminde mi?
+                        if trade_time_ts >= oos_start_ts:
+                            grouped_by_trade.setdefault(key, []).append(net)
+                        # OOS öncesi trade'ler atlanır (curve-fitted dönem)
+                    except Exception:
+                        # Dönüştürme başarısız olursa tüm trade'leri say
                         grouped_by_trade.setdefault(key, []).append(net)
-                    # OOS öncesi trade'ler atlanır (curve-fitted dönem)
                 else:
                     # Timestamp yoksa tüm trade'leri say (fallback)
                     grouped_by_trade.setdefault(key, []).append(net)
