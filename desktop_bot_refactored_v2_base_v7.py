@@ -5581,6 +5581,8 @@ def run_portfolio_backtest(
         result = {}
         active_limit_map = limit_map if limit_map else BACKTEST_CANDLE_LIMITS
 
+        # Paralel veri çekme için iş listesi oluştur
+        jobs = []
         for sym in symbols:
             for tf in timeframes:
                 tf_candle_limit = active_limit_map.get(tf, target_candles)
@@ -5588,18 +5590,40 @@ def run_portfolio_backtest(
                     tf_candle_limit = min(target_candles, tf_candle_limit)
                 else:
                     tf_candle_limit = target_candles
+                jobs.append((sym, tf, tf_candle_limit))
 
-                df = TradingEngine.get_historical_data_pagination(sym, tf, total_candles=tf_candle_limit)
+        total_jobs = len(jobs)
+        log(f"📥 {total_jobs} stream için veri indiriliyor...", category="summary")
+
+        def fetch_one(job):
+            sym, tf, candle_limit = job
+            try:
+                df = TradingEngine.get_historical_data_pagination(sym, tf, total_candles=candle_limit)
                 if df is None or df.empty or len(df) < 400:
-                    continue
-
+                    return None
                 df = TradingEngine.calculate_indicators(df)
-
                 if write_prices:
                     df.to_csv(f"{sym}_{tf}_prices.csv", index=False)
+                return (sym, tf, df.reset_index(drop=True))
+            except Exception as e:
+                return None
 
-                result[(sym, tf)] = df.reset_index(drop=True)
+        # Paralel veri çekme (max 5 thread - API rate limit'e dikkat)
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        completed = 0
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(fetch_one, job): job for job in jobs}
+            for future in as_completed(futures):
+                completed += 1
+                res = future.result()
+                if res:
+                    sym, tf, df = res
+                    result[(sym, tf)] = df
+                # Her 10 stream'de bir progress göster
+                if completed % 10 == 0 or completed == total_jobs:
+                    log(f"   📊 {completed}/{total_jobs} stream yüklendi", category="progress")
 
+        log(f"   ✓ {len(result)} stream hazır", category="summary")
         return result
 
     streams = build_streams(candles, write_prices=True)
