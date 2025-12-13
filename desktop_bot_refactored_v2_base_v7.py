@@ -717,7 +717,8 @@ def _split_data_walk_forward(df: pd.DataFrame, train_ratio: float = 0.70) -> tup
         train_ratio: Ratio of data to use for training (default 0.70 = 70%)
 
     Returns:
-        (train_df, test_df): Tuple of DataFrames
+        (train_df, test_df, oos_start_time): Tuple of DataFrames and OOS start timestamp
+        oos_start_time is None if walk-forward is skipped
     """
     n = len(df)
     train_end = int(n * train_ratio)
@@ -725,12 +726,15 @@ def _split_data_walk_forward(df: pd.DataFrame, train_ratio: float = 0.70) -> tup
     # Ensure we have enough data for both periods
     if train_end < 300 or (n - train_end) < 100:
         # Not enough data, return full df for both (skip walk-forward)
-        return df, None
+        return df, None, None
 
     train_df = df.iloc[:train_end].reset_index(drop=True)
     test_df = df.iloc[train_end:].reset_index(drop=True)
 
-    return train_df, test_df
+    # Get the OOS start timestamp for filtering backtest results
+    oos_start_time = test_df['timestamp'].iloc[0] if 'timestamp' in test_df.columns else None
+
+    return train_df, test_df, oos_start_time
 
 
 def _validate_config_oos(df_test: pd.DataFrame, sym: str, tf: str, config: dict) -> dict:
@@ -1116,9 +1120,10 @@ def _optimize_backtest_configs(
         num_candles_full = len(df_full)
 
         # Walk-forward: veriyi train/test olarak böl
+        oos_start_time = None  # OOS başlangıç zamanı (backtest filtreleme için)
         if walk_forward_enabled:
             train_ratio = WALK_FORWARD_CONFIG.get("train_ratio", 0.70)
-            df_train, df_test = _split_data_walk_forward(df_full, train_ratio)
+            df_train, df_test, oos_start_time = _split_data_walk_forward(df_full, train_ratio)
             if df_test is not None:
                 log(f"[OPT][{sym}-{tf}] Walk-Forward: Train={len(df_train)} mum, Test={len(df_test)} mum")
             else:
@@ -1299,6 +1304,9 @@ def _optimize_backtest_configs(
                     config_result["_oos_trades"] = oos_result.get('oos_trades', 0)
                     config_result["_overfit_ratio"] = overfit_ratio
                     config_result["_walk_forward_validated"] = True
+                    # OOS başlangıç zamanını kaydet - backtest sonuçlarını filtrelemek için
+                    if oos_start_time is not None:
+                        config_result["_oos_start_time"] = oos_start_time
                 else:
                     config_result["_walk_forward_validated"] = False
 
@@ -5794,18 +5802,45 @@ def run_portfolio_backtest(
     if not trades_df.empty:
         # Aynı id'ye ait tüm bacakları (partial + final) toplayıp
         # trade başına net sonucu hesapla
+        # Walk-Forward aktifse, sadece OOS dönemindeki trade'leri say
         grouped_by_trade = {}
+        grouped_by_trade_all = {}  # Tüm trade'ler (karşılaştırma için)
 
         for (sym, tf, tid), g in trades_df.groupby(["symbol", "timeframe", "id"]):
             net = g["pnl"].astype(float).sum()
             key = (sym, tf)
-            grouped_by_trade.setdefault(key, []).append(net)
+
+            # Tüm trade'leri kaydet (karşılaştırma için)
+            grouped_by_trade_all.setdefault(key, []).append(net)
+
+            # OOS filtreleme: Eğer bu stream için OOS start time varsa, sadece OOS trade'leri say
+            opt_cfg = best_configs.get((sym, tf), {})
+            oos_start = opt_cfg.get("_oos_start_time")
+
+            if oos_start is not None:
+                # Trade'in açılış zamanını al
+                trade_time = g["timestamp"].iloc[0] if "timestamp" in g.columns else None
+                if trade_time is not None:
+                    # Trade OOS döneminde mi?
+                    if trade_time >= oos_start:
+                        grouped_by_trade.setdefault(key, []).append(net)
+                    # OOS öncesi trade'ler atlanır (curve-fitted dönem)
+                else:
+                    # Timestamp yoksa tüm trade'leri say (fallback)
+                    grouped_by_trade.setdefault(key, []).append(net)
+            else:
+                # OOS start time yoksa tüm trade'leri say
+                grouped_by_trade.setdefault(key, []).append(net)
 
         for (sym, tf), pnl_list in grouped_by_trade.items():
             total = len(pnl_list)
             wins = sum(1 for x in pnl_list if x > 0)
             pnl = sum(pnl_list)
             wr = (wins / total * 100.0) if total else 0.0
+
+            # Karşılaştırma için tüm trade sayısını da kaydet
+            all_trades = len(grouped_by_trade_all.get((sym, tf), []))
+            oos_filtered = all_trades > total  # OOS filtreleme yapıldı mı?
 
             summary_rows.append(
                 {
@@ -5814,6 +5849,7 @@ def run_portfolio_backtest(
                     "trades": total,
                     "win_rate_pct": wr,
                     "net_pnl": pnl,
+                    "_all_trades": all_trades if oos_filtered else None,  # Filtreleme yapıldıysa göster
                 }
             )
 
@@ -5841,6 +5877,16 @@ def run_portfolio_backtest(
         summary_df.to_csv(out_summary_csv, index=False)
 
     log("Backtest bitti.", category="summary")
+
+    # OOS filtreleme yapıldıysa bilgi ver
+    oos_filtered_streams = [r for r in summary_rows if r.get("_all_trades") is not None]
+    if oos_filtered_streams:
+        log(
+            f"\n📊 [OOS FİLTRE] {len(oos_filtered_streams)} stream için sadece Out-of-Sample (test dönemi) trade'leri sayıldı.",
+            category="summary"
+        )
+        log("   (Training dönemindeki trade'ler curve-fitted olduğu için dışlandı)", category="summary")
+
     if not summary_df.empty:
         log(summary_df.to_string(index=False), category="summary")
 
@@ -5862,7 +5908,8 @@ def run_portfolio_backtest(
             log(f"\n[OPT] {disabled_count} stream devre dışı bırakıldı (pozitif PnL'li config bulunamadı)", category="summary")
 
     # --- OPTIMIZER VS BACKTEST DIVERGENCE DETECTION ---
-    # Compare optimizer predictions with actual backtest results
+    # Compare OOS predictions with actual OOS backtest results
+    # (OOS = Out-of-Sample, training dönemindeki trade'ler hariç)
     divergent_streams = []
     for row in summary_rows:
         sym, tf = row["symbol"], row["timeframe"]
@@ -5873,8 +5920,13 @@ def run_portfolio_backtest(
         if opt_cfg.get("disabled", False):
             continue  # Skip disabled streams
 
-        opt_pnl = opt_cfg.get("_net_pnl", 0)
-        opt_trades = opt_cfg.get("_trades", 0)
+        # Walk-Forward varsa OOS değerlerini kullan, yoksa training değerlerini
+        if opt_cfg.get("_walk_forward_validated"):
+            opt_pnl = opt_cfg.get("_oos_pnl", 0)
+            opt_trades = opt_cfg.get("_oos_trades", 0)
+        else:
+            opt_pnl = opt_cfg.get("_net_pnl", 0)
+            opt_trades = opt_cfg.get("_trades", 0)
 
         # Detect significant divergence: optimizer predicted positive but actual negative
         if opt_pnl > 0 and actual_pnl < -10:  # Allow some tolerance
@@ -5888,10 +5940,10 @@ def run_portfolio_backtest(
             })
 
     if divergent_streams:
-        log(f"\n⚠️ [DIVERGENCE] {len(divergent_streams)} stream optimizer vs backtest uyuşmazlığı:", category="summary")
+        log(f"\n⚠️ [DIVERGENCE] {len(divergent_streams)} stream OOS beklenti vs gerçek uyuşmazlığı:", category="summary")
         for d in sorted(divergent_streams, key=lambda x: x["divergence"]):
             log(
-                f"  - {d['stream']}: OPT=${d['opt_pnl']:.0f}({d['opt_trades']}tr) → "
+                f"  - {d['stream']}: OOS=${d['opt_pnl']:.0f}({d['opt_trades']}tr) → "
                 f"ACTUAL=${d['actual_pnl']:.0f}({d['actual_trades']}tr) [Δ${d['divergence']:.0f}]",
                 category="summary"
             )
