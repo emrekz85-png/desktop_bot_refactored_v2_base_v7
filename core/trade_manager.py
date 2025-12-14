@@ -280,7 +280,8 @@ class BaseTradeManager(ABC):
         size = float(trade["size"])
         t_type = trade["type"]
         tf = trade["timeframe"]
-        initial_margin = float(trade.get("margin", size / TRADING_CONFIG["leverage"]))
+        # Fallback: margin yoksa doğru hesapla (size * entry / leverage, size / leverage DEĞİL)
+        initial_margin = float(trade.get("margin", abs(size) * entry / TRADING_CONFIG["leverage"]))
 
         # Get config from trade (snapshotted at open)
         use_trailing = trade.get("use_trailing", False)
@@ -316,7 +317,10 @@ class BaseTradeManager(ABC):
         self.open_trades[trade_idx]["pnl"] = live_pnl
 
         # Calculate progress towards target
-        total_dist = abs(dyn_tp - entry)
+        # KRITIK: Progress için initial_tp kullan, dinamik TP değil!
+        # Dinamik TP değiştikçe progress zıplamasın, partial/breakeven erken tetiklenmesin
+        initial_tp = float(trade.get("initial_tp", tp))  # Backward compat: yoksa tp kullan
+        total_dist = abs(initial_tp - entry)
         if total_dist <= 0:
             return None
         current_dist = abs(extreme_price - entry)
@@ -615,7 +619,8 @@ class SimTradeManager(BaseTradeManager):
         opt_rsi = config_snapshot.get("rsi", 60)
 
         # Confidence-based risk multiplier
-        confidence_level = config_snapshot.get("confidence", "high")
+        # Backward compat: eski JSON'larda _confidence olabilir
+        confidence_level = config_snapshot.get("confidence") or config_snapshot.get("_confidence", "high")
         risk_multiplier = CONFIDENCE_RISK_MULTIPLIER.get(confidence_level, 1.0)
         if risk_multiplier <= 0:
             return False
@@ -655,6 +660,7 @@ class SimTradeManager(BaseTradeManager):
             "setup": setup_type,
             "entry": real_entry,
             "tp": float(trade_data["tp"]),
+            "initial_tp": float(trade_data["tp"]),  # Progress hesabı için sabit referans (dinamik TP değişse bile)
             "sl": sl_price,
             "size": position_size,
             "margin": required_margin,
