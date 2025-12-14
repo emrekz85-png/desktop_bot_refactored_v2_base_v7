@@ -2633,13 +2633,21 @@ class TradingEngine:
         adx_res = ta.adx(df["high"], df["low"], df["close"], length=14)
         df["adx"] = adx_res["ADX_14"] if adx_res is not None and "ADX_14" in adx_res.columns else 0.0
 
-        # PBEMA cloud
-        df["pb_ema_top"] = ta.ema(df["high"], length=150)
-        df["pb_ema_bot"] = ta.ema(df["close"], length=150)
+        # PBEMA cloud (EMA 200) - Base strateji için
+        df["pb_ema_top"] = ta.ema(df["high"], length=200)
+        df["pb_ema_bot"] = ta.ema(df["close"], length=200)
 
-        # Slope (şimdilik sadece bilgi amaçlı)
+        # PBEMA cloud (EMA 150) - PBEMA Reaction strateji için
+        df["pb_ema_top_150"] = ta.ema(df["high"], length=150)
+        df["pb_ema_bot_150"] = ta.ema(df["close"], length=150)
+
+        # Slope (şimdilik sadece bilgi amaçlı) - Base için
         df["slope_top"] = (df["pb_ema_top"].diff(5) / df["pb_ema_top"]) * 1000
         df["slope_bot"] = (df["pb_ema_bot"].diff(5) / df["pb_ema_bot"]) * 1000
+
+        # Slope - PBEMA Reaction için
+        df["slope_top_150"] = (df["pb_ema_top_150"].diff(5) / df["pb_ema_top_150"]) * 1000
+        df["slope_bot_150"] = (df["pb_ema_bot_150"].diff(5) / df["pb_ema_bot_150"]) * 1000
 
         # SSL baseline (HMA60) ve Keltner bantları
         df["baseline"] = ta.hma(df["close"], length=60)
@@ -3096,7 +3104,7 @@ class TradingEngine:
         required_cols = [
             "open", "high", "low", "close",
             "rsi", "adx",
-            "pb_ema_top", "pb_ema_bot",
+            "pb_ema_top_150", "pb_ema_bot_150",
             "keltner_upper", "keltner_lower",
         ]
         for col in required_cols:
@@ -3117,8 +3125,8 @@ class TradingEngine:
         high = float(curr["high"])
         low = float(curr["low"])
         close = float(curr["close"])
-        pb_top = float(curr["pb_ema_top"])
-        pb_bot = float(curr["pb_ema_bot"])
+        pb_top = float(curr["pb_ema_top_150"])
+        pb_bot = float(curr["pb_ema_bot_150"])
         lower_band = float(curr["keltner_lower"])
         upper_band = float(curr["keltner_upper"])
         adx_val = float(curr["adx"])
@@ -3200,8 +3208,8 @@ class TradingEngine:
             is_short = False
 
         # Slope filter - PBEMA should be sloping down or flat for SHORT
-        if is_short and "slope_top" in curr.index:
-            slope_val = float(curr["slope_top"])
+        if is_short and "slope_top_150" in curr.index:
+            slope_val = float(curr["slope_top_150"])
             if slope_val > slope_thresh:  # Strong uptrend - skip SHORT
                 is_short = False
 
@@ -3270,8 +3278,8 @@ class TradingEngine:
             is_long = False
 
         # Slope filter - PBEMA should be sloping up or flat for LONG
-        if is_long and "slope_bot" in curr.index:
-            slope_val = float(curr["slope_bot"])
+        if is_long and "slope_bot_150" in curr.index:
+            slope_val = float(curr["slope_bot_150"])
             if slope_val < -slope_thresh:  # Strong downtrend - skip LONG
                 is_long = False
 
