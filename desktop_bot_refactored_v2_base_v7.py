@@ -2634,8 +2634,8 @@ class TradingEngine:
         df["adx"] = adx_res["ADX_14"] if adx_res is not None and "ADX_14" in adx_res.columns else 0.0
 
         # PBEMA cloud
-        df["pb_ema_top"] = ta.ema(df["high"], length=200)
-        df["pb_ema_bot"] = ta.ema(df["close"], length=200)
+        df["pb_ema_top"] = ta.ema(df["high"], length=150)
+        df["pb_ema_bot"] = ta.ema(df["close"], length=150)
 
         # Slope (şimdilik sadece bilgi amaçlı)
         df["slope_top"] = (df["pb_ema_top"].diff(5) / df["pb_ema_top"]) * 1000
@@ -3051,7 +3051,7 @@ class TradingEngine:
             pbema_frontrun_margin: float = 0.002,
             tp_min_dist_ratio: float = 0.0015,
             tp_max_dist_ratio: float = 0.04,
-            adx_min: float = 8.0,
+            adx_min: float = 12.0,
             return_debug: bool = False,
     ) -> Tuple:
         """
@@ -3078,6 +3078,11 @@ class TradingEngine:
             "long_rsi_ok": None,
             "tp_dist_ratio": None,
             "rr_value": None,
+            "min_wick_ratio_pbema": None,
+            "upper_wick_ratio": None,
+            "lower_wick_ratio": None,
+            "wick_quality_short": None,
+            "wick_quality_long": None,
         }
 
         def _ret(s_type, entry, tp, sl, reason):
@@ -3123,6 +3128,23 @@ class TradingEngine:
         if any(pd.isna([open_, high, low, close, pb_top, pb_bot, lower_band, upper_band, adx_val, rsi_val])):
             return _ret(None, None, None, None, "NaN Values")
 
+        # Wick-quality filter calculations
+        min_wick_ratio_pbema = 0.12
+        candle_range = high - low
+        if candle_range <= 0:
+            upper_wick_ratio = 0.0
+            lower_wick_ratio = 0.0
+        else:
+            upper_wick = high - max(open_, close)
+            lower_wick = min(open_, close) - low
+            upper_wick_ratio = upper_wick / candle_range
+            lower_wick_ratio = lower_wick / candle_range
+
+        # Update debug_info with wick quality values
+        debug_info["min_wick_ratio_pbema"] = min_wick_ratio_pbema
+        debug_info["upper_wick_ratio"] = upper_wick_ratio
+        debug_info["lower_wick_ratio"] = lower_wick_ratio
+
         # ADX filter - need some volatility
         adx_ok = adx_val >= adx_min
         debug_info["adx_ok"] = adx_ok
@@ -3166,7 +3188,9 @@ class TradingEngine:
         if is_short:
             rejection_wick_short = (high >= pb_top * (1 - pbema_approach_tolerance)) and (close < pb_top)
             candle_body_below = max(open_, close) < pb_top
-            is_short = rejection_wick_short and candle_body_below
+            wick_quality_short = (upper_wick_ratio >= min_wick_ratio_pbema)
+            debug_info["wick_quality_short"] = wick_quality_short
+            is_short = rejection_wick_short and candle_body_below and wick_quality_short
 
         # RSI filter for SHORT - not too oversold
         short_rsi_limit = 100.0 - (rsi_limit + 10.0)
@@ -3234,7 +3258,9 @@ class TradingEngine:
         if is_long:
             rejection_wick_long = (low <= pb_bot * (1 + pbema_approach_tolerance)) and (close > pb_bot)
             candle_body_above = min(open_, close) > pb_bot
-            is_long = rejection_wick_long and candle_body_above
+            wick_quality_long = (lower_wick_ratio >= min_wick_ratio_pbema)
+            debug_info["wick_quality_long"] = wick_quality_long
+            is_long = rejection_wick_long and candle_body_above and wick_quality_long
 
         # RSI filter for LONG - not too overbought
         long_rsi_limit = rsi_limit + 10.0
