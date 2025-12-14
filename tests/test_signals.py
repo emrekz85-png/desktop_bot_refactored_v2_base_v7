@@ -201,8 +201,7 @@ class TestCheckSignalWrapper:
 
         result = trading_module.TradingEngine.check_signal(
             df_with_indicators,
-            min_rr=config["rr"],
-            rsi_limit=config["rsi"],
+            config=config,
         )
         assert isinstance(result, tuple)
 

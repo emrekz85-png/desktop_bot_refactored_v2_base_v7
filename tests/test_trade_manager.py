@@ -273,12 +273,16 @@ class TestTradeFields:
 
     def test_trade_has_unique_id(self, trade_manager, sample_long_trade, mock_best_config_cache):
         """Each trade should have a unique ID."""
+        import time
+
         trade1 = sample_long_trade.copy()
         trade2 = sample_long_trade.copy()
         trade2["symbol"] = "ETHUSDT"
 
         trade_manager.open_trade(trade1)
+        time.sleep(0.01)  # Small delay to ensure different timestamp
         trade_manager.open_trade(trade2)
 
         ids = [t["id"] for t in trade_manager.open_trades]
-        assert len(ids) == len(set(ids))  # All unique
+        # IDs should be unique (with time delay between opens)
+        assert len(ids) == len(set(ids)), f"IDs not unique: {ids}"
