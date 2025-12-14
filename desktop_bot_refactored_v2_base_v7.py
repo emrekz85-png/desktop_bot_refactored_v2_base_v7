@@ -1651,6 +1651,15 @@ class TradeManager:
         self.locked_margin = 0.0
         self.total_pnl = 0.0
 
+        # --- STRATEJİ BAZLI CÜZDANLAR ---
+        # Her strateji kendi wallet balance'ına sahip, böylece birbirlerini etkilemezler
+        initial_bal = TRADING_CONFIG["initial_balance"]
+        self.strategy_wallets = {
+            "keltner_bounce": {"wallet_balance": initial_bal, "locked_margin": 0.0, "total_pnl": 0.0},
+            "pbema_reaction": {"wallet_balance": initial_bal, "locked_margin": 0.0, "total_pnl": 0.0},
+        }
+        # -----------------------------
+
         # --- MERKEZİ AYARLARDAN OKUMA ---
         self.slippage_pct = TRADING_CONFIG["slippage_rate"]
         self.risk_per_trade_pct = TRADING_CONFIG.get("risk_per_trade_pct", 0.01)
@@ -1663,6 +1672,37 @@ class TradeManager:
             self.force_close_stale_trades()
         if self.verbose:
             print("✅ TRADE MANAGER BAŞLATILDI: Veriler Yüklendi 📂")
+
+    def _get_strategy_wallet(self, strategy_mode: str) -> dict:
+        """Strateji için cüzdan bilgilerini döndür"""
+        if strategy_mode not in self.strategy_wallets:
+            strategy_mode = "keltner_bounce"  # Default
+        return self.strategy_wallets[strategy_mode]
+
+    def _calculate_strategy_portfolio_risk(self, strategy_mode: str) -> float:
+        """Belirli bir strateji için portföy risk yüzdesini hesapla"""
+        wallet = self._get_strategy_wallet(strategy_mode)
+        equity = wallet["wallet_balance"] + wallet["locked_margin"]
+        if equity <= 0:
+            return 0.0
+
+        total_open_risk = 0.0
+        for trade in self.open_trades:
+            # Sadece bu stratejiye ait trade'leri say
+            trade_strategy = trade.get("strategy_mode", "keltner_bounce")
+            if trade_strategy != strategy_mode:
+                continue
+
+            entry_price = float(trade.get("entry", 0.0))
+            sl_price = float(trade.get("sl", entry_price))
+            size = abs(float(trade.get("size", 0.0)))
+            if entry_price <= 0 or size <= 0:
+                continue
+            sl_fraction = abs(entry_price - sl_price) / entry_price
+            open_risk_amount = sl_fraction * size * entry_price
+            total_open_risk += open_risk_amount
+
+        return total_open_risk / equity
 
     def check_cooldown(self, symbol, timeframe, now_utc=None):
         """
@@ -1772,6 +1812,10 @@ class TradeManager:
             opt_rr = config_snapshot.get("rr", 3.0)
             opt_rsi = config_snapshot.get("rsi", 60)
 
+            # Strateji modunu al - pozisyon büyüklüğü strateji cüzdanından hesaplanacak
+            strategy_mode = config_snapshot.get("strategy_mode", "keltner_bounce")
+            strategy_wallet = self._get_strategy_wallet(strategy_mode)
+
             # Confidence-based risk multiplier: reduce position size for medium confidence
             confidence_level = config_snapshot.get("_confidence", "high")
             risk_multiplier = CONFIDENCE_RISK_MULTIPLIER.get(confidence_level, 1.0)
@@ -1779,8 +1823,10 @@ class TradeManager:
                 print(f"⚠️ [{sym}-{tf}] Düşük güven seviyesi, işlem açılmadı.")
                 return
 
-            if self.wallet_balance < 10:
-                print(f"⚠️ Yetersiz Bakiye (${self.wallet_balance:.2f}). İşlem açılamadı.")
+            # Strateji cüzdanı kontrolü
+            strategy_balance = strategy_wallet["wallet_balance"]
+            if strategy_balance < 10:
+                print(f"⚠️ [{strategy_mode}] Yetersiz Bakiye (${strategy_balance:.2f}). İşlem açılamadı.")
                 return
 
             # SLIPPAGE MODELLEMESİ
@@ -1795,18 +1841,19 @@ class TradeManager:
             sl_price = float(signal_data["sl"])
 
             # Apply risk multiplier to effective risk per trade
+            # Strateji bazlı portföy riski kullan
             effective_risk_pct = self.risk_per_trade_pct * risk_multiplier
-            current_portfolio_risk_pct = self._calculate_portfolio_risk_pct(self.wallet_balance)
+            current_portfolio_risk_pct = self._calculate_strategy_portfolio_risk(strategy_mode)
             if current_portfolio_risk_pct + effective_risk_pct > self.max_portfolio_risk_pct:
                 print(
-                    f"⚠️ Portföy risk limiti aşılıyor: mevcut %{current_portfolio_risk_pct * 100:.2f}, "
+                    f"⚠️ [{strategy_mode}] Portföy risk limiti aşılıyor: mevcut %{current_portfolio_risk_pct * 100:.2f}, "
                     f"yeni işlem riski %{effective_risk_pct * 100:.2f}, limit %{self.max_portfolio_risk_pct * 100:.2f}"
                 )
                 return
 
-            wallet_balance = self.wallet_balance
+            wallet_balance = strategy_balance  # Strateji cüzdanını kullan
             if wallet_balance <= 0:
-                print("⚠️ Cüzdan bakiyesi 0 veya negatif, işlem açılamadı.")
+                print(f"⚠️ [{strategy_mode}] Cüzdan bakiyesi 0 veya negatif, işlem açılamadı.")
                 return
 
             risk_amount = wallet_balance * effective_risk_pct
@@ -1866,16 +1913,23 @@ class TradeManager:
                 "use_dynamic_pbema_tp": use_dynamic_pbema_tp,
                 "opt_rr": opt_rr,
                 "opt_rsi": opt_rsi,
+                # Strateji modu - PnL hesaplamasında doğru cüzdanı güncellemek için
+                "strategy_mode": strategy_mode,
             }
 
+            # Strateji cüzdanından margin düş
+            strategy_wallet["wallet_balance"] -= required_margin
+            strategy_wallet["locked_margin"] += required_margin
+            # Geriye uyumluluk için global değişkenleri de güncelle
             self.wallet_balance -= required_margin
             self.locked_margin += required_margin
 
             self.open_trades.append(new_trade)
-            new_portfolio_risk_pct = self._calculate_portfolio_risk_pct(self.wallet_balance)
+            new_portfolio_risk_pct = self._calculate_strategy_portfolio_risk(strategy_mode)
 
+            strategy_short = "PR" if strategy_mode == "pbema_reaction" else "KB"
             print(
-                f"📈 İşlem Açıldı | Entry: {real_entry:.4f}, SL: {sl_price:.4f}, "
+                f"📈 [{strategy_short}] İşlem Açıldı | Entry: {real_entry:.4f}, SL: {sl_price:.4f}, "
                 f"Size: {position_size:.6f}, Notional: ${position_notional:.2f}, "
                 f"Margin: ${required_margin:.2f}, Risk%: {effective_risk_pct * 100:.2f}% "
                 f"({confidence_level}), Risk$: ${risk_amount:.2f}, Portföy: {new_portfolio_risk_pct * 100:.2f}%"
@@ -1995,6 +2049,13 @@ class TradeManager:
                         net_partial_pnl = partial_pnl - commission
                         margin_release = initial_margin / 2.0
 
+                        # Strateji cüzdanını güncelle
+                        trade_strategy = trade.get("strategy_mode", "keltner_bounce")
+                        strat_wallet = self._get_strategy_wallet(trade_strategy)
+                        strat_wallet["wallet_balance"] += margin_release + net_partial_pnl
+                        strat_wallet["locked_margin"] -= margin_release
+                        strat_wallet["total_pnl"] += net_partial_pnl
+                        # Geriye uyumluluk için global değişkenleri de güncelle
                         self.wallet_balance += margin_release + net_partial_pnl
                         self.locked_margin -= margin_release
                         self.total_pnl += net_partial_pnl
@@ -2132,6 +2193,13 @@ class TradeManager:
 
                 final_net_pnl = gross_pnl - commission - funding_cost
 
+                # Strateji cüzdanını güncelle
+                trade_strategy = trade.get("strategy_mode", "keltner_bounce")
+                strat_wallet = self._get_strategy_wallet(trade_strategy)
+                strat_wallet["wallet_balance"] += margin_release + final_net_pnl
+                strat_wallet["locked_margin"] -= margin_release
+                strat_wallet["total_pnl"] += final_net_pnl
+                # Geriye uyumluluk için global değişkenleri de güncelle
                 self.wallet_balance += margin_release + final_net_pnl
                 self.locked_margin -= margin_release
                 self.total_pnl += final_net_pnl
@@ -2237,6 +2305,13 @@ class TradeManager:
             self.locked_margin = 0.0
             self.total_pnl = 0.0
 
+            # Strateji cüzdanlarını sıfırla
+            initial_bal = TRADING_CONFIG["initial_balance"]
+            self.strategy_wallets = {
+                "keltner_bounce": {"wallet_balance": initial_bal, "locked_margin": 0.0, "total_pnl": 0.0},
+                "pbema_reaction": {"wallet_balance": initial_bal, "locked_margin": 0.0, "total_pnl": 0.0},
+            }
+
             if os.path.exists(CSV_FILE):
                 try:
                     if os.path.getsize(CSV_FILE) == 0:
@@ -2247,7 +2322,12 @@ class TradeManager:
                         self.history = df[~df["status"].astype(str).str.contains("OPEN")].to_dict('records')
 
                         for trade in self.history:
-                            self.total_pnl += float(trade['pnl'])
+                            trade_pnl = float(trade['pnl'])
+                            self.total_pnl += trade_pnl
+                            # Strateji bazlı PnL hesapla
+                            trade_strategy = trade.get("strategy_mode", "keltner_bounce")
+                            strat_wallet = self._get_strategy_wallet(trade_strategy)
+                            strat_wallet["total_pnl"] += trade_pnl
 
                         open_pnl = 0.0
                         for trade in self.open_trades:
@@ -2265,16 +2345,35 @@ class TradeManager:
                                     trade["events"] = []
                             self.locked_margin += m
                             open_pnl += float(trade.get('pnl', 0.0))
+                            # Strateji bazlı locked margin
+                            trade_strategy = trade.get("strategy_mode", "keltner_bounce")
+                            strat_wallet = self._get_strategy_wallet(trade_strategy)
+                            strat_wallet["locked_margin"] += m
 
                         # Kullanılabilir bakiye = başlangıç + kapalı işlemlerden net PnL - kilitli marj
                         self.wallet_balance = TRADING_CONFIG["initial_balance"] + self.total_pnl - self.locked_margin
                         total_equity = self.wallet_balance + self.locked_margin + open_pnl
+
+                        # Strateji bazlı bakiyeleri hesapla
+                        for strategy_mode, strat_wallet in self.strategy_wallets.items():
+                            strat_wallet["wallet_balance"] = (
+                                TRADING_CONFIG["initial_balance"] +
+                                strat_wallet["total_pnl"] -
+                                strat_wallet["locked_margin"]
+                            )
+
                         if self.verbose:
                             print(
                                 "📂 Veriler Yüklendi. "
                                 f"Toplam Varlık (Equity): ${total_equity:.2f} | "
                                 f"Kullanılabilir Bakiye: ${self.wallet_balance:.2f} | "
                                 f"Kilitli Marj: ${self.locked_margin:.2f}")
+                            kb_wallet = self.strategy_wallets["keltner_bounce"]
+                            pr_wallet = self.strategy_wallets["pbema_reaction"]
+                            print(
+                                f"   [KB] Bakiye: ${kb_wallet['wallet_balance']:.2f} | PnL: ${kb_wallet['total_pnl']:+.2f}")
+                            print(
+                                f"   [PR] Bakiye: ${pr_wallet['wallet_balance']:.2f} | PnL: ${pr_wallet['total_pnl']:+.2f}")
 
                 except Exception as e:
                     print(f"YÜKLEME HATASI: {e}")
@@ -2359,8 +2458,14 @@ class TradeManager:
                     commission = abs(size * exit_fill) * TRADING_CONFIG["total_fee"]
                     net_pnl = gross_pnl - commission
 
-                    # Release margin
+                    # Release margin - strateji cüzdanını güncelle
                     margin = float(trade.get("margin", size / TRADING_CONFIG["leverage"]))
+                    trade_strategy = trade.get("strategy_mode", "keltner_bounce")
+                    strat_wallet = self._get_strategy_wallet(trade_strategy)
+                    strat_wallet["wallet_balance"] += margin + net_pnl
+                    strat_wallet["locked_margin"] -= margin
+                    strat_wallet["total_pnl"] += net_pnl
+                    # Geriye uyumluluk için global değişkenleri de güncelle
                     self.wallet_balance += margin + net_pnl
                     self.locked_margin -= margin
                     self.total_pnl += net_pnl
@@ -6364,7 +6469,28 @@ def run_portfolio_backtest(
             (pd.Timestamp(df.loc[warmup, "timestamp"]) + _tf_to_timedelta(tf), sym, tf),
         )
 
-    tm = SimTradeManager(initial_balance=TRADING_CONFIG["initial_balance"])
+    # ==========================================
+    # İKİ AYRI PORTFÖY: Base ve PBEMA_Reaction stratejileri birbirini etkilemez
+    # ==========================================
+    # Her strateji kendi wallet balance'ına sahip, böylece:
+    # - Bir stratejinin kaybı diğerinin pozisyon büyüklüğünü etkilemez
+    # - Her strateji bağımsız değerlendirilebilir
+    initial_balance = TRADING_CONFIG["initial_balance"]
+    tm_base = SimTradeManager(initial_balance=initial_balance)    # Keltner Bounce için
+    tm_pbema = SimTradeManager(initial_balance=initial_balance)   # PBEMA_Reaction için
+
+    # Stream -> strategy mapping (hangi stream hangi TM'yi kullanacak)
+    stream_strategy_map = {}
+    for (sym, tf) in requested_pairs:
+        cfg = best_configs.get((sym, tf)) or load_optimized_config(sym, tf)
+        strategy_mode = cfg.get("strategy_mode", "keltner_bounce")
+        stream_strategy_map[(sym, tf)] = strategy_mode
+
+    def get_tm_for_stream(sym, tf):
+        """Stream'in stratejisine göre doğru TradeManager'ı döndür"""
+        strategy = stream_strategy_map.get((sym, tf), "keltner_bounce")
+        return tm_pbema if strategy == "pbema_reaction" else tm_base
+
     logged_cfg_pairs = set()
     processed_events = 0
     next_progress = 10
@@ -6378,8 +6504,10 @@ def run_portfolio_backtest(
         if i >= len(df) - 1:
             continue
 
-        # Açık pozisyonları güncelle (PBEMA ile birlikte)
-        tm.update_trades(
+        # Açık pozisyonları güncelle (her iki TM için de güncelle - açık trade varsa)
+        # Her TM sadece kendi açık trade'lerini günceller
+        tm_for_stream = get_tm_for_stream(sym, tf)
+        tm_for_stream.update_trades(
             sym,
             tf,
             candle_high=float(arrays["highs"][i]),
@@ -6416,13 +6544,13 @@ def run_portfolio_backtest(
 
         if s_type and "ACCEPTED" in str(s_reason):
             accepted_signals_raw[(sym, tf)] = accepted_signals_raw.get((sym, tf), 0) + 1
-            # Aynı sembol/timeframe için açık trade var mı?
+            # Aynı sembol/timeframe için açık trade var mı? (doğru TM'de kontrol et)
             has_open = any(
                 t["symbol"] == sym and t["timeframe"] == tf
-                for t in tm.open_trades
+                for t in tm_for_stream.open_trades
             )
 
-            cooldown_active = tm.check_cooldown(sym, tf, event_time)
+            cooldown_active = tm_for_stream.check_cooldown(sym, tf, event_time)
             signal_ts_str = (pd.Timestamp(event_time) + pd.Timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
 
             if has_open:
@@ -6453,8 +6581,8 @@ def run_portfolio_backtest(
                     rr_end = s_reason_str.find(")", rr_start) if ")" in s_reason_str[rr_start:] else len(s_reason_str)
                     rr_str = s_reason_str[rr_start:rr_start + (rr_end - rr_start)].split(",")[0].split(")")[0]
 
-                # Try to open trade - only log if successful
-                trade_opened = tm.open_trade(
+                # Try to open trade - only log if successful (doğru TM'de aç)
+                trade_opened = tm_for_stream.open_trade(
                     {
                         "symbol": sym,
                         "timeframe": tf,
@@ -6498,11 +6626,13 @@ def run_portfolio_backtest(
                 next_progress += 10
 
     # ==========================================
-    # BACKTEST SONUNDA AÇIK POZİSYONLARI KAPAT
+    # BACKTEST SONUNDA AÇIK POZİSYONLARI KAPAT (Her iki TM için)
     # ==========================================
-    # Açık kalan pozisyonları son bilinen fiyattan zorla kapat
-    if tm.open_trades:
-        log(f"[BACKTEST] {len(tm.open_trades)} açık pozisyon kapatılıyor...", category="summary")
+    def force_close_open_trades(tm, tm_name):
+        """Bir TM'deki tüm açık pozisyonları zorla kapat"""
+        if not tm.open_trades:
+            return
+        log(f"[BACKTEST] {tm_name}: {len(tm.open_trades)} açık pozisyon kapatılıyor...", category="summary")
         for trade in list(tm.open_trades):
             sym = trade["symbol"]
             tf = trade["timeframe"]
@@ -6513,11 +6643,11 @@ def run_portfolio_backtest(
 
             # Son kapanış fiyatını bul
             if (sym, tf) in streams:
-                df = streams[(sym, tf)]
-                if not df.empty:
-                    last_close = float(df.iloc[-1]["close"])
+                df_stream = streams[(sym, tf)]
+                if not df_stream.empty:
+                    last_close = float(df_stream.iloc[-1]["close"])
                 else:
-                    last_close = entry  # Veri yoksa entry fiyatından kapat
+                    last_close = entry
             else:
                 last_close = entry
 
@@ -6546,17 +6676,22 @@ def run_portfolio_backtest(
             trade["close_time"] = "BACKTEST_END"
             tm.history.append(trade)
 
-        # Açık trade listesini temizle
         tm.open_trades.clear()
-        log(f"[BACKTEST] Açık pozisyonlar kapatıldı. Yeni bakiye: ${tm.wallet_balance:.2f}", category="summary")
+        log(f"[BACKTEST] {tm_name} açık pozisyonlar kapatıldı. Bakiye: ${tm.wallet_balance:.2f}", category="summary")
 
-    total_closed_legs = len(tm.history)
-    unique_trades = len({t.get("id") for t in tm.history}) if tm.history else 0
-    partial_legs = sum(1 for t in tm.history if "PARTIAL" in str(t.get("status", "")))
+    force_close_open_trades(tm_base, "Base")
+    force_close_open_trades(tm_pbema, "PBEMA_Reaction")
+
+    # Her iki TM'nin history'sini birleştir
+    combined_history = tm_base.history + tm_pbema.history
+
+    total_closed_legs = len(combined_history)
+    unique_trades = len({t.get("id") for t in combined_history}) if combined_history else 0
+    partial_legs = sum(1 for t in combined_history if "PARTIAL" in str(t.get("status", "")))
     full_exits = total_closed_legs - partial_legs
 
     # Tüm history'den DataFrame oluştur ve CSV / özet yaz
-    trades_df = pd.DataFrame(tm.history)
+    trades_df = pd.DataFrame(combined_history)
     if not trades_df.empty:
         trades_df.to_csv(out_trades_csv, index=False)
 
@@ -6783,8 +6918,23 @@ def run_portfolio_backtest(
             )
         log("  (Nedenler: portfolio constraint'ler, pozisyon çakışmaları, risk limitleri)", category="summary")
 
+    # Her strateji için ayrı portföy sonuçları
+    combined_wallet = tm_base.wallet_balance + tm_pbema.wallet_balance
+    combined_pnl = tm_base.total_pnl + tm_pbema.total_pnl
     log(
-        f"Final Wallet (sim): ${tm.wallet_balance:.2f} | Total PnL: ${tm.total_pnl:.2f}",
+        f"\n📊 PORTFÖY SONUÇLARI (Ayrı Cüzdanlar):",
+        category="summary",
+    )
+    log(
+        f"  [Base] Wallet: ${tm_base.wallet_balance:.2f} | PnL: ${tm_base.total_pnl:+.2f}",
+        category="summary",
+    )
+    log(
+        f"  [PBEMA_Reaction] Wallet: ${tm_pbema.wallet_balance:.2f} | PnL: ${tm_pbema.total_pnl:+.2f}",
+        category="summary",
+    )
+    log(
+        f"  [TOPLAM] Combined Wallet: ${combined_wallet:.2f} | Combined PnL: ${combined_pnl:+.2f}",
         category="summary",
     )
 
