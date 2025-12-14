@@ -2697,7 +2697,7 @@ class TradingEngine:
                 all_data = data + all_data  # Eskiden yeniye doğru birleştir
                 end_time = data[0][0] - 1
                 time.sleep(0.1)  # Kısa bir mola (Rate limit nezaketi)
-            except:
+            except Exception:
                 break
 
         if not all_data: return pd.DataFrame()
@@ -2740,7 +2740,7 @@ class TradingEngine:
             df['alphatrend'] = alpha_trend
             df['alphatrend_2'] = df['alphatrend'].shift(2)
             return df
-        except:
+        except Exception:
             df['alphatrend'] = df['close'];
             return df
 
@@ -4285,7 +4285,7 @@ class OptimizerWorker(QThread):
                     if not df_trend.empty:
                         df_trend['ema_trend'] = ta.ema(df_trend['close'], length=200)
                         df_trend = df_trend[['timestamp', 'ema_trend']].dropna()
-                except:
+                except Exception:
                     pass
 
             data_cache = {}
@@ -4438,7 +4438,7 @@ class OptimizerWorker(QThread):
                             if not self.monte_carlo_mode:
                                 try:
                                     duration_hours = (exit_time - entry_time).total_seconds() / 3600
-                                except:
+                                except Exception:
                                     duration_hours = 0
 
                             # Funding (R cinsinden) = (Funding Rate * Kaldıraç * Periyot) / Risk Oranı
