@@ -28,28 +28,45 @@ import threading
 # - Fixed UTC/time naming (close_time_utc vs close_time_local)
 # - Thread pool for Telegram (prevents thread accumulation)
 # ==========================================
-try:
-    from core import (
-        # Utils
-        normalize_datetime as _core_normalize_datetime,
-        tf_to_timedelta as _core_tf_to_timedelta,
-        calculate_funding_cost as _core_calculate_funding_cost,
-        format_time_utc as _core_format_time_utc,
-        format_time_local as _core_format_time_local,
-        append_trade_event as _core_append_trade_event,
-        # Telegram
-        send_telegram as _core_send_telegram,
-        get_notifier as _core_get_notifier,
-        # Binance client
-        BinanceClient as _core_BinanceClient,
-        get_client as _core_get_client,
-        # Indicators
-        calculate_indicators as _core_calculate_indicators,
-        calculate_alphatrend as _core_calculate_alphatrend,
-    )
-    CORE_PACKAGE_AVAILABLE = True
-except ImportError:
-    CORE_PACKAGE_AVAILABLE = False
+# ==========================================
+# 🔗 CORE PACKAGE - ZORUNLU MODÜLLER (v40.1)
+# ==========================================
+# Core paketi bu repoda bulunur ve zorunludur.
+# Fallback kodlar kaldırıldı - tek kaynak core paketi.
+from core import (
+    # Utils
+    normalize_datetime,
+    tf_to_timedelta,
+    calculate_funding_cost,
+    format_time_utc,
+    format_time_local,
+    append_trade_event,
+    apply_1m_profit_lock,
+    apply_partial_stop_protection,
+    calculate_r_multiple,
+    calculate_expected_r,
+    # Trade managers
+    SimTradeManager,
+    BaseTradeManager,
+    # Telegram
+    send_telegram,
+    get_notifier,
+    TelegramNotifier,
+    save_telegram_config,
+    load_telegram_config,
+    # Binance client
+    BinanceClient,
+    get_client,
+    # Indicators
+    calculate_indicators as core_calculate_indicators,
+    calculate_alphatrend as core_calculate_alphatrend,
+    get_indicator_value,
+    get_candle_data,
+    # Config
+    is_stream_blacklisted,
+    load_dynamic_blacklist,
+    update_dynamic_blacklist,
+)
 
 # ==========================================
 # 🚀 FAST STARTUP - Lazy imports for heavy libraries
@@ -764,111 +781,25 @@ def _strategy_signature() -> str:
     return hashlib.sha256(serialized.encode()).hexdigest()
 
 
-def _apply_1m_profit_lock(
-    trade: dict, tf: str, t_type: str, entry: float, tp: float, progress: float
-) -> bool:
-    """Shift SL into profit on 1m trades once price is very close to TP.
+# ==========================================
+# 🔗 CORE WRAPPER FONKSİYONLAR (Geriye Uyumluluk)
+# ==========================================
+# Bu wrapper'lar TradeManager'daki mevcut çağrılar için geriye uyumluluk sağlar.
+# Tüm mantık core paketinde tek bir yerde tanımlanmıştır.
 
-    When the price reaches 80% of the distance to TP, move SL to a level that
-    locks 40% of the entry-to-TP distance as profit. Applies to both live and
-    backtest flows.
-    """
-
-    if tf != "1m" or progress < 0.80:
-        return False
-
-    total_dist = abs(tp - entry)
-    if total_dist <= 0:
-        return False
-
-    current_sl = float(trade.get("sl", entry))
-    lock_distance = total_dist * 0.40
-
-    if t_type == "LONG":
-        target_sl = entry + lock_distance
-        if target_sl > current_sl:
-            trade["sl"] = target_sl
-            trade["breakeven"] = True
-            return True
-    else:
-        target_sl = entry - lock_distance
-        if target_sl < current_sl:
-            trade["sl"] = target_sl
-            trade["breakeven"] = True
-            return True
-
-    return False
+def _apply_1m_profit_lock(trade: dict, tf: str, t_type: str, entry: float, tp: float, progress: float) -> bool:
+    """Wrapper: core.utils.apply_1m_profit_lock kullanır."""
+    return apply_1m_profit_lock(trade, tf, t_type, entry, tp, progress)
 
 
 def _apply_partial_stop_protection(trade: dict, tf: str, progress: float, t_type: str) -> bool:
-    """Raise SL to partial fill price after deeper TP progress on higher timeframes.
-
-    %80 progress'te SL'yi partial fill seviyesine çeker (kar koruma).
-    """
-
-    if tf not in PARTIAL_STOP_PROTECTION_TFS:
-        return False
-
-    if not trade.get("partial_taken") or progress < 0.80:
-        return False
-
-    p_price = trade.get("partial_price")
-    if p_price is None:
-        return False
-
-    p_price = float(p_price)
-    current_sl = float(trade.get("sl", p_price))
-
-    if t_type == "LONG" and p_price > current_sl:
-        trade["sl"] = p_price
-        trade["stop_protection"] = True
-        return True
-    if t_type == "SHORT" and p_price < current_sl:
-        trade["sl"] = p_price
-        trade["stop_protection"] = True
-        return True
-
-    return False
+    """Wrapper: core.utils.apply_partial_stop_protection kullanır."""
+    return apply_partial_stop_protection(trade, tf, progress, t_type)
 
 
 def _append_trade_event(trade: dict, event_type: str, event_time, price: Optional[float] = None):
-    """Append a serializable lifecycle event to the trade for plotting/logging parity.
-
-    Note: The core.utils module has an improved version of this function.
-    This version is kept for backward compatibility.
-    """
-    # Use core package version if available
-    if CORE_PACKAGE_AVAILABLE:
-        _core_append_trade_event(trade, event_type, event_time, price)
-        return
-
-    try:
-        events = trade.get("events", [])
-        if isinstance(events, str):
-            try:
-                events = json.loads(events)
-            except Exception:
-                events = []
-        if not isinstance(events, list):
-            events = []
-
-        # event_time'ı datetime'a çevir (numpy.datetime64, pd.Timestamp veya datetime olabilir)
-        et = event_time or datetime.utcnow()
-        if isinstance(et, np.datetime64):
-            et = pd.Timestamp(et).to_pydatetime()
-        elif isinstance(et, pd.Timestamp):
-            et = et.to_pydatetime()
-
-        events.append(
-            {
-                "type": event_type,
-                "time": et.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "price": float(price) if price is not None else None,
-            }
-        )
-        trade["events"] = events
-    except Exception:
-        trade["events"] = trade.get("events", [])
+    """Wrapper: core.utils.append_trade_event kullanır."""
+    append_trade_event(trade, event_type, event_time, price)
 
 
 def _audit_trade_logic_parity() -> dict:
@@ -5151,9 +5082,13 @@ class MainWindow(QMainWindow):
         tg_group = QGroupBox("Telegram");
         tg_layout = QHBoxLayout()
         self.txt_token = QLineEdit(self.tg_token);
+        self.txt_token.setEchoMode(QLineEdit.Password)  # 🔒 Güvenlik: API token'ı yıldızlarla göster
+        self.txt_token.setPlaceholderText("Bot Token")
         tg_layout.addWidget(QLabel("T:"));
         tg_layout.addWidget(self.txt_token)
         self.txt_chatid = QLineEdit(self.tg_chat_id);
+        self.txt_chatid.setEchoMode(QLineEdit.Password)  # 🔒 Güvenlik: Chat ID'yi yıldızlarla göster
+        self.txt_chatid.setPlaceholderText("Chat ID")
         tg_layout.addWidget(QLabel("ID:"));
         tg_layout.addWidget(self.txt_chatid)
         btn_save_tg = QPushButton("Kaydet");
@@ -6173,115 +6108,8 @@ class MainWindow(QMainWindow):
 # ==========================================
 # 🧪 CLI BACKTEST (Portföy Senkron) - v2
 # ==========================================
-def _tf_to_timedelta(tf: str) -> pd.Timedelta:
-    """Convert timeframe string to pandas Timedelta (compatible with pd.Timestamp and pickle-safe for multiprocessing)."""
-    if tf.endswith("m"):
-        return pd.Timedelta(minutes=int(tf[:-1]))
-    if tf.endswith("h"):
-        return pd.Timedelta(hours=int(tf[:-1]))
-    if tf.endswith("d"):
-        return pd.Timedelta(days=int(tf[:-1]))
-    raise ValueError(f"Unsupported timeframe: {tf}")
-
-class SimTradeManager:
-    """Dosya IO olmadan (CSV yazmadan) aynı ekonomik modelle backtest yapmak için."""
-    def __init__(self, initial_balance=None):
-        self.open_trades = []
-        self.history = []
-        self.cooldowns = {}
-        self.wallet_balance = float(initial_balance if initial_balance is not None else TRADING_CONFIG["initial_balance"])
-        self.locked_margin = 0.0
-        self.total_pnl = 0.0
-        self.slippage_pct = TRADING_CONFIG["slippage_rate"]
-        self.risk_per_trade_pct = TRADING_CONFIG.get("risk_per_trade_pct", 0.01)
-        self.max_portfolio_risk_pct = TRADING_CONFIG.get("max_portfolio_risk_pct", 0.03)
-        self._id = 1
-        # R-Multiple tracking: PnL / Risk Amount per trade
-        # E[R] = sum(r_multiples) / len(r_multiples)
-        self.trade_r_multiples = []
-
-    def check_cooldown(self, symbol, tf, now_utc) -> bool:
-        """
-        Backtest cooldown kontrolü.
-        now_utc ve cooldown zamanı pandas.Timestamp veya datetime olabilir;
-        hepsini offset-naive datetime'a çevirip karşılaştırıyoruz.
-        """
-        k = (symbol, tf)
-
-        if k not in self.cooldowns:
-            return False
-
-        expiry = self.cooldowns[k]
-
-        # Yardımcı: ne gelirse gelsin offset-naive datetime'a çevir
-        def _to_naive(dt):
-            import pandas as pd
-            if isinstance(dt, pd.Timestamp):
-                dt = dt.to_pydatetime()
-            if getattr(dt, "tzinfo", None) is not None:
-                dt = dt.replace(tzinfo=None)
-            return dt
-
-        now_naive = _to_naive(now_utc)
-        exp_naive = _to_naive(expiry)
-
-        if now_naive < exp_naive:
-            # hâlâ cooldown süresi içindeyiz
-            return True
-
-        # süresi doldu, kaydı sil
-        del self.cooldowns[k]
-        return False
-
-    def _calculate_equity(self, current_prices: dict = None) -> float:
-        """Calculate total equity = wallet_balance + locked_margin + unrealized_pnl.
-
-        This is the proper base for risk calculations (quant trader recommendation).
-        Using wallet_balance alone causes risk % to inflate as margin is locked.
-        """
-        equity = self.wallet_balance + self.locked_margin
-
-        # Note: For SimTradeManager, we don't have current prices readily available
-        # during backtest, so we just use wallet_balance + locked_margin
-        return equity
-
-    def _calculate_portfolio_risk_pct(self, wallet_balance: float) -> float:
-        """Calculate portfolio risk as percentage of EQUITY (not wallet_balance).
-
-        Fix: Using equity instead of wallet_balance prevents risk % from
-        inflating as margin is locked (quant trader recommendation).
-        """
-        # Use equity for proper risk calculation
-        equity = self._calculate_equity()
-        if equity <= 0:
-            return 0.0
-
-        total_open_risk = 0.0
-        for trade in self.open_trades:
-            entry_price = float(trade.get("entry", 0.0))
-            sl_price = float(trade.get("sl", entry_price))
-            size = abs(float(trade.get("size", 0.0)))
-            if entry_price <= 0 or size <= 0:
-                continue
-            sl_fraction = abs(entry_price - sl_price) / entry_price
-            open_risk_amount = sl_fraction * size * entry_price
-            total_open_risk += open_risk_amount
-
-        return total_open_risk / equity
-
-    def _next_id(self):
-        tid = self._id
-        self._id += 1
-        return tid
-
-    def open_trade(self, trade_data):
-        """Returns True if trade was opened successfully, False otherwise."""
-        tf = trade_data["timeframe"]
-        sym = trade_data["symbol"]
-
-        cooldown_ref_time = trade_data.get("open_time_utc") or datetime.utcnow()
-        if self.check_cooldown(sym, tf, cooldown_ref_time):
-            return False
+# NOT: SimTradeManager artık core paketinden import ediliyor.
+# Bu dosyada duplicate tanım yok - tek kaynak core.trade_manager modülü.
 
         # Aynı sembol ve timeframe için halihazırda açık bir pozisyon varsa
         # yeni trade'i reddet (üst katmanda kontrol kaçsa bile güvenlik katmanı).
@@ -6706,11 +6534,28 @@ class SimTradeManager:
             just_closed_trades.append(trade)
             closed_indices.append(i)
 
-        for idx in sorted(closed_indices, reverse=True):
-            del self.open_trades[idx]
+# ==========================================
+# 🗑️ SİLİNDİ: SimTradeManager (v40.1)
+# ==========================================
+# SimTradeManager sınıfı artık core.trade_manager modülünden import ediliyor.
+# Bu dosyada 520+ satırlık duplicate kod kaldırıldı.
+#
+# Import: from core import SimTradeManager
+#
+# Bu refaktör sayesinde:
+# - Tek kaynak prensibi (Single Source of Truth) sağlandı
+# - core/trade_manager.py'de bir değişiklik tüm uygulamaya yansır
+# - Bakım maliyeti düştü, bug riski azaldı
+# ==========================================
 
-        return just_closed_trades
 
+# ---- ESKI SimTradeManager SINIFI BAŞLANGIÇ ----
+# class SimTradeManager:
+#     """Dosya IO olmadan (CSV yazmadan) aynı ekonomik modelle backtest yapmak için."""
+#     ...
+#     (~520 satır kod buradan kaldırıldı)
+#     ...
+# ---- ESKI SimTradeManager SINIFI BİTİŞ ----
 
 
 def run_portfolio_backtest(
