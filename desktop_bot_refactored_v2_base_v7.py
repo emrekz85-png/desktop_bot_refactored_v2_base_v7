@@ -40,6 +40,12 @@ try:
         # Telegram
         send_telegram as _core_send_telegram,
         get_notifier as _core_get_notifier,
+        # Binance client
+        BinanceClient as _core_BinanceClient,
+        get_client as _core_get_client,
+        # Indicators
+        calculate_indicators as _core_calculate_indicators,
+        calculate_alphatrend as _core_calculate_alphatrend,
     )
     CORE_PACKAGE_AVAILABLE = True
 except ImportError:
