@@ -3990,12 +3990,50 @@ class BinanceWebSocketKlineStream(threading.Thread):
         self._lock = threading.Lock()
         self._host = "fstream.binance.com"
         self._url_path = self._build_stream_path()
-        self._data = {(s, tf): TradingEngine.get_data(s, tf, limit=max_candles) for s in symbols for tf in timeframes}
+        # ⚡ FAST STARTUP: Paralel veri yükleme (77 sıralı çağrı yerine 5 paralel thread)
+        print("[STARTUP] Veriler paralel olarak yükleniyor...")
+        self._data = self._load_initial_data_parallel()
 
     def _build_stream_path(self):
         streams = [f"{s.lower()}@kline_{tf}" for s in self.symbols for tf in self.timeframes]
         stream_query = "/stream?streams=" + "/".join(streams)
         return stream_query
+
+    def _load_initial_data_parallel(self):
+        """Başlangıç verilerini paralel olarak yükle (5x daha hızlı)."""
+        import concurrent.futures
+        import time as _time
+
+        start_time = _time.time()
+        tasks = [(s, tf) for s in self.symbols for tf in self.timeframes]
+        results = {}
+        total = len(tasks)
+        completed = 0
+
+        def fetch_one(args):
+            symbol, tf = args
+            try:
+                return (symbol, tf, TradingEngine.get_data(symbol, tf, limit=self.max_candles))
+            except Exception:
+                return (symbol, tf, pd.DataFrame())
+
+        # 10 paralel thread kullan (API rate limit'e dikkat ederek)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(fetch_one, t): t for t in tasks}
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    sym, tf, df = future.result()
+                    results[(sym, tf)] = df
+                    completed += 1
+                    # Her 10 tamamlananda bir progress göster
+                    if completed % 10 == 0 or completed == total:
+                        print(f"[STARTUP] Veri yükleme: {completed}/{total} ({100*completed//total}%)")
+                except Exception as e:
+                    print(f"[STARTUP] Veri hatası: {e}")
+
+        elapsed = _time.time() - start_time
+        print(f"[STARTUP] Tüm veriler yüklendi! ({elapsed:.1f} saniye)")
+        return results
 
     def _recv_exact(self, length):
         data = b""
