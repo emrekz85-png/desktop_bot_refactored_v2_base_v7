@@ -10,6 +10,42 @@ import contextlib
 import threading
 
 # ==========================================
+# 🆕 MODULAR CORE PACKAGE INTEGRATION (v40.0)
+# ==========================================
+# The core package provides refactored modules for better maintainability:
+# - core.config: Centralized configuration
+# - core.utils: Helper functions (time conversion, funding calculation)
+# - core.trade_manager: BaseTradeManager with shared logic
+# - core.telegram: Improved Telegram notifications
+#
+# Use environment variables for Telegram (more secure than config.json):
+# - TELEGRAM_BOT_TOKEN
+# - TELEGRAM_CHAT_ID
+#
+# Key improvements:
+# - Eliminated code duplication between TradeManager and SimTradeManager
+# - Fixed funding calculation to use actual hours (not bar count)
+# - Fixed UTC/time naming (close_time_utc vs close_time_local)
+# - Thread pool for Telegram (prevents thread accumulation)
+# ==========================================
+try:
+    from core import (
+        # Utils
+        normalize_datetime as _core_normalize_datetime,
+        tf_to_timedelta as _core_tf_to_timedelta,
+        calculate_funding_cost as _core_calculate_funding_cost,
+        format_time_utc as _core_format_time_utc,
+        format_time_local as _core_format_time_local,
+        append_trade_event as _core_append_trade_event,
+        # Telegram
+        send_telegram as _core_send_telegram,
+        get_notifier as _core_get_notifier,
+    )
+    CORE_PACKAGE_AVAILABLE = True
+except ImportError:
+    CORE_PACKAGE_AVAILABLE = False
+
+# ==========================================
 # 🚀 FAST STARTUP - Lazy imports for heavy libraries
 # ==========================================
 # Performance note: pandas_ta and plotly are imported lazily
@@ -790,7 +826,15 @@ def _apply_partial_stop_protection(trade: dict, tf: str, progress: float, t_type
 
 
 def _append_trade_event(trade: dict, event_type: str, event_time, price: Optional[float] = None):
-    """Append a serializable lifecycle event to the trade for plotting/logging parity."""
+    """Append a serializable lifecycle event to the trade for plotting/logging parity.
+
+    Note: The core.utils module has an improved version of this function.
+    This version is kept for backward compatibility.
+    """
+    # Use core package version if available
+    if CORE_PACKAGE_AVAILABLE:
+        _core_append_trade_event(trade, event_type, event_time, price)
+        return
 
     try:
         events = trade.get("events", [])
@@ -2784,8 +2828,26 @@ class TradingEngine:
 
     @staticmethod
     def send_telegram(token, chat_id, message):
-        if not token or not chat_id: return
+        """Send Telegram message asynchronously.
 
+        Note: The core.telegram module provides an improved version with:
+        - Thread pool (prevents thread accumulation)
+        - Rate limiting (prevents API throttling)
+        - Retry logic
+        - Environment variable support for credentials
+
+        Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment variables
+        for better security (instead of storing in config.json).
+        """
+        if not token or not chat_id:
+            return
+
+        # Use core package version if available (has thread pool and rate limiting)
+        if CORE_PACKAGE_AVAILABLE:
+            _core_send_telegram(token, chat_id, message)
+            return
+
+        # Fallback to simple thread-based sending
         def sender():
             try:
                 url = f"https://api.telegram.org/bot{token}/sendMessage"
