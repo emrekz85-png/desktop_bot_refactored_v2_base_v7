@@ -161,13 +161,21 @@ def save_best_configs(best_configs: dict):
     """
     global BEST_CONFIG_CACHE, BEST_CONFIG_WARNING_FLAGS
 
+    # Kritik metadata alanları - underscore ile başlasa bile korunmalı
+    # _oos_start_time: Backtest trade'lerini OOS dönemden filtrelemek için
+    # _expected_r, _oos_expected_r: E[R] metrikleri (istatistik için)
+    METADATA_TO_PRESERVE = {"_oos_start_time", "_expected_r", "_oos_expected_r", "_walk_forward_validated"}
+
     cleaned = {}
     for (key, cfg) in best_configs.items():
         if isinstance(key, tuple) and len(key) == 2:
             sym, tf = key
             cleaned.setdefault(sym, {})
-            # Remove internal fields starting with "_"
-            cleaned[sym][tf] = {k: v for k, v in cfg.items() if not str(k).startswith("_")}
+            # Underscore ile başlamayan + kritik metadata alanlarını koru
+            cleaned[sym][tf] = {
+                k: v for k, v in cfg.items()
+                if not str(k).startswith("_") or k in METADATA_TO_PRESERVE
+            }
         elif isinstance(cfg, dict):
             cleaned[key] = cfg
 

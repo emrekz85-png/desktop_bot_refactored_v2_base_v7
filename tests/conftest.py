@@ -247,7 +247,7 @@ def mock_best_config_cache(trading_module):
             "use_trailing": False,
             "use_dynamic_pbema_tp": True,
             "strategy_mode": "keltner_bounce",
-            "_confidence": "high",
+            "confidence": "high",
         },
         "15m": {
             "rr": 1.5,
@@ -256,7 +256,7 @@ def mock_best_config_cache(trading_module):
             "use_trailing": False,
             "use_dynamic_pbema_tp": True,
             "strategy_mode": "keltner_bounce",
-            "_confidence": "high",
+            "confidence": "high",
         },
     }
 
