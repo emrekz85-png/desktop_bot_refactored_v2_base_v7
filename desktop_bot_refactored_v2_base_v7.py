@@ -224,6 +224,30 @@ DAILY_REPORT_CANDLE_LIMITS = {
     "12h": 5000,
     "1d": 4000,
 }
+
+# Gün → Mum dönüşüm sabitleri (her TF için günde kaç mum)
+CANDLES_PER_DAY = {
+    "1m": 1440,   # 24 * 60
+    "5m": 288,    # 24 * 60 / 5
+    "15m": 96,    # 24 * 60 / 15
+    "30m": 48,    # 24 * 60 / 30
+    "1h": 24,     # 24
+    "4h": 6,      # 24 / 4
+    "12h": 2,     # 24 / 12
+    "1d": 1,      # 1
+}
+
+def days_to_candles(days: int, timeframe: str) -> int:
+    """Gün sayısını belirtilen timeframe için mum sayısına çevirir."""
+    cpd = CANDLES_PER_DAY.get(timeframe, 24)  # varsayılan 1h
+    return days * cpd
+
+def days_to_candles_map(days: int, timeframes: list = None) -> dict:
+    """Gün sayısını tüm timeframe'ler için mum sayısı dict'ine çevirir."""
+    if timeframes is None:
+        timeframes = TIMEFRAMES
+    return {tf: days_to_candles(days, tf) for tf in timeframes}
+
 BEST_CONFIGS_FILE = os.path.join(DATA_DIR, "best_configs.json")
 BEST_CONFIG_CACHE = {}
 BEST_CONFIG_WARNING_FLAGS = {
@@ -4520,16 +4544,26 @@ class LiveBotWorker(QThread):
 class OptimizerWorker(QThread):
     result_signal = pyqtSignal(str)
 
-    def __init__(self, symbol, candle_limit, rr_range, rsi_range, slope_range, use_alphatrend,
-                 monte_carlo_mode=False, timeframes=None):
+    def __init__(self, symbol, candle_limit_or_days, rr_range, rsi_range, slope_range, use_alphatrend,
+                 monte_carlo_mode=False, timeframes=None, use_days=False):
         super().__init__()
         self.symbol = symbol
-        self.candle_limit = candle_limit
+        self.use_days = use_days
+        self.timeframes = timeframes or list(TIMEFRAMES)
+        if use_days:
+            # Gün modunda: her TF için ayrı mum sayısı
+            self.days = candle_limit_or_days
+            self.candle_limit = None
+            self.candle_limit_map = days_to_candles_map(candle_limit_or_days, self.timeframes)
+        else:
+            # Eski mum modu (geriye uyumluluk)
+            self.days = None
+            self.candle_limit = candle_limit_or_days
+            self.candle_limit_map = None
         self.rr_range = rr_range
         self.rsi_range = rsi_range
         self.slope_range = slope_range
         self.monte_carlo_mode = monte_carlo_mode
-        self.timeframes = timeframes or list(TIMEFRAMES)
 
         # --- MERKEZİ AYARLARDAN OKUMA ---
         self.slippage_rate = TRADING_CONFIG["slippage_rate"]
@@ -4555,8 +4589,14 @@ class OptimizerWorker(QThread):
 
             data_cache = {}
             for tf in self.timeframes:
-                self.result_signal.emit(f"⬇️ {tf} verisi hazırlanıyor...\n")
-                df = TradingEngine.get_historical_data_pagination(self.symbol, tf, total_candles=self.candle_limit)
+                # Gün modunda her TF için farklı mum sayısı
+                if self.use_days and self.candle_limit_map:
+                    tf_candle_limit = self.candle_limit_map.get(tf, 720)  # varsayılan 30 gün * 24
+                    self.result_signal.emit(f"⬇️ {tf} verisi hazırlanıyor ({self.days} gün = {tf_candle_limit} mum)...\n")
+                else:
+                    tf_candle_limit = self.candle_limit
+                    self.result_signal.emit(f"⬇️ {tf} verisi hazırlanıyor...\n")
+                df = TradingEngine.get_historical_data_pagination(self.symbol, tf, total_candles=tf_candle_limit)
 
                 if not df.empty:
                     # --- MONTE CARLO KARIŞTIRMA ---
@@ -4855,11 +4895,21 @@ class BacktestWorker(QThread):
     log_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(dict)
 
-    def __init__(self, symbols, timeframes, candles, skip_optimization=False, quick_mode=False):
+    def __init__(self, symbols, timeframes, candles_or_days, skip_optimization=False, quick_mode=False, use_days=False):
         super().__init__()
         self.symbols = symbols
         self.timeframes = timeframes
-        self.candles = candles
+        self.use_days = use_days
+        if use_days:
+            # Gün modunda: her TF için ayrı mum sayısı hesapla
+            self.days = candles_or_days
+            self.candles = None  # limit_map kullanılacak
+            self.limit_map = days_to_candles_map(candles_or_days, timeframes)
+        else:
+            # Eski mum modu (geriye uyumluluk)
+            self.days = None
+            self.candles = candles_or_days
+            self.limit_map = None
         self.skip_optimization = skip_optimization
         self.quick_mode = quick_mode
         self._last_log_time = 0.0
@@ -4886,16 +4936,30 @@ class BacktestWorker(QThread):
         result = {}
 
         try:
-            result = run_portfolio_backtest(
-                symbols=self.symbols,
-                timeframes=self.timeframes,
-                candles=self.candles,
-                progress_callback=self._throttled_log,
-                draw_trades=True,
-                max_draw_trades=30,
-                skip_optimization=self.skip_optimization,
-                quick_mode=self.quick_mode,
-            ) or {}
+            # Gün modunda limit_map kullan, aksi halde eski candles
+            if self.use_days and self.limit_map:
+                result = run_portfolio_backtest(
+                    symbols=self.symbols,
+                    timeframes=self.timeframes,
+                    candles=max(self.limit_map.values()),  # En yüksek değeri fallback olarak kullan
+                    limit_map=self.limit_map,
+                    progress_callback=self._throttled_log,
+                    draw_trades=True,
+                    max_draw_trades=30,
+                    skip_optimization=self.skip_optimization,
+                    quick_mode=self.quick_mode,
+                ) or {}
+            else:
+                result = run_portfolio_backtest(
+                    symbols=self.symbols,
+                    timeframes=self.timeframes,
+                    candles=self.candles,
+                    progress_callback=self._throttled_log,
+                    draw_trades=True,
+                    max_draw_trades=30,
+                    skip_optimization=self.skip_optimization,
+                    quick_mode=self.quick_mode,
+                ) or {}
             # Ensure the last status arrives even if throttled
             self._flush_pending_log()
         except Exception as e:
@@ -5227,11 +5291,12 @@ class MainWindow(QMainWindow):
             bt_tf_layout.addWidget(cb)
             self.backtest_tf_checks[tf] = cb
         bt_cfg.addLayout(bt_tf_layout)
-        bt_cfg.addWidget(QLabel("Mum Sayısı:"));
-        self.backtest_candles = QSpinBox();
-        self.backtest_candles.setRange(500, 100000);  # Maksimum limit kaldırıldı
-        self.backtest_candles.setValue(3000);
-        bt_cfg.addWidget(self.backtest_candles)
+        bt_cfg.addWidget(QLabel("Gün Sayısı:"));
+        self.backtest_days = QSpinBox();
+        self.backtest_days.setRange(7, 365);  # 7 gün - 1 yıl arası
+        self.backtest_days.setValue(30);  # Varsayılan 30 gün
+        self.backtest_days.setToolTip("Her timeframe için bu kadar günlük veri test edilecek")
+        bt_cfg.addWidget(self.backtest_days)
 
         # Hız ayarları
         speed_layout = QHBoxLayout()
@@ -5320,11 +5385,12 @@ class MainWindow(QMainWindow):
         self.combo_opt_symbol = QComboBox();
         self.combo_opt_symbol.addItems(SYMBOLS);
         candles_layout.addWidget(self.combo_opt_symbol)
-        candles_layout.addWidget(QLabel("Mum Sayısı:"));
-        self.opt_candles = QSpinBox();
-        self.opt_candles.setRange(1000, 20000);
-        self.opt_candles.setValue(3500);
-        candles_layout.addWidget(self.opt_candles)
+        candles_layout.addWidget(QLabel("Gün Sayısı:"));
+        self.opt_days = QSpinBox();
+        self.opt_days.setRange(7, 180);  # 7 gün - 6 ay arası
+        self.opt_days.setValue(30);  # Varsayılan 30 gün
+        self.opt_days.setToolTip("Her timeframe için bu kadar günlük veri optimize edilecek");
+        candles_layout.addWidget(self.opt_days)
         self.chk_monte_carlo = QCheckBox("🎲 Monte Carlo Testi (Random Walk)")
         self.chk_monte_carlo.setStyleSheet("color: #ff9900; font-weight: bold;")
         candles_layout.addWidget(self.chk_monte_carlo)
@@ -5796,9 +5862,14 @@ class MainWindow(QMainWindow):
         else:
             self.backtest_logs.append("ℹ️ Önceki backtest kaydı bulunamadı.")
 
-        self.backtest_logs.append("🧪 Backtest başlatıldı. Lütfen bekleyin...")
-        candles = self.backtest_candles.value()
+        days = self.backtest_days.value()
         selected_tfs = self.get_selected_timeframes(getattr(self, "backtest_tf_checks", {}))
+
+        # Gün → Mum dönüşümü bilgisi
+        candles_info = ", ".join([f"{tf}:{days_to_candles(days, tf)}" for tf in selected_tfs[:3]])
+        if len(selected_tfs) > 3:
+            candles_info += "..."
+        self.backtest_logs.append(f"🧪 Backtest başlatıldı ({days} gün → {candles_info} mum)")
 
         # Hız ayarlarını oku
         skip_opt = self.chk_skip_optimization.isChecked()
@@ -5808,7 +5879,7 @@ class MainWindow(QMainWindow):
         elif quick:
             self.backtest_logs.append("🚀 Hızlı mod aktif (13 config)")
 
-        self.backtest_worker = BacktestWorker(SYMBOLS, selected_tfs, candles, skip_opt, quick)
+        self.backtest_worker = BacktestWorker(SYMBOLS, selected_tfs, days, skip_opt, quick, use_days=True)
         self.backtest_worker.log_signal.connect(self.append_backtest_log)
         self.backtest_worker.finished_signal.connect(self.on_backtest_finished)
         self.btn_run_backtest.setEnabled(False)
@@ -5906,7 +5977,7 @@ class MainWindow(QMainWindow):
     # --- OPTIMIZATION STARTUP (FIXED) ---
         # --- GÜNCELLENMİŞ RUN OPTIMIZATION ---
     def run_optimization(self):
-        candles = self.opt_candles.value()
+        days = self.opt_days.value()
         rr_range = (self.opt_rr_start.value(), self.opt_rr_end.value(), self.opt_rr_step.value())
         rsi_range = (self.opt_rsi_start.value(), self.opt_rsi_end.value(), self.opt_rsi_step.value())
         slope_range = (self.opt_slope_start.value(), self.opt_slope_end.value(), self.opt_slope_step.value())
@@ -5921,9 +5992,9 @@ class MainWindow(QMainWindow):
         self.opt_logs.clear()
         self.btn_run_opt.setEnabled(False)
 
-        # Worker'a monte_carlo parametresini gönder
-        self.opt_worker = OptimizerWorker(selected_sym, candles, rr_range, rsi_range, slope_range, use_at,
-                                          is_monte_carlo, selected_tfs)
+        # Worker'a days parametresini gönder (TF başına mum sayısı dönüşümü worker içinde yapılacak)
+        self.opt_worker = OptimizerWorker(selected_sym, days, rr_range, rsi_range, slope_range, use_at,
+                                          is_monte_carlo, selected_tfs, use_days=True)
         self.opt_worker.result_signal.connect(self.on_opt_update)
         self.opt_worker.start()
 
