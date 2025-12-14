@@ -148,15 +148,7 @@ TRADING_CONFIG = {
     "funding_rate_8h": 0.0001,   # %0.01 Fonlama (8 saatlik)
     "maker_fee": 0.0002,         # %0.02 Limit Emir Komisyonu
     "taker_fee": 0.0005,         # %0.05 Piyasa Emir Komisyonu
-    "total_fee": 0.0007,         # %0.07 (Giriş + Çıkış Tahmini) - Güvenlik marjı
-    # --- SEMBOL BAZLI RİSK LİMİTLERİ (v40.0) ---
-    # Tek bir sembolün portföyü "yakmasını" önler
-    # NOT: max_symbol_risk_pct en az risk_per_trade_pct kadar olmalı, yoksa ilk trade bile açılamaz!
-    # 0.035 = 2 concurrent trade'e izin verir (0.0175 * 2)
-    "max_symbol_risk_pct": 0.035,           # Tek sembolde max %3.5 açık risk (2 concurrent trade)
-    "max_symbol_rolling_loss_usd": 100.0,   # Son N trade'de max $100 kayıp
-    "symbol_rolling_window": 5,             # Rolling loss için kaç trade geriye bakılacak
-    "symbol_loss_cooldown_hours": 24,       # Loss limitine ulaşınca bekleme süresi (saat)
+    "total_fee": 0.0007          # %0.07 (Giriş + Çıkış Tahmini) - Güvenlik marjı
 }
 
 # ==========================================
@@ -679,9 +671,8 @@ def _generate_candidate_configs():
     - Mean reversion stratejisinde slope filter mantıksız
     - Slope taramak sadece zaman kaybı
 
-    İki strateji modu test edilir:
-    - keltner_bounce: Keltner band bounce (mevcut)
-    - pbema_reaction: PBEMA tepki stratejisi (yeni)
+    Sadece Keltner Bounce stratejisi kullanılıyor.
+    PBEMA_Reaction stratejisi devre dışı bırakıldı (backtest sonuçları negatif).
     """
 
     rr_vals = np.arange(1.2, 2.6, 0.3)
@@ -689,8 +680,8 @@ def _generate_candidate_configs():
     at_vals = [False, True]
     # Include both dynamic TP options to ensure optimizer matches what live will use
     dyn_tp_vals = [True, False]
-    # Test both strategy modes
-    strategy_modes = ["keltner_bounce", "pbema_reaction"]
+    # PBEMA_Reaction devre dışı bırakıldı - sadece Keltner Bounce kullanılıyor
+    strategy_modes = ["keltner_bounce"]
 
     candidates = []
 
@@ -710,27 +701,8 @@ def _generate_candidate_configs():
             }
         )
 
-    # PBEMA reaction strategy configs
-    # PBEMA stratejisi için farklı parametre kombinasyonları
-    pbema_approach_vals = [0.002, 0.003, 0.004]  # PBEMA yaklaşım toleransı
-    pbema_frontrun_vals = [0.0015, 0.002, 0.003]  # Frontrun marjı
-
-    for rr, rsi, approach_tol, frontrun_margin in itertools.product(
-        rr_vals, rsi_vals, pbema_approach_vals, pbema_frontrun_vals
-    ):
-        candidates.append(
-            {
-                "rr": round(float(rr), 2),
-                "rsi": int(rsi),
-                "slope": 0.5,
-                "at_active": False,  # PBEMA stratejisinde AT kullanılmıyor
-                "use_trailing": False,
-                "use_dynamic_pbema_tp": False,  # PBEMA stratejisinde dinamik TP yok
-                "strategy_mode": "pbema_reaction",
-                "pbema_approach_tolerance": approach_tol,
-                "pbema_frontrun_margin": frontrun_margin,
-            }
-        )
+    # PBEMA_Reaction stratejisi devre dışı bırakıldı (backtest sonuçları negatif)
+    # Eski PBEMA config üretimi kaldırıldı
 
     # Birkaç agresif trailing seçeneği ekle (sadece keltner bounce için)
     trailing_extras = []
@@ -744,11 +716,11 @@ def _generate_candidate_configs():
 
 
 def _generate_quick_candidate_configs():
-    """Create a minimal config grid for quick testing (~24 configs instead of ~120).
+    """Create a minimal config grid for quick testing (~12 configs instead of ~120).
 
     Used when quick_mode=True for faster backtest iterations.
     Covers key combinations without exhaustive search.
-    Both strategy modes (keltner_bounce and pbema_reaction) are tested.
+    Only Keltner Bounce strategy is tested (PBEMA_Reaction devre dışı).
     """
     # Sadece en önemli RR ve RSI değerlerini kullan
     rr_vals = [1.2, 1.8, 2.4]  # 3 değer (vs 5)
@@ -774,26 +746,7 @@ def _generate_quick_candidate_configs():
             }
         )
 
-    # PBEMA reaction strategy configs (minimal grid)
-    pbema_approach_vals = [0.003]  # Sadece 1 değer
-    pbema_frontrun_vals = [0.002]  # Sadece 1 değer
-
-    for rr, rsi, approach_tol, frontrun_margin in itertools.product(
-        rr_vals, rsi_vals, pbema_approach_vals, pbema_frontrun_vals
-    ):
-        candidates.append(
-            {
-                "rr": round(float(rr), 2),
-                "rsi": int(rsi),
-                "slope": 0.5,
-                "at_active": False,
-                "use_trailing": False,
-                "use_dynamic_pbema_tp": False,
-                "strategy_mode": "pbema_reaction",
-                "pbema_approach_tolerance": approach_tol,
-                "pbema_frontrun_margin": frontrun_margin,
-            }
-        )
+    # PBEMA_Reaction stratejisi devre dışı bırakıldı (backtest sonuçları negatif)
 
     # 1 trailing config ekle (sadece keltner bounce için)
     trailing_cfg = dict(candidates[0])
@@ -1712,125 +1665,6 @@ class TradeManager:
 
         return total_open_risk / equity
 
-    # --- SEMBOL BAZLI RİSK LİMİTLERİ (v40.0) ---
-
-    def _calculate_symbol_open_risk(self, symbol: str, strategy_mode: str) -> float:
-        """Belirli bir sembol için açık risk yüzdesini hesapla (tüm timeframe'ler dahil).
-
-        Bu fonksiyon, aynı sembolde birden fazla pozisyon açıldığında toplam riski hesaplar.
-        Örnek: XRPUSDT 1h + XRPUSDT 4h açıksa, ikisinin toplam riski döner.
-        """
-        wallet = self._get_strategy_wallet(strategy_mode)
-        equity = wallet["wallet_balance"] + wallet["locked_margin"]
-        if equity <= 0:
-            return 0.0
-
-        symbol_open_risk = 0.0
-        for trade in self.open_trades:
-            # Sadece bu stratejiye ve sembole ait trade'leri say
-            trade_strategy = trade.get("strategy_mode", "keltner_bounce")
-            if trade_strategy != strategy_mode:
-                continue
-            if trade.get("symbol") != symbol:
-                continue
-
-            entry_price = float(trade.get("entry", 0.0))
-            sl_price = float(trade.get("sl", entry_price))
-            size = abs(float(trade.get("size", 0.0)))
-            if entry_price <= 0 or size <= 0:
-                continue
-            sl_fraction = abs(entry_price - sl_price) / entry_price
-            open_risk_amount = sl_fraction * size * entry_price
-            symbol_open_risk += open_risk_amount
-
-        return symbol_open_risk / equity
-
-    def _get_symbol_rolling_loss(self, symbol: str, strategy_mode: str, window: int = 5) -> float:
-        """Son N trade'deki sembol bazlı toplam kayıp (USD).
-
-        Sadece negatif PnL'leri toplar (pozitif trade'ler sıfır olarak sayılır).
-        Bu sayede seri kayıp durumları tespit edilir.
-        """
-        # Kapalı trade'lerden bu sembole ait olanları filtrele
-        symbol_trades = [
-            t for t in self.closed_trades
-            if t.get("symbol") == symbol and t.get("strategy_mode", "keltner_bounce") == strategy_mode
-        ]
-
-        # Son N trade'i al (en yeniler sonda)
-        recent_trades = symbol_trades[-window:] if len(symbol_trades) >= window else symbol_trades
-
-        # Sadece kayıpları topla
-        rolling_loss = 0.0
-        for trade in recent_trades:
-            pnl = float(trade.get("pnl", 0.0))
-            if pnl < 0:
-                rolling_loss += abs(pnl)
-
-        return rolling_loss
-
-    def _is_symbol_in_loss_cooldown(self, symbol: str, strategy_mode: str, now_utc=None) -> bool:
-        """Sembol loss limitine ulaşmış mı ve cooldown'da mı kontrol et.
-
-        Returns:
-            True: Sembol cooldown'da, trade açılmamalı
-            False: Sembol trade açabilir
-        """
-        if now_utc is None:
-            now_utc = datetime.utcnow()
-
-        # Normalize timestamp (numpy datetime64 dahil)
-        if isinstance(now_utc, np.datetime64):
-            now_utc = pd.Timestamp(now_utc).to_pydatetime()
-        elif isinstance(now_utc, pd.Timestamp):
-            now_utc = now_utc.to_pydatetime()
-        if hasattr(now_utc, "tzinfo") and now_utc.tzinfo is not None:
-            now_utc = now_utc.replace(tzinfo=None)
-
-        cooldown_key = f"symbol_loss_{symbol}_{strategy_mode}"
-
-        if cooldown_key not in self.cooldowns:
-            return False
-
-        expiry = self.cooldowns[cooldown_key]
-
-        # Normalize expiry (numpy datetime64 dahil)
-        if isinstance(expiry, np.datetime64):
-            expiry = pd.Timestamp(expiry).to_pydatetime()
-        elif isinstance(expiry, pd.Timestamp):
-            expiry = expiry.to_pydatetime()
-        if hasattr(expiry, "tzinfo") and expiry.tzinfo is not None:
-            expiry = expiry.replace(tzinfo=None)
-
-        self.cooldowns[cooldown_key] = expiry
-
-        if now_utc < expiry:
-            return True
-
-        # Cooldown süresi doldu, temizle
-        del self.cooldowns[cooldown_key]
-        return False
-
-    def _set_symbol_loss_cooldown(self, symbol: str, strategy_mode: str, hours: float, now_utc=None):
-        """Sembol için loss cooldown'ı ayarla."""
-        if now_utc is None:
-            now_utc = datetime.utcnow()
-
-        # Normalize timestamp (numpy datetime64 dahil)
-        if isinstance(now_utc, np.datetime64):
-            now_utc = pd.Timestamp(now_utc).to_pydatetime()
-        elif isinstance(now_utc, pd.Timestamp):
-            now_utc = now_utc.to_pydatetime()
-        if hasattr(now_utc, "tzinfo") and now_utc.tzinfo is not None:
-            now_utc = now_utc.replace(tzinfo=None)
-
-        cooldown_key = f"symbol_loss_{symbol}_{strategy_mode}"
-        expiry = now_utc + timedelta(hours=hours)
-        self.cooldowns[cooldown_key] = expiry
-
-        if self.verbose:
-            print(f"🛑 SEMBOL LOSS COOLDOWN: {symbol} ({strategy_mode}) - {hours}h cooldown başladı, bitiş: {expiry}")
-
     def check_cooldown(self, symbol, timeframe, now_utc=None):
         """
         İşlem sonrası cooldown kontrolü.
@@ -1975,39 +1809,6 @@ class TradeManager:
                 print(
                     f"⚠️ [{strategy_mode}] Portföy risk limiti aşılıyor: mevcut %{current_portfolio_risk_pct * 100:.2f}, "
                     f"yeni işlem riski %{effective_risk_pct * 100:.2f}, limit %{self.max_portfolio_risk_pct * 100:.2f}"
-                )
-                return
-
-            # --- SEMBOL BAZLI RİSK KONTROLLERİ (v40.0) ---
-            max_symbol_risk_pct = TRADING_CONFIG.get("max_symbol_risk_pct", 0.015)
-            max_symbol_rolling_loss = TRADING_CONFIG.get("max_symbol_rolling_loss_usd", 100.0)
-            symbol_rolling_window = TRADING_CONFIG.get("symbol_rolling_window", 5)
-            symbol_cooldown_hours = TRADING_CONFIG.get("symbol_loss_cooldown_hours", 24)
-
-            # Kontrol 1: Sembol loss cooldown'da mı?
-            if self._is_symbol_in_loss_cooldown(sym, strategy_mode, cooldown_ref_time):
-                print(f"🛑 [{sym}] SEMBOL LOSS COOLDOWN aktif ({strategy_mode}). İşlem açılmadı.")
-                return
-
-            # Kontrol 2: Sembol rolling loss limitini aştı mı?
-            symbol_rolling_loss = self._get_symbol_rolling_loss(sym, strategy_mode, symbol_rolling_window)
-            if symbol_rolling_loss >= max_symbol_rolling_loss:
-                # Cooldown'ı ayarla ve trade'i reddet
-                self._set_symbol_loss_cooldown(sym, strategy_mode, symbol_cooldown_hours, cooldown_ref_time)
-                print(
-                    f"🛑 [{sym}] SEMBOL ROLLING LOSS LİMİTİ AŞILDI ({strategy_mode}): "
-                    f"Son {symbol_rolling_window} trade'de ${symbol_rolling_loss:.2f} kayıp (limit: ${max_symbol_rolling_loss:.2f}). "
-                    f"{symbol_cooldown_hours}h cooldown başlatıldı."
-                )
-                return
-
-            # Kontrol 3: Sembol açık risk limiti aşılıyor mu?
-            current_symbol_risk_pct = self._calculate_symbol_open_risk(sym, strategy_mode)
-            if current_symbol_risk_pct + effective_risk_pct > max_symbol_risk_pct:
-                print(
-                    f"⚠️ [{sym}] SEMBOL AÇIK RİSK LİMİTİ aşılıyor ({strategy_mode}): "
-                    f"mevcut %{current_symbol_risk_pct * 100:.2f}, yeni %{effective_risk_pct * 100:.2f}, "
-                    f"limit %{max_symbol_risk_pct * 100:.2f}. İşlem açılmadı."
                 )
                 return
 
@@ -5995,97 +5796,6 @@ class SimTradeManager:
 
         return total_open_risk / equity
 
-    # --- SEMBOL BAZLI RİSK LİMİTLERİ (v40.0) ---
-
-    def _calculate_symbol_open_risk(self, symbol: str) -> float:
-        """Belirli bir sembol için açık risk yüzdesini hesapla (tüm timeframe'ler dahil)."""
-        equity = self._calculate_equity()
-        if equity <= 0:
-            return 0.0
-
-        symbol_open_risk = 0.0
-        for trade in self.open_trades:
-            if trade.get("symbol") != symbol:
-                continue
-
-            entry_price = float(trade.get("entry", 0.0))
-            sl_price = float(trade.get("sl", entry_price))
-            size = abs(float(trade.get("size", 0.0)))
-            if entry_price <= 0 or size <= 0:
-                continue
-            sl_fraction = abs(entry_price - sl_price) / entry_price
-            open_risk_amount = sl_fraction * size * entry_price
-            symbol_open_risk += open_risk_amount
-
-        return symbol_open_risk / equity
-
-    def _get_symbol_rolling_loss(self, symbol: str, window: int = 5) -> float:
-        """Son N trade'deki sembol bazlı toplam kayıp (USD)."""
-        # Kapalı trade'lerden bu sembole ait olanları filtrele
-        symbol_trades = [t for t in self.history if t.get("symbol") == symbol]
-
-        # Son N trade'i al (en yeniler sonda)
-        recent_trades = symbol_trades[-window:] if len(symbol_trades) >= window else symbol_trades
-
-        # Sadece kayıpları topla
-        rolling_loss = 0.0
-        for trade in recent_trades:
-            pnl = float(trade.get("pnl", 0.0))
-            if pnl < 0:
-                rolling_loss += abs(pnl)
-
-        return rolling_loss
-
-    def _is_symbol_in_loss_cooldown(self, symbol: str, now_utc=None) -> bool:
-        """Sembol loss cooldown'da mı kontrol et."""
-        if now_utc is None:
-            now_utc = datetime.utcnow()
-
-        def _to_naive(dt):
-            # numpy datetime64'ü de handle et
-            if isinstance(dt, np.datetime64):
-                dt = pd.Timestamp(dt).to_pydatetime()
-            elif isinstance(dt, pd.Timestamp):
-                dt = dt.to_pydatetime()
-            if getattr(dt, "tzinfo", None) is not None:
-                dt = dt.replace(tzinfo=None)
-            return dt
-
-        now_naive = _to_naive(now_utc)
-        cooldown_key = f"symbol_loss_{symbol}"
-
-        if cooldown_key not in self.cooldowns:
-            return False
-
-        expiry = self.cooldowns[cooldown_key]
-        exp_naive = _to_naive(expiry)
-
-        if now_naive < exp_naive:
-            return True
-
-        del self.cooldowns[cooldown_key]
-        return False
-
-    def _set_symbol_loss_cooldown(self, symbol: str, hours: float, now_utc=None):
-        """Sembol için loss cooldown'ı ayarla."""
-        if now_utc is None:
-            now_utc = datetime.utcnow()
-
-        def _to_naive(dt):
-            # numpy datetime64'ü de handle et
-            if isinstance(dt, np.datetime64):
-                dt = pd.Timestamp(dt).to_pydatetime()
-            elif isinstance(dt, pd.Timestamp):
-                dt = dt.to_pydatetime()
-            if getattr(dt, "tzinfo", None) is not None:
-                dt = dt.replace(tzinfo=None)
-            return dt
-
-        now_naive = _to_naive(now_utc)
-        cooldown_key = f"symbol_loss_{symbol}"
-        expiry = now_naive + timedelta(hours=hours)
-        self.cooldowns[cooldown_key] = expiry
-
     def _next_id(self):
         tid = self._id
         self._id += 1
@@ -6142,27 +5852,6 @@ class SimTradeManager:
         effective_risk_pct = self.risk_per_trade_pct * risk_multiplier
         current_portfolio_risk_pct = self._calculate_portfolio_risk_pct(self.wallet_balance)
         if current_portfolio_risk_pct + effective_risk_pct > self.max_portfolio_risk_pct:
-            return False
-
-        # --- SEMBOL BAZLI RİSK KONTROLLERİ (v40.0) ---
-        max_symbol_risk_pct = TRADING_CONFIG.get("max_symbol_risk_pct", 0.015)
-        max_symbol_rolling_loss = TRADING_CONFIG.get("max_symbol_rolling_loss_usd", 100.0)
-        symbol_rolling_window = TRADING_CONFIG.get("symbol_rolling_window", 5)
-        symbol_cooldown_hours = TRADING_CONFIG.get("symbol_loss_cooldown_hours", 24)
-
-        # Kontrol 1: Sembol loss cooldown'da mı?
-        if self._is_symbol_in_loss_cooldown(sym, cooldown_ref_time):
-            return False
-
-        # Kontrol 2: Sembol rolling loss limitini aştı mı?
-        symbol_rolling_loss = self._get_symbol_rolling_loss(sym, symbol_rolling_window)
-        if symbol_rolling_loss >= max_symbol_rolling_loss:
-            self._set_symbol_loss_cooldown(sym, symbol_cooldown_hours, cooldown_ref_time)
-            return False
-
-        # Kontrol 3: Sembol açık risk limiti aşılıyor mu?
-        current_symbol_risk_pct = self._calculate_symbol_open_risk(sym)
-        if current_symbol_risk_pct + effective_risk_pct > max_symbol_risk_pct:
             return False
 
         wallet_balance = self.wallet_balance
