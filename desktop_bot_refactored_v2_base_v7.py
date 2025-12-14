@@ -151,7 +151,9 @@ TRADING_CONFIG = {
     "total_fee": 0.0007,         # %0.07 (Giriş + Çıkış Tahmini) - Güvenlik marjı
     # --- SEMBOL BAZLI RİSK LİMİTLERİ (v40.0) ---
     # Tek bir sembolün portföyü "yakmasını" önler
-    "max_symbol_risk_pct": 0.015,           # Tek sembolde max %1.5 açık risk (tüm timeframe'ler dahil)
+    # NOT: max_symbol_risk_pct en az risk_per_trade_pct kadar olmalı, yoksa ilk trade bile açılamaz!
+    # 0.035 = 2 concurrent trade'e izin verir (0.0175 * 2)
+    "max_symbol_risk_pct": 0.035,           # Tek sembolde max %3.5 açık risk (2 concurrent trade)
     "max_symbol_rolling_loss_usd": 100.0,   # Son N trade'de max $100 kayıp
     "symbol_rolling_window": 5,             # Rolling loss için kaç trade geriye bakılacak
     "symbol_loss_cooldown_hours": 24,       # Loss limitine ulaşınca bekleme süresi (saat)
