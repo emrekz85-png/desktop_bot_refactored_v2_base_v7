@@ -181,6 +181,7 @@ BEST_CONFIG_WARNING_FLAGS = {
 }
 BACKTEST_META_FILE = "backtest_meta.json"
 POT_LOG_FILE = "potential_trades.json"  # Persistent storage for potential trade logs
+DYNAMIC_BLACKLIST_FILE = "dynamic_blacklist.json"  # Auto-updated blacklist based on backtest results
 # Çökme veya kapanma durumlarında otomatik yeniden başlatma gecikmesi (saniye)
 AUTO_RESTART_DELAY_SECONDS = 5
 
@@ -271,6 +272,166 @@ POST_PORTFOLIO_BLACKLIST = {
     # ("HYPEUSDT", "15m"): True,
     # ("BNBUSDT", "15m"): True,
 }
+
+# ==========================================
+# 🔄 DYNAMIC BLACKLIST SYSTEM (v39.1)
+# ==========================================
+# Automatically updated after each backtest based on portfolio-level PnL.
+# Streams with significant negative PnL are blacklisted, positive ones are removed.
+# This allows the system to adapt to changing market conditions.
+# ==========================================
+DYNAMIC_BLACKLIST_CONFIG = {
+    "enabled": True,                    # Enable/disable dynamic blacklist
+    "negative_threshold": -20.0,        # PnL below this = blacklist (tolerates small losses)
+    "positive_threshold": 10.0,         # PnL above this = remove from blacklist
+    "min_trades_required": 3,           # Minimum trades to make a decision
+    "consecutive_losses_required": 1,   # How many backtests must show loss (future: track history)
+}
+
+# Runtime cache for dynamic blacklist (loaded from file)
+DYNAMIC_BLACKLIST_CACHE = {}
+
+
+def load_dynamic_blacklist() -> dict:
+    """Load dynamic blacklist from file. Returns dict of {(symbol, timeframe): info}"""
+    global DYNAMIC_BLACKLIST_CACHE
+    try:
+        if os.path.exists(DYNAMIC_BLACKLIST_FILE):
+            with open(DYNAMIC_BLACKLIST_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                # Convert string keys back to tuples
+                DYNAMIC_BLACKLIST_CACHE = {}
+                for key, val in data.get("blacklist", {}).items():
+                    if "|" in key:
+                        sym, tf = key.split("|")
+                        DYNAMIC_BLACKLIST_CACHE[(sym, tf)] = val
+                return DYNAMIC_BLACKLIST_CACHE
+    except Exception as e:
+        print(f"[DYNAMIC_BLACKLIST] Yükleme hatası: {e}")
+    return {}
+
+
+def save_dynamic_blacklist(blacklist: dict, summary_info: dict = None):
+    """Save dynamic blacklist to file."""
+    global DYNAMIC_BLACKLIST_CACHE
+    DYNAMIC_BLACKLIST_CACHE = blacklist
+    try:
+        # Convert tuple keys to strings for JSON
+        serializable = {}
+        for (sym, tf), info in blacklist.items():
+            serializable[f"{sym}|{tf}"] = info
+
+        data = {
+            "blacklist": serializable,
+            "updated_at": datetime.utcnow().isoformat() + "Z",
+            "config": DYNAMIC_BLACKLIST_CONFIG,
+        }
+        if summary_info:
+            data["last_backtest_summary"] = summary_info
+
+        with open(DYNAMIC_BLACKLIST_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[DYNAMIC_BLACKLIST] Kaydetme hatası: {e}")
+
+
+def update_dynamic_blacklist(summary_rows: list) -> dict:
+    """
+    Update dynamic blacklist based on backtest results.
+
+    - Streams with net_pnl < negative_threshold AND min_trades → ADD to blacklist
+    - Streams with net_pnl > positive_threshold → REMOVE from blacklist
+    - Streams in between → keep current state
+
+    Returns updated blacklist dict.
+    """
+    if not DYNAMIC_BLACKLIST_CONFIG.get("enabled", True):
+        return DYNAMIC_BLACKLIST_CACHE
+
+    neg_thresh = DYNAMIC_BLACKLIST_CONFIG.get("negative_threshold", -20.0)
+    pos_thresh = DYNAMIC_BLACKLIST_CONFIG.get("positive_threshold", 10.0)
+    min_trades = DYNAMIC_BLACKLIST_CONFIG.get("min_trades_required", 3)
+
+    # Load current blacklist
+    current_blacklist = load_dynamic_blacklist()
+
+    added = []
+    removed = []
+
+    for row in summary_rows:
+        sym = row.get("symbol")
+        tf = row.get("timeframe")
+        pnl = row.get("net_pnl", 0)
+        trades = row.get("trades", 0)
+        win_rate = row.get("win_rate_pct", 0)
+
+        if not sym or not tf:
+            continue
+
+        key = (sym, tf)
+
+        # Not enough trades to decide
+        if trades < min_trades:
+            continue
+
+        # Significant loss → blacklist
+        if pnl < neg_thresh:
+            if key not in current_blacklist:
+                added.append(f"{sym}-{tf} (PnL=${pnl:.2f}, {trades} trades)")
+            current_blacklist[key] = {
+                "reason": "negative_pnl",
+                "pnl": pnl,
+                "trades": trades,
+                "win_rate": win_rate,
+                "blacklisted_at": datetime.utcnow().isoformat() + "Z",
+            }
+
+        # Significant profit → remove from blacklist
+        elif pnl > pos_thresh:
+            if key in current_blacklist:
+                removed.append(f"{sym}-{tf} (PnL=${pnl:.2f}, {trades} trades)")
+                del current_blacklist[key]
+
+    # Log changes
+    if added:
+        print(f"\n🚫 [DYNAMIC_BLACKLIST] Blacklist'e eklendi:")
+        for item in added:
+            print(f"   - {item}")
+
+    if removed:
+        print(f"\n✅ [DYNAMIC_BLACKLIST] Blacklist'ten çıkarıldı:")
+        for item in removed:
+            print(f"   - {item}")
+
+    if not added and not removed:
+        print(f"\n📋 [DYNAMIC_BLACKLIST] Değişiklik yok. Mevcut blacklist: {len(current_blacklist)} stream")
+
+    # Save updated blacklist
+    summary_info = {
+        "total_streams": len(summary_rows),
+        "blacklisted_streams": len(current_blacklist),
+        "added_count": len(added),
+        "removed_count": len(removed),
+    }
+    save_dynamic_blacklist(current_blacklist, summary_info)
+
+    return current_blacklist
+
+
+def is_stream_blacklisted(symbol: str, timeframe: str) -> bool:
+    """Check if a stream is in any blacklist (static or dynamic)."""
+    key = (symbol, timeframe)
+
+    # Check static blacklist first
+    if POST_PORTFOLIO_BLACKLIST.get(key, False):
+        return True
+
+    # Check dynamic blacklist
+    if not DYNAMIC_BLACKLIST_CACHE:
+        load_dynamic_blacklist()
+
+    return key in DYNAMIC_BLACKLIST_CACHE
+
 
 # PBEMA_Reaction strategy blacklist: Streams where PBEMA_Reaction performs poorly
 # Optimizer will skip pbema_reaction configs for these streams
@@ -4094,6 +4255,10 @@ class LiveBotWorker(QThread):
                                 if config.get("disabled", False):
                                     continue
 
+                                # 🔄 Dynamic blacklist kontrolü - backtest'te negatif PnL veren streamler atlanır
+                                if is_stream_blacklisted(sym, tf):
+                                    continue
+
                                 rr, rsi, slope = config['rr'], config['rsi'], config['slope']
                                 use_at = config['at_active']
                                 at_status_log = "AT:ON" if use_at else "AT:OFF"
@@ -6960,6 +7125,9 @@ def run_portfolio_backtest(
 
     # Sonuçları GUI/LIVE ile paylaşmak için kaydet
     save_best_configs(best_configs)
+
+    # 🔄 Dynamic blacklist güncellemesi - negatif PnL'li streamler blacklist'e alınır
+    dynamic_bl = update_dynamic_blacklist(summary_rows)
     result = {
         "summary": summary_rows,
         "best_configs": best_configs,
@@ -6967,6 +7135,7 @@ def run_portfolio_backtest(
         "summary_csv": out_summary_csv,
         "strategy_signature": strategy_sig,
         "parity_report": parity_report,
+        "dynamic_blacklist": dynamic_bl,
     }
 
     if draw_trades:
