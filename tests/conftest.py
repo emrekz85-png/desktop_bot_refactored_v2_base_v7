@@ -16,8 +16,10 @@ from unittest.mock import patch, MagicMock
 # Add parent directory to path to import main module
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Set headless mode before importing main module
-os.environ['HEADLESS_MODE'] = '1'
+# NOTE: Do NOT set HEADLESS_MODE here. The main module's GUI classes (LiveBotWorker, etc.)
+# inherit from QThread which requires PyQt5 to be imported. Setting HEADLESS_MODE
+# prevents PyQt5 import but the class definitions still try to use QThread.
+# Instead, ensure PyQt5 and PyQtWebEngine are installed: pip install PyQt5 PyQtWebEngine
 
 
 @pytest.fixture(scope="session")
