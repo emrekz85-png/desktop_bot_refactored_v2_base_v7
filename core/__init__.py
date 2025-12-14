@@ -33,6 +33,7 @@ from .utils import (
     normalize_datetime, tf_to_timedelta, tf_to_minutes,
     calculate_funding_cost, format_time_utc, format_time_local,
     append_trade_event, calculate_r_multiple, calculate_expected_r,
+    apply_1m_profit_lock, apply_partial_stop_protection,
 )
 
 from .config_loader import (
@@ -77,6 +78,7 @@ __all__ = [
     'normalize_datetime', 'tf_to_timedelta', 'tf_to_minutes',
     'calculate_funding_cost', 'format_time_utc', 'format_time_local',
     'append_trade_event', 'calculate_r_multiple', 'calculate_expected_r',
+    'apply_1m_profit_lock', 'apply_partial_stop_protection',
     # Config loader
     'load_optimized_config', 'save_best_configs', 'invalidate_config_cache',
     'SYMBOL_PARAMS', 'DEFAULT_STRATEGY_CONFIG',
