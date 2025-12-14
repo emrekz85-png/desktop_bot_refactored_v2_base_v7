@@ -605,15 +605,17 @@ class SimTradeManager(BaseTradeManager):
         # Import here to avoid circular imports
         from .config_loader import load_optimized_config
 
-        # Snapshot config at trade open
-        config_snapshot = load_optimized_config(sym, tf)
+        # KRITIK: Config snapshot'ı önce trade_data'dan al (sinyal üretiminde kullanılan config)
+        # Bu sayede sinyal üretimi ve trade yönetimi aynı config ile yapılır
+        # Fallback: trade_data'da yoksa diskten yükle (eski trade'ler için)
+        config_snapshot = trade_data.get("config_snapshot") or load_optimized_config(sym, tf)
         use_trailing = config_snapshot.get("use_trailing", False)
         use_dynamic_pbema_tp = config_snapshot.get("use_dynamic_pbema_tp", True)
         opt_rr = config_snapshot.get("rr", 3.0)
         opt_rsi = config_snapshot.get("rsi", 60)
 
         # Confidence-based risk multiplier
-        confidence_level = config_snapshot.get("_confidence", "high")
+        confidence_level = config_snapshot.get("confidence", "high")
         risk_multiplier = CONFIDENCE_RISK_MULTIPLIER.get(confidence_level, 1.0)
         if risk_multiplier <= 0:
             return False

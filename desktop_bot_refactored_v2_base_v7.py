@@ -1761,7 +1761,7 @@ def _optimize_backtest_configs(
                     "_net_pnl": best_pnl,
                     "_trades": best_trades,
                     "_score": best_score,
-                    "_confidence": confidence_level,  # For risk multiplier
+                    "confidence": confidence_level,  # For risk multiplier (underscore yok - save'de korunur)
                     "_expectancy": best_pnl / best_trades if best_trades > 0 else 0,
                     "_expected_r": best_expected_r,  # E[R] - R-multiple bazlı expectancy (train)
                 }
@@ -1894,13 +1894,23 @@ def save_best_configs(best_configs: dict):
     """Persist best backtest configs to disk and cache for live bot usage."""
 
     global BEST_CONFIG_CACHE, BEST_CONFIG_WARNING_FLAGS
+
+    # Kritik metadata alanları - underscore ile başlasa bile korunmalı
+    # _oos_start_time: Backtest trade'lerini OOS dönemden filtrelemek için
+    # _expected_r, _oos_expected_r: E[R] metrikleri (istatistik için)
+    METADATA_TO_PRESERVE = {"_oos_start_time", "_expected_r", "_oos_expected_r", "_walk_forward_validated"}
+
     cleaned = {}
     for (key, cfg) in best_configs.items():
         # key can be tuple (sym, tf) or nested dict
         if isinstance(key, tuple) and len(key) == 2:
             sym, tf = key
             cleaned.setdefault(sym, {})
-            cleaned[sym][tf] = {k: v for k, v in cfg.items() if not str(k).startswith("_")}
+            # Underscore ile başlamayan + kritik metadata alanlarını koru
+            cleaned[sym][tf] = {
+                k: v for k, v in cfg.items()
+                if not str(k).startswith("_") or k in METADATA_TO_PRESERVE
+            }
         elif isinstance(cfg, dict):
             # already nested
             cleaned[key] = cfg
@@ -2100,9 +2110,10 @@ class TradeManager:
 
             setup_type = signal_data.get("setup", "Unknown")
 
-            # Trade açılırken config'i snapshot olarak al ve trade'e göm
-            # Bu sayede trade yaşam döngüsü boyunca aynı kurallar kullanılır
-            config_snapshot = load_optimized_config(sym, tf)
+            # KRITIK: Config snapshot'ı önce signal_data'dan al (sinyal üretiminde kullanılan config)
+            # Bu sayede sinyal üretimi ve trade yönetimi aynı config ile yapılır
+            # Fallback: signal_data'da yoksa diskten yükle (eski trade'ler için)
+            config_snapshot = signal_data.get("config_snapshot") or load_optimized_config(sym, tf)
             use_trailing = config_snapshot.get("use_trailing", False)
             use_dynamic_pbema_tp = config_snapshot.get("use_dynamic_pbema_tp", True)
             opt_rr = config_snapshot.get("rr", 3.0)
@@ -2113,7 +2124,7 @@ class TradeManager:
             strategy_wallet = self._get_strategy_wallet(strategy_mode)
 
             # Confidence-based risk multiplier: reduce position size for medium confidence
-            confidence_level = config_snapshot.get("_confidence", "high")
+            confidence_level = config_snapshot.get("confidence", "high")
             risk_multiplier = CONFIDENCE_RISK_MULTIPLIER.get(confidence_level, 1.0)
             if risk_multiplier <= 0:
                 print(f"⚠️ [{sym}-{tf}] Düşük güven seviyesi, işlem açılmadı.")
@@ -4517,10 +4528,12 @@ class LiveBotWorker(QThread):
                                             self.update_ui_signal.emit(sym, tf, json_data, log_msg)
                                         else:
                                             # YENİ İŞLEM AÇ
+                                            # KRITIK: Sinyal üretirken kullanılan config'i trade'e göm
                                             trade_data = {
                                                 "symbol": sym, "timestamp": next_open_ts_str, "open_time_utc": forming_ts_utc,
                                                 "timeframe": tf, "type": s_type,
-                                                "entry": next_open_price, "tp": s_tp, "sl": s_sl, "setup": setup_tag
+                                                "entry": next_open_price, "tp": s_tp, "sl": s_sl, "setup": setup_tag,
+                                                "config_snapshot": config,  # Sinyal üretiminde kullanılan config
                                             }
                                             trade_manager.open_trade(trade_data)
                                             self.trade_signal.emit(trade_data)
@@ -6274,16 +6287,17 @@ class SimTradeManager:
 
         setup_type = trade_data.get("setup", "Unknown")
 
-        # Trade açılırken config'i snapshot olarak al ve trade'e göm
-        # Bu sayede trade yaşam döngüsü boyunca aynı kurallar kullanılır
-        config_snapshot = load_optimized_config(sym, tf)
+        # KRITIK: Config snapshot'ı önce trade_data'dan al (sinyal üretiminde kullanılan config)
+        # Bu sayede sinyal üretimi ve trade yönetimi aynı config ile yapılır
+        # Fallback: trade_data'da yoksa diskten yükle (eski trade'ler için)
+        config_snapshot = trade_data.get("config_snapshot") or load_optimized_config(sym, tf)
         use_trailing = config_snapshot.get("use_trailing", False)
         use_dynamic_pbema_tp = config_snapshot.get("use_dynamic_pbema_tp", True)
         opt_rr = config_snapshot.get("rr", 3.0)
         opt_rsi = config_snapshot.get("rsi", 60)
 
         # Confidence-based risk multiplier: reduce position size for medium confidence
-        confidence_level = config_snapshot.get("_confidence", "high")
+        confidence_level = config_snapshot.get("confidence", "high")
         risk_multiplier = CONFIDENCE_RISK_MULTIPLIER.get(confidence_level, 1.0)
         if risk_multiplier <= 0:
             # Low confidence = no trades
@@ -6840,7 +6854,7 @@ def run_portfolio_backtest(
             reason = cfg.get("_reason", "unknown")
             disabled_streams.append(f"{sym}-{tf} ({reason})")
         else:
-            conf = cfg.get("_confidence", "high")
+            conf = cfg.get("confidence", "high")
             score = cfg.get("_score", 0)
             exp = cfg.get("_expectancy", 0)
             risk_mult = CONFIDENCE_RISK_MULTIPLIER.get(conf, 1.0)
@@ -7003,6 +7017,8 @@ def run_portfolio_backtest(
                     rr_str = s_reason_str[rr_start:rr_start + (rr_end - rr_start)].split(",")[0].split(")")[0]
 
                 # Try to open trade - only log if successful (doğru TM'de aç)
+                # KRITIK: Sinyal üretirken kullanılan config'i trade'e göm
+                # Bu sayede trade yönetimi aynı config ile yapılır (diskten tekrar yükleme yok)
                 trade_opened = tm_for_stream.open_trade(
                     {
                         "symbol": sym,
@@ -7014,6 +7030,7 @@ def run_portfolio_backtest(
                         "setup": setup_tag,
                         "timestamp": ts_str,
                         "open_time_utc": open_ts,
+                        "config_snapshot": config,  # Sinyal üretiminde kullanılan config
                     }
                 )
 
