@@ -223,6 +223,13 @@ POST_PORTFOLIO_BLACKLIST = {
     # ("BNBUSDT", "15m"): True,
 }
 
+# PBEMA_Reaction strategy blacklist: Streams where PBEMA_Reaction performs poorly
+# Optimizer will skip pbema_reaction configs for these streams
+# Based on backtest results: HYPEUSDT-15m loses heavily with PBEMA_Reaction (-369.91)
+PBEMA_REACTION_BLACKLIST = {
+    ("HYPEUSDT", "15m"): True,
+}
+
 # ==========================================
 # 🚀 v37.0 - DYNAMIC OPTIMIZER CONTROLS DISABLED STATE
 # ==========================================
@@ -1121,8 +1128,18 @@ def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) 
     lows = df["low"].values
     closes = df["close"].values
     opens = df["open"].values
-    pb_tops = df.get("pb_ema_top", df["close"]).values if "pb_ema_top" in df.columns else closes
-    pb_bots = df.get("pb_ema_bot", df["close"]).values if "pb_ema_bot" in df.columns else closes
+
+    # PBEMA_Reaction için EMA150, Base için EMA200 kullan
+    strategy_mode = config.get("strategy_mode", "keltner_bounce")
+    if strategy_mode == "pbema_reaction":
+        pb_top_col = "pb_ema_top_150"
+        pb_bot_col = "pb_ema_bot_150"
+    else:
+        pb_top_col = "pb_ema_top"
+        pb_bot_col = "pb_ema_bot"
+
+    pb_tops = df.get(pb_top_col, df["close"]).values if pb_top_col in df.columns else closes
+    pb_bots = df.get(pb_bot_col, df["close"]).values if pb_bot_col in df.columns else closes
 
     for i in range(warmup, end):
         event_time = pd.Timestamp(timestamps[i]) + _tf_to_timedelta(tf)
@@ -1289,6 +1306,13 @@ def _optimize_backtest_configs(
         best_trades = 0
         best_expected_r = 0.0  # E[R] değeri
 
+        # PBEMA_Reaction blacklist: Bu stream için PBEMA_Reaction config'lerini filtrele
+        if PBEMA_REACTION_BLACKLIST.get((sym, tf), False):
+            stream_candidates = [c for c in candidates if c.get("strategy_mode") != "pbema_reaction"]
+            log(f"[OPT][{sym}-{tf}] PBEMA_Reaction blacklist'te - sadece keltner_bounce test edilecek")
+        else:
+            stream_candidates = candidates
+
         def handle_result(cfg, net_pnl, trades, trade_pnls, trade_r_multiples=None):
             nonlocal completed, next_progress, best_cfg, best_score, best_pnl, best_trades, best_expected_r
 
@@ -1333,7 +1357,7 @@ def _optimize_backtest_configs(
             with ProcessPoolExecutor(max_workers=max_workers) as executor:
                 futures = {
                     executor.submit(_score_config_for_stream, df, sym, tf, cfg): cfg
-                    for cfg in candidates
+                    for cfg in stream_candidates
                 }
 
                 for future in as_completed(futures):
@@ -1355,7 +1379,7 @@ def _optimize_backtest_configs(
                 "Seri moda düşülüyor."
             )
 
-            for cfg in candidates:
+            for cfg in stream_candidates:
                 try:
                     net_pnl, trades, trade_pnls, trade_r_multiples = _score_config_for_stream(df, sym, tf, cfg)
                 except Exception as exc:
@@ -3214,15 +3238,13 @@ class TradingEngine:
                 is_short = False
 
         if is_short:
-            # Find swing low for TP
+            # Find swing low for TP (sadece swing low kullan, Keltner çok hızlı hareket edebilir)
             swing_n = 20
             start = max(0, abs_index - swing_n)
             swing_low = float(df["low"].iloc[start:abs_index].min())
 
-            # TP options: swing low or Keltner lower band (whichever is closer)
-            tp_swing = swing_low * 0.998
-            tp_keltner = lower_band * 0.998
-            tp = max(tp_swing, tp_keltner)  # Choose closer TP
+            # TP: swing low only (Keltner fiyatla birlikte çok hızlı hareket edebilir)
+            tp = swing_low * 0.998
 
             # Entry at close
             entry = close
@@ -3284,15 +3306,13 @@ class TradingEngine:
                 is_long = False
 
         if is_long:
-            # Find swing high for TP
+            # Find swing high for TP (sadece swing high kullan, Keltner çok hızlı hareket edebilir)
             swing_n = 20
             start = max(0, abs_index - swing_n)
             swing_high = float(df["high"].iloc[start:abs_index].max())
 
-            # TP options: swing high or Keltner upper band (whichever is closer)
-            tp_swing = swing_high * 1.002
-            tp_keltner = upper_band * 1.002
-            tp = min(tp_swing, tp_keltner)  # Choose closer TP
+            # TP: swing high only (Keltner fiyatla birlikte çok hızlı hareket edebilir)
+            tp = swing_high * 1.002
 
             # Entry at close
             entry = close
@@ -3781,6 +3801,7 @@ class LiveBotWorker(QThread):
     trade_signal = pyqtSignal(dict)
     price_signal = pyqtSignal(str, float)
     potential_signal = pyqtSignal(dict)
+    status_signal = pyqtSignal(str)  # Bot aktiflik durumu için sinyal
 
     def __init__(self, current_params, tg_token, tg_chat_id, show_rr):
         super().__init__()
@@ -3826,11 +3847,21 @@ class LiveBotWorker(QThread):
         self.ws_stream.start()
         next_price_time = 0
         next_candle_time = 0
+        next_status_time = 0  # Status güncellemesi için timer
         try:
             while self.is_running:
                 now = time.time()
 
                 stream_snapshot = None
+
+                # Periyodik status güncellemesi (her 2 saniyede bir)
+                if now >= next_status_time:
+                    open_count = len(trade_manager.open_trades)
+                    if open_count > 0:
+                        self.status_signal.emit(f"AÇIK POZİSYON: {open_count}")
+                    else:
+                        self.status_signal.emit("TRADE ARIYOR...")
+                    next_status_time = now + 2.0
 
                 if now >= next_price_time:
                     try:
@@ -3878,9 +3909,17 @@ class LiveBotWorker(QThread):
 
                                 if len(df) < 3:
                                     continue
+
+                                # Skip if insufficient data for indicators (need 200+ candles for EMA200)
+                                if len(df) < 250:
+                                    continue
+
+                                # --- İndikatör Hesabı (ÖNCE yapılmalı - PBEMA değerleri için gerekli) ---
+                                df_ind = TradingEngine.calculate_indicators(df.copy())
+
                                 # Binance kline: son satır çoğunlukla oluşan (henüz kapanmamış) mumdur.
-                                closed = df.iloc[-2]
-                                forming = df.iloc[-1]
+                                closed = df_ind.iloc[-2]
+                                forming = df_ind.iloc[-1]
                                 curr_price = float(closed['close'])
                                 closed_ts_utc = closed['timestamp']
                                 forming_ts_utc = forming['timestamp']
@@ -3893,7 +3932,18 @@ class LiveBotWorker(QThread):
                                 if tf == "1m":
                                     self.price_signal.emit(sym, curr_price)
 
+                                # Config'i erken yükle - strategy_mode için gerekli
+                                config = load_optimized_config(sym, tf)
+                                strategy_mode = config.get("strategy_mode", "keltner_bounce")
+
                                 # --- Trade Manager Güncellemesi ---
+                                # PBEMA_Reaction için EMA150, Base için EMA200 kullan
+                                if strategy_mode == "pbema_reaction":
+                                    pb_top_col = 'pb_ema_top_150'
+                                    pb_bot_col = 'pb_ema_bot_150'
+                                else:
+                                    pb_top_col = 'pb_ema_top'
+                                    pb_bot_col = 'pb_ema_bot'
 
                                 closed_trades = trade_manager.update_trades(
                                     sym, tf,
@@ -3901,8 +3951,8 @@ class LiveBotWorker(QThread):
                                     candle_low=float(closed['low']),
                                     candle_close=float(closed['close']),
                                     candle_time_utc=closed_ts_utc,
-                                    pb_top=float(closed.get('pb_ema_top', closed['close'])),
-                                    pb_bot=float(closed.get('pb_ema_bot', closed['close']))
+                                    pb_top=float(closed.get(pb_top_col, closed['close'])),
+                                    pb_bot=float(closed.get(pb_bot_col, closed['close']))
                                 )
                                 if closed_trades:
                                     for ct in closed_trades:
@@ -3919,15 +3969,8 @@ class LiveBotWorker(QThread):
                                                       f"Sonuç: {reason}\nNet PnL: {pnl_str}")
                                             TradingEngine.send_telegram(self.tg_token, self.tg_chat_id, tg_msg)
 
-                                # --- İndikatör ve Sinyal Hesabı ---
-
-                                # Skip if insufficient data for indicators (need 200+ candles for EMA200)
-                                if len(df) < 250:
-                                    continue
-
-                                df_ind = TradingEngine.calculate_indicators(df.copy())
+                                # --- Sinyal Hesabı ---
                                 df_closed = df_ind.iloc[:-1].copy()  # oluşan mumu çıkar
-                                config = load_optimized_config(sym, tf)
 
                                 # Skip disabled symbol/timeframe combinations
                                 if config.get("disabled", False):
@@ -3936,7 +3979,7 @@ class LiveBotWorker(QThread):
                                 rr, rsi, slope = config['rr'], config['rsi'], config['slope']
                                 use_at = config['at_active']
                                 at_status_log = "AT:ON" if use_at else "AT:OFF"
-                                strategy_mode = config.get("strategy_mode", "keltner_bounce")
+                                # strategy_mode already loaded earlier for PBEMA selection
                                 strategy_log = f"Mode:{strategy_mode[:7]}"
 
                                 # Use wrapper function to support both strategies
@@ -3986,6 +4029,7 @@ class LiveBotWorker(QThread):
                                         # last_signals None ise bu ilk döngü demek - sadece timestamp kaydet
                                         if self.last_signals[sym][tf] is None:
                                             self.last_signals[sym][tf] = closed_ts_utc
+                                            self.last_potential[sym][tf] = closed_ts_utc  # Prevent potential_trades logging
                                             decision = "Rejected"
                                             reject_reason = "Startup Sync"
                                             log_msg = f"{tf} | {curr_price} | 🔄 Başlangıç senkronizasyonu"
@@ -4039,7 +4083,9 @@ class LiveBotWorker(QThread):
                                                                                      active_trades if self.show_rr else [])
                                     self.update_ui_signal.emit(sym, tf, json_data, log_msg)
 
-                                if s_type and "ACCEPTED" in s_reason and self.last_potential[sym][tf] != closed_ts_utc:
+                                # Startup Sync rejections should not be logged to potential_trades
+                                # (they are just old signals from before bot startup, not real opportunities)
+                                if s_type and "ACCEPTED" in s_reason and self.last_potential[sym][tf] != closed_ts_utc and reject_reason != "Startup Sync":
                                     direction = s_type or ("LONG" if s_debug.get("holding_long") else ("SHORT" if s_debug.get("holding_short") else ""))
 
                                     checks = dict(s_debug or {})
@@ -4536,6 +4582,20 @@ class MainWindow(QMainWindow):
             ticker_layout.addSpacing(20)
 
         ticker_layout.addStretch()
+
+        # Bot aktiflik göstergesi
+        self.status_label = QLabel("TRADE ARIYOR...")
+        self.status_label.setStyleSheet("""
+            color: #00ff00;
+            font-weight: bold;
+            font-size: 14px;
+            padding: 5px 15px;
+            background-color: #004400;
+            border-radius: 10px;
+            border: 1px solid #00ff00;
+        """)
+        ticker_layout.addWidget(self.status_label)
+
         main_layout.addWidget(ticker_widget)
         # ---------------------------------------------
 
@@ -4908,6 +4968,7 @@ class MainWindow(QMainWindow):
         self.live_worker.update_ui_signal.connect(self.update_ui)
         self.live_worker.price_signal.connect(self.on_price_update)
         self.live_worker.potential_signal.connect(self.append_potential_trade)
+        self.live_worker.status_signal.connect(self.update_bot_status)
         self.live_worker.start()
         self.logs.append(">>> Sistem Başlatıldı. v30.4 (PROFIT ENGINE)")
         self.load_tf_settings("1m")
@@ -4940,6 +5001,30 @@ class MainWindow(QMainWindow):
     def update_ui(self, symbol, tf, json_data, log_msg):
         self.data_cache[symbol][tf] = (json_data, log_msg)
         if symbol == self.current_symbol: self.render_chart_and_log(tf, json_data, log_msg)
+
+    def update_bot_status(self, status_text):
+        """Bot aktiflik durumunu güncelle"""
+        self.status_label.setText(status_text)
+        if "TRADE ARIYOR" in status_text:
+            self.status_label.setStyleSheet("""
+                color: #00ff00;
+                font-weight: bold;
+                font-size: 14px;
+                padding: 5px 15px;
+                background-color: #004400;
+                border-radius: 10px;
+                border: 1px solid #00ff00;
+            """)
+        elif "AÇIK POZİSYON" in status_text:
+            self.status_label.setStyleSheet("""
+                color: #ffcc00;
+                font-weight: bold;
+                font-size: 14px;
+                padding: 5px 15px;
+                background-color: #443300;
+                border-radius: 10px;
+                border: 1px solid #ffcc00;
+            """)
 
     def render_chart_and_log(self, tf, json_data, log_msg):
         # Grafik güncelleme sadece ENABLE_CHARTS=True ise
@@ -6243,14 +6328,24 @@ def run_portfolio_backtest(
     # PERFORMANCE: Pre-extract NumPy arrays for all streams to avoid df.iloc[i] overhead
     streams_arrays = {}
     for (sym, tf), df in streams.items():
+        # PBEMA_Reaction için EMA150, Base için EMA200 kullan
+        stream_config = best_configs.get((sym, tf)) or load_optimized_config(sym, tf)
+        strategy_mode = stream_config.get("strategy_mode", "keltner_bounce")
+        if strategy_mode == "pbema_reaction":
+            pb_top_col = "pb_ema_top_150"
+            pb_bot_col = "pb_ema_bot_150"
+        else:
+            pb_top_col = "pb_ema_top"
+            pb_bot_col = "pb_ema_bot"
+
         streams_arrays[(sym, tf)] = {
             "timestamps": pd.to_datetime(df["timestamp"]).values,
             "highs": df["high"].values,
             "lows": df["low"].values,
             "closes": df["close"].values,
             "opens": df["open"].values,
-            "pb_tops": df.get("pb_ema_top", df["close"]).values if "pb_ema_top" in df.columns else df["close"].values,
-            "pb_bots": df.get("pb_ema_bot", df["close"]).values if "pb_ema_bot" in df.columns else df["close"].values,
+            "pb_tops": df.get(pb_top_col, df["close"]).values if pb_top_col in df.columns else df["close"].values,
+            "pb_bots": df.get(pb_bot_col, df["close"]).values if pb_bot_col in df.columns else df["close"].values,
         }
 
     # Çoklu stream için zaman bazlı event kuyruğu
