@@ -46,7 +46,11 @@ coverage.xml
 *.cover
 .hypothesis/
 
-# Project specific
+# Project specific - Data directory
+data/
+!data/.gitkeep
+
+# Legacy paths (for backwards compatibility)
 trades.csv
 backtest_trades.csv
 backtest_summary.csv
@@ -60,3 +64,6 @@ potential_trades.json
 dynamic_blacklist.json
 error_log.txt
 trades_temp_*.csv
+
+# Replay charts
+replay_charts/
