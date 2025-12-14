@@ -67,9 +67,18 @@ elif IS_HEADLESS:
 
 # Matplotlib çizimlerini arka planda üretmek için GUI gerektirmeyen backend
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt
+# Lazy import for matplotlib.pyplot - only import when needed
+_plt = None
+def get_plt():
+    """Lazy load matplotlib.pyplot when first needed."""
+    global _plt
+    if _plt is None:
+        import matplotlib.pyplot as plt_module
+        _plt = plt_module
+    return _plt
 
 # PyQt5 Modülleri - sadece GUI modunda yükle
+# NOT: QWebEngineView lazy import edilir (çok ağır - 15-25 saniye)
 if not IS_HEADLESS:
     try:
         from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
@@ -77,7 +86,15 @@ if not IS_HEADLESS:
                                      QTableWidget, QTableWidgetItem, QPushButton, QHeaderView,
                                      QGroupBox, QDoubleSpinBox, QComboBox, QMessageBox, QCheckBox,
                                      QLineEdit, QSpinBox, QFrame)
-        from PyQt5.QtWebEngineWidgets import QWebEngineView
+        # QWebEngineView lazy import - sadece grafik gösterildiğinde yüklenir
+        _QWebEngineView = None
+        def get_QWebEngineView():
+            """Lazy load QWebEngineView when first needed (saves 15-25s startup time)."""
+            global _QWebEngineView
+            if _QWebEngineView is None:
+                from PyQt5.QtWebEngineWidgets import QWebEngineView as WebEngine
+                _QWebEngineView = WebEngine
+            return _QWebEngineView
         from PyQt5.QtCore import QThread, pyqtSignal, QTimer, Qt
         from PyQt5.QtGui import QColor, QFont
         HAS_GUI = True
@@ -3755,7 +3772,7 @@ class TradingEngine:
 
         # 3) Plot
         plot_trade(df_prices, df_trades, trade_id=trade_id, window=window)
-        plt.show()
+        get_plt().show()
 
     @staticmethod
     def debug_base_short(df, index):
@@ -5005,6 +5022,7 @@ class MainWindow(QMainWindow):
                 box_layout.setContentsMargins(0, 15, 0, 0)
 
                 if ENABLE_CHARTS:
+                    QWebEngineView = get_QWebEngineView()
                     view = QWebEngineView()
                     view.setHtml(CHART_TEMPLATE)
                     view.loadFinished.connect(lambda ok, t=tf: self.on_load_finished(ok, t))
@@ -7216,6 +7234,8 @@ def plot_trade(
     - save_dir: Grafiklerin diske kaydedileceği klasör (None verilirse kaydedilmez)
     - show    : True ise ek olarak plt.show() ile görüntü açılır (varsayılan False)
     """
+    # Lazy import matplotlib.pyplot
+    plt = get_plt()
 
     trades_for_id = df_trades[df_trades["id"] == trade_id].copy()
     if trades_for_id.empty:

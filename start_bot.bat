@@ -15,7 +15,10 @@ echo    Trading Bot v39.0 - R-Multiple Based
 echo ==========================================
 echo.
 
-REM Python kontrolu
+REM Hizli baslangic - sadece ilk kurulumda kontrol yap
+if exist "data\.setup_complete" goto :start_bot
+
+REM Ilk kurulum - Python kontrolu
 where python >nul 2>nul
 if %errorlevel% neq 0 (
     echo [HATA] Python bulunamadi!
@@ -24,21 +27,22 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-REM Gerekli kutuphaneleri kontrol et
-echo Kutuphaneler kontrol ediliyor...
-python -c "import pandas, numpy, requests" 2>nul
+REM Ilk kurulum - kutuphaneleri kontrol et
+echo Ilk kurulum: Kutuphaneler kontrol ediliyor...
+python -c "import pandas, numpy, requests, PyQt5" 2>nul
 if %errorlevel% neq 0 (
     echo [UYARI] Bazi kutuphaneler eksik. Yukluyor...
     pip install pandas numpy requests pandas_ta plotly PyQt5 PyQtWebEngine matplotlib tqdm
 )
 
-REM Data klasoru olustur
+REM Data klasoru olustur ve kurulum tamamlandi isareti birak
 if not exist "data" mkdir data
+echo. > "data\.setup_complete"
+echo Kurulum tamamlandi! Sonraki baslangiclar daha hizli olacak.
 
+:start_bot
 echo.
 echo Bot baslatiliyor...
-echo (Kapatmak icin Ctrl+C basin veya pencereyi kapatin)
-echo.
 
 REM GUI modunda baslat
 python desktop_bot_refactored_v2_base_v7.py
