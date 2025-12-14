@@ -1779,8 +1779,10 @@ class TradeManager:
         if now_utc is None:
             now_utc = datetime.utcnow()
 
-        # Normalize timestamp
-        if isinstance(now_utc, pd.Timestamp):
+        # Normalize timestamp (numpy datetime64 dahil)
+        if isinstance(now_utc, np.datetime64):
+            now_utc = pd.Timestamp(now_utc).to_pydatetime()
+        elif isinstance(now_utc, pd.Timestamp):
             now_utc = now_utc.to_pydatetime()
         if hasattr(now_utc, "tzinfo") and now_utc.tzinfo is not None:
             now_utc = now_utc.replace(tzinfo=None)
@@ -1792,8 +1794,10 @@ class TradeManager:
 
         expiry = self.cooldowns[cooldown_key]
 
-        # Normalize expiry
-        if isinstance(expiry, pd.Timestamp):
+        # Normalize expiry (numpy datetime64 dahil)
+        if isinstance(expiry, np.datetime64):
+            expiry = pd.Timestamp(expiry).to_pydatetime()
+        elif isinstance(expiry, pd.Timestamp):
             expiry = expiry.to_pydatetime()
         if hasattr(expiry, "tzinfo") and expiry.tzinfo is not None:
             expiry = expiry.replace(tzinfo=None)
@@ -1812,7 +1816,10 @@ class TradeManager:
         if now_utc is None:
             now_utc = datetime.utcnow()
 
-        if isinstance(now_utc, pd.Timestamp):
+        # Normalize timestamp (numpy datetime64 dahil)
+        if isinstance(now_utc, np.datetime64):
+            now_utc = pd.Timestamp(now_utc).to_pydatetime()
+        elif isinstance(now_utc, pd.Timestamp):
             now_utc = now_utc.to_pydatetime()
         if hasattr(now_utc, "tzinfo") and now_utc.tzinfo is not None:
             now_utc = now_utc.replace(tzinfo=None)
@@ -6035,7 +6042,10 @@ class SimTradeManager:
             now_utc = datetime.utcnow()
 
         def _to_naive(dt):
-            if isinstance(dt, pd.Timestamp):
+            # numpy datetime64'ü de handle et
+            if isinstance(dt, np.datetime64):
+                dt = pd.Timestamp(dt).to_pydatetime()
+            elif isinstance(dt, pd.Timestamp):
                 dt = dt.to_pydatetime()
             if getattr(dt, "tzinfo", None) is not None:
                 dt = dt.replace(tzinfo=None)
@@ -6062,7 +6072,10 @@ class SimTradeManager:
             now_utc = datetime.utcnow()
 
         def _to_naive(dt):
-            if isinstance(dt, pd.Timestamp):
+            # numpy datetime64'ü de handle et
+            if isinstance(dt, np.datetime64):
+                dt = pd.Timestamp(dt).to_pydatetime()
+            elif isinstance(dt, pd.Timestamp):
                 dt = dt.to_pydatetime()
             if getattr(dt, "tzinfo", None) is not None:
                 dt = dt.replace(tzinfo=None)
