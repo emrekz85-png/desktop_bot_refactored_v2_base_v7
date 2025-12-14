@@ -7,6 +7,8 @@
 # - config_loader.py: Load/save optimized strategy configurations
 # - trade_manager.py: BaseTradeManager and SimTradeManager classes
 # - telegram.py: Telegram notification handling (secure, efficient)
+# - binance_client.py: Binance API client with retry logic
+# - indicators.py: Technical indicator calculations
 #
 # This modular structure eliminates code duplication and improves maintainability.
 
@@ -47,6 +49,16 @@ from .telegram import (
     save_telegram_config, load_telegram_config,
 )
 
+from .binance_client import (
+    BinanceClient, get_client,
+)
+
+from .indicators import (
+    calculate_indicators, calculate_alphatrend,
+    get_indicator_value, get_candle_data,
+    calculate_rr_ratio, check_wick_rejection,
+)
+
 __all__ = [
     # Environment
     'IS_COLAB', 'IS_HEADLESS', 'IS_NOTEBOOK', 'HAS_TQDM',
@@ -73,4 +85,10 @@ __all__ = [
     # Telegram
     'TelegramNotifier', 'get_notifier', 'send_telegram',
     'save_telegram_config', 'load_telegram_config',
+    # Binance client
+    'BinanceClient', 'get_client',
+    # Indicators
+    'calculate_indicators', 'calculate_alphatrend',
+    'get_indicator_value', 'get_candle_data',
+    'calculate_rr_ratio', 'check_wick_rejection',
 ]
