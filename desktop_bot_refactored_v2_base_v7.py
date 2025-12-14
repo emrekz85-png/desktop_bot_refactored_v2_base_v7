@@ -69,8 +69,57 @@ if not IS_HEADLESS:
         print("⚠️ PyQt5 bulunamadı - GUI devre dışı, sadece CLI modu kullanılabilir")
         HAS_GUI = False
         IS_HEADLESS = True
+        # Placeholder classes when PyQt5 import fails
+        class QThread:
+            def __init__(self, *args, **kwargs): pass
+            def start(self): pass
+            def wait(self): pass
+            def isRunning(self): return False
+            def quit(self): pass
+            def terminate(self): pass
+
+        class pyqtSignal:
+            def __init__(self, *args, **kwargs): pass
+            def emit(self, *args, **kwargs): pass
+            def connect(self, *args, **kwargs): pass
+
+        class QTimer:
+            def __init__(self, *args, **kwargs): pass
+            def start(self, *args): pass
+            def stop(self): pass
+
+        class Qt:
+            AlignCenter = 0
+            AlignLeft = 0
+            AlignRight = 0
 else:
     HAS_GUI = False
+    # Placeholder classes for headless mode - allows class definitions to work
+    class QThread:
+        """Placeholder QThread for headless mode."""
+        def __init__(self, *args, **kwargs): pass
+        def start(self): pass
+        def wait(self): pass
+        def isRunning(self): return False
+        def quit(self): pass
+        def terminate(self): pass
+
+    class pyqtSignal:
+        """Placeholder pyqtSignal for headless mode."""
+        def __init__(self, *args, **kwargs): pass
+        def emit(self, *args, **kwargs): pass
+        def connect(self, *args, **kwargs): pass
+
+    # Other placeholder classes
+    class QTimer:
+        def __init__(self, *args, **kwargs): pass
+        def start(self, *args): pass
+        def stop(self): pass
+
+    class Qt:
+        AlignCenter = 0
+        AlignLeft = 0
+        AlignRight = 0
 
 import plotly.graph_objects as go
 import plotly.utils
