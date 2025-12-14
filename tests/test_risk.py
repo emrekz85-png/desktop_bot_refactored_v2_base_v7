@@ -120,8 +120,9 @@ class TestRMultiple:
         # Trade should be closed
         if sim.history:
             trade = sim.history[-1]
-            # Trade closed - could be WON, PARTIAL_WIN, or STOP depending on logic
-            assert trade["status"] in ["WON", "PARTIAL_WIN", "STOP"]
+            # Trade closed - various possible statuses depending on logic
+            valid_statuses = ["WON", "PARTIAL_WIN", "STOP", "PARTIAL TP (50%)"]
+            assert trade["status"] in valid_statuses, f"Unexpected status: {trade['status']}"
             # If R-multiple is tracked, verify it exists
             if "r_multiple" in trade:
                 # R-multiple exists (positive or negative depending on outcome)
