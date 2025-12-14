@@ -2124,7 +2124,8 @@ class TradeManager:
             strategy_wallet = self._get_strategy_wallet(strategy_mode)
 
             # Confidence-based risk multiplier: reduce position size for medium confidence
-            confidence_level = config_snapshot.get("confidence", "high")
+            # Backward compat: eski JSON'larda _confidence olabilir
+            confidence_level = config_snapshot.get("confidence") or config_snapshot.get("_confidence", "high")
             risk_multiplier = CONFIDENCE_RISK_MULTIPLIER.get(confidence_level, 1.0)
             if risk_multiplier <= 0:
                 print(f"⚠️ [{sym}-{tf}] Düşük güven seviyesi, işlem açılmadı.")
@@ -2209,6 +2210,7 @@ class TradeManager:
                 "timeframe": tf, "type": trade_type, "setup": setup_type,
                 "entry": real_entry,
                 "tp": float(signal_data["tp"]), "sl": sl_price,
+                "initial_tp": float(signal_data["tp"]),  # Progress hesabı için sabit referans (dinamik TP değişse bile)
                 "size": position_size, "margin": required_margin,
                 "notional": position_notional, "risk_amount": risk_amount,  # For R-multiple calculation
                 "events": [],
@@ -2275,7 +2277,8 @@ class TradeManager:
                 sl = float(trade["sl"])
                 size = float(trade["size"])
                 t_type = trade["type"]
-                initial_margin = float(trade.get("margin", size / TRADING_CONFIG["leverage"]))
+                # Fallback: margin yoksa doğru hesapla (size * entry / leverage, size / leverage DEĞİL)
+                initial_margin = float(trade.get("margin", abs(size) * entry / TRADING_CONFIG["leverage"]))
 
                 # Config'i trade dict'inden oku (açılışta snapshot edildi)
                 # Eski trade'ler için fallback olarak load_optimized_config kullan ve trade'e yaz
@@ -2331,7 +2334,10 @@ class TradeManager:
                 self.open_trades[i]["pnl"] = live_pnl
 
                 # Hedefe ilerleme oranı (GERÇEK extreme'e göre, conservative değil)
-                total_dist = abs(dyn_tp - entry)
+                # KRITIK: Progress için initial_tp kullan, dinamik TP değil!
+                # Dinamik TP değiştikçe progress zıplamasın, partial/breakeven erken tetiklenmesin
+                initial_tp = float(trade.get("initial_tp", tp))  # Backward compat: yoksa tp kullan
+                total_dist = abs(initial_tp - entry)
                 if total_dist <= 0:
                     continue
                 current_dist = abs(extreme_price - entry)
@@ -6297,7 +6303,8 @@ class SimTradeManager:
         opt_rsi = config_snapshot.get("rsi", 60)
 
         # Confidence-based risk multiplier: reduce position size for medium confidence
-        confidence_level = config_snapshot.get("confidence", "high")
+        # Backward compat: eski JSON'larda _confidence olabilir
+        confidence_level = config_snapshot.get("confidence") or config_snapshot.get("_confidence", "high")
         risk_multiplier = CONFIDENCE_RISK_MULTIPLIER.get(confidence_level, 1.0)
         if risk_multiplier <= 0:
             # Low confidence = no trades
@@ -6370,6 +6377,7 @@ class SimTradeManager:
             "setup": setup_type,
             "entry": real_entry,
             "tp": float(trade_data["tp"]),
+            "initial_tp": float(trade_data["tp"]),  # Progress hesabı için sabit referans (dinamik TP değişse bile)
             "sl": sl_price,
             "size": position_size,
             "margin": required_margin,
@@ -6442,7 +6450,8 @@ class SimTradeManager:
             sl = float(trade["sl"])
             size = float(trade["size"])
             t_type = trade["type"]
-            initial_margin = float(trade.get("margin", size / TRADING_CONFIG["leverage"]))
+            # Fallback: margin yoksa doğru hesapla (size * entry / leverage, size / leverage DEĞİL)
+            initial_margin = float(trade.get("margin", abs(size) * entry / TRADING_CONFIG["leverage"]))
 
             # Config'i trade dict'inden oku (açılışta snapshot edildi)
             # Eski trade'ler için fallback olarak load_optimized_config kullan ve trade'e yaz
@@ -6496,7 +6505,10 @@ class SimTradeManager:
             self.open_trades[i]["pnl"] = live_pnl
 
             # Hedefe ilerleme oranı (GERÇEK extreme'e göre, conservative değil)
-            total_dist = abs(dyn_tp - entry)
+            # KRITIK: Progress için initial_tp kullan, dinamik TP değil!
+            # Dinamik TP değiştikçe progress zıplamasın, partial/breakeven erken tetiklenmesin
+            initial_tp = float(trade.get("initial_tp", tp))  # Backward compat: yoksa tp kullan
+            total_dist = abs(initial_tp - entry)
             if total_dist <= 0:
                 continue
             current_dist = abs(extreme_price - entry)
@@ -6854,7 +6866,8 @@ def run_portfolio_backtest(
             reason = cfg.get("_reason", "unknown")
             disabled_streams.append(f"{sym}-{tf} ({reason})")
         else:
-            conf = cfg.get("confidence", "high")
+            # Backward compat: eski JSON'larda _confidence olabilir
+            conf = cfg.get("confidence") or cfg.get("_confidence", "high")
             score = cfg.get("_score", 0)
             exp = cfg.get("_expectancy", 0)
             risk_mult = CONFIDENCE_RISK_MULTIPLIER.get(conf, 1.0)
