@@ -3613,6 +3613,9 @@ class TradingEngine:
     def create_chart_data_json(df, interval, symbol="BTCUSDT", signal=None, active_trades=[], show_rr=True):
         try:
             plot_df = df.tail(300).copy()
+            # Define candle time range for filtering trades
+            candle_start = plot_df['timestamp'].iloc[0] if len(plot_df) > 0 else pd.Timestamp.min.tz_localize('UTC')
+            candle_end = plot_df['timestamp'].iloc[-1] if len(plot_df) > 0 else pd.Timestamp.max.tz_localize('UTC')
             if len(plot_df) > 1:
                 if interval.endswith('m'):
                     interval_mins = int(interval[:-1])
