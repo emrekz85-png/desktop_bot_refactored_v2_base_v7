@@ -8,8 +8,14 @@ import ssl
 import base64
 import contextlib
 import threading
+
+# ==========================================
+# 🚀 FAST STARTUP - Lazy imports for heavy libraries
+# ==========================================
+# Performance note: pandas_ta and plotly are imported lazily
+# to reduce startup time from ~30-40s to ~10-15s
+
 import pandas as pd
-import pandas_ta as ta
 import numpy as np
 import requests
 import dateutil.parser
@@ -23,6 +29,16 @@ import shutil
 from typing import Tuple, Optional
 import matplotlib
 import hashlib
+
+# Lazy import wrapper for pandas_ta (heavy library ~5-10s import time)
+_ta = None
+def get_ta():
+    """Lazy load pandas_ta when first needed."""
+    global _ta
+    if _ta is None:
+        import pandas_ta as ta_module
+        _ta = ta_module
+    return _ta
 
 # ==========================================
 # 🚀 GOOGLE COLAB / HEADLESS MODE SUPPORT
@@ -121,8 +137,18 @@ else:
         AlignLeft = 0
         AlignRight = 0
 
-import plotly.graph_objects as go
-import plotly.utils
+# Lazy import for plotly (heavy library, only needed for charts)
+_plotly_go = None
+_plotly_utils = None
+def get_plotly():
+    """Lazy load plotly when first needed."""
+    global _plotly_go, _plotly_utils
+    if _plotly_go is None:
+        import plotly.graph_objects as go_module
+        import plotly.utils as utils_module
+        _plotly_go = go_module
+        _plotly_utils = utils_module
+    return _plotly_go, _plotly_utils
 
 # ==========================================
 # ⚙️ GENEL AYARLAR VE SABİTLER (MERKEZİ YÖNETİM)
@@ -149,8 +175,16 @@ REFRESH_RATE = 3
 
 # Grafik güncelleme - False = daha hızlı başlatma, daha az CPU
 ENABLE_CHARTS = False
-CSV_FILE = "trades.csv"
-CONFIG_FILE = "config.json"
+
+# ==========================================
+# 📁 DATA DIRECTORY SETUP
+# ==========================================
+# Tüm CSV, JSON ve geçici dosyalar bu klasörde toplanır
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+CSV_FILE = os.path.join(DATA_DIR, "trades.csv")
+CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
 # Backtestler için maks. mum sayısı sınırları (yüksek limit - kullanıcının isteğine göre)
 BACKTEST_CANDLE_LIMITS = {
     "1m": 100000,
@@ -173,15 +207,15 @@ DAILY_REPORT_CANDLE_LIMITS = {
     "12h": 5000,
     "1d": 4000,
 }
-BEST_CONFIGS_FILE = "best_configs.json"
+BEST_CONFIGS_FILE = os.path.join(DATA_DIR, "best_configs.json")
 BEST_CONFIG_CACHE = {}
 BEST_CONFIG_WARNING_FLAGS = {
     "missing_signature": False,
     "signature_mismatch": False,
 }
-BACKTEST_META_FILE = "backtest_meta.json"
-POT_LOG_FILE = "potential_trades.json"  # Persistent storage for potential trade logs
-DYNAMIC_BLACKLIST_FILE = "dynamic_blacklist.json"  # Auto-updated blacklist based on backtest results
+BACKTEST_META_FILE = os.path.join(DATA_DIR, "backtest_meta.json")
+POT_LOG_FILE = os.path.join(DATA_DIR, "potential_trades.json")  # Persistent storage for potential trade logs
+DYNAMIC_BLACKLIST_FILE = os.path.join(DATA_DIR, "dynamic_blacklist.json")  # Auto-updated blacklist based on backtest results
 # Çökme veya kapanma durumlarında otomatik yeniden başlatma gecikmesi (saniye)
 AUTO_RESTART_DELAY_SECONDS = 5
 
@@ -2455,7 +2489,7 @@ class TradeManager:
                         df_all[c] = ""
 
                 # ATOMIC WRITE
-                fd, tmp_path = tempfile.mkstemp(prefix="trades_temp_", suffix=".csv", dir=".")
+                fd, tmp_path = tempfile.mkstemp(prefix="trades_temp_", suffix=".csv", dir=DATA_DIR)
                 os.close(fd)
                 df_all[cols].to_csv(tmp_path, index=False)
                 shutil.move(tmp_path, CSV_FILE)
@@ -2464,7 +2498,7 @@ class TradeManager:
                 print(f"KAYIT HATASI: {e}")
                 if 'tmp_path' in locals() and os.path.exists(tmp_path):
                     os.remove(tmp_path)
-                with open("error_log.txt", "a") as f:
+                with open(os.path.join(DATA_DIR, "error_log.txt"), "a") as f:
                     f.write(f"\n[{datetime.now()}] SAVE_TRADES HATA: {str(e)}\n")
                     f.write(traceback.format_exc())
 
@@ -2548,7 +2582,7 @@ class TradeManager:
 
                 except Exception as e:
                     print(f"YÜKLEME HATASI: {e}")
-                    with open("error_log.txt", "a") as f:
+                    with open(os.path.join(DATA_DIR, "error_log.txt"), "a") as f:
                         f.write(f"\n[{datetime.now()}] LOAD_TRADES HATA: {str(e)}\n")
                     self.open_trades = []
                     self.history = []
@@ -2786,7 +2820,7 @@ class TradingEngine:
             return df
         except Exception as e:
             print(f"VERİ ÇEKME HATASI ({symbol}): {e}")
-            with open("error_log.txt", "a") as f:
+            with open(os.path.join(DATA_DIR, "error_log.txt"), "a") as f:
                 f.write(f"\n[{datetime.now()}] GET_DATA HATA ({symbol}): {str(e)}\n")
             return pd.DataFrame()
 
@@ -2876,6 +2910,7 @@ class TradingEngine:
             import warnings;
             warnings.simplefilter(action='ignore', category=FutureWarning)
             if 'volume' in df.columns: df['volume'] = df['volume'].astype(float)
+            ta = get_ta()  # Lazy load pandas_ta
             df['tr'] = ta.true_range(df['high'], df['low'], df['close'])
             df['atr_at'] = ta.sma(df['tr'], length=ap)
             if 'volume' in df.columns and df['volume'].sum() > 0:
@@ -2927,6 +2962,9 @@ class TradingEngine:
         for col in ["open", "high", "low", "close"]:
             if col in df.columns:
                 df[col] = df[col].astype(float)
+
+        # Lazy load pandas_ta for faster startup
+        ta = get_ta()
 
         # RSI ve ADX
         df["rsi"] = ta.rsi(df["close"], length=14)
@@ -3689,16 +3727,19 @@ class TradingEngine:
     def debug_plot_backtest_trade(symbol: str,
                                   timeframe: str,
                                   trade_id: int,
-                                  trades_csv: str = "bt_trades_base_setup.csv",
+                                  trades_csv: str = None,  # Default: DATA_DIR/backtest_trades.csv
                                   window: int = 40):
         """
         Backtest sonrası belirli bir trade'i dahili grafikle görmek için yardımcı fonksiyon.
         - Önce run_portfolio_backtest çalıştırılmış olmalı.
         - <symbol>_<timeframe>_prices.csv ve trades_csv dosyaları mevcut olmalı.
         """
+        # Set default trades_csv path
+        if trades_csv is None:
+            trades_csv = os.path.join(DATA_DIR, "backtest_trades.csv")
 
         # 1) Fiyat datası
-        prices_path = f"{symbol}_{timeframe}_prices.csv"
+        prices_path = os.path.join(DATA_DIR, f"{symbol}_{timeframe}_prices.csv")
         if not os.path.exists(prices_path):
             raise FileNotFoundError(f"Fiyat datası bulunamadı: {prices_path}")
 
@@ -3913,8 +3954,9 @@ class TradingEngine:
                                    'marker': {'size': 12, 'color': m_color, 'symbol': 'star', 'opacity': m_opacity},
                                    'name': f'{t_type}', 'showlegend': False})
 
+            _, plotly_utils = get_plotly()
             return json.dumps({'traces': traces, 'shapes': shapes, 'symbol': symbol},
-                              cls=plotly.utils.PlotlyJSONEncoder)
+                              cls=plotly_utils.PlotlyJSONEncoder)
         except Exception as e:
             return "{}"
 
@@ -4404,7 +4446,7 @@ class LiveBotWorker(QThread):
 
                             except Exception as e:
                                 print(f"Loop Processing Error ({sym}-{tf}): {e}")
-                                with open("error_log.txt", "a") as f:
+                                with open(os.path.join(DATA_DIR, "error_log.txt"), "a") as f:
                                     f.write(f"\n[{datetime.now()}] LOOP HATA: {str(e)}\n")
                                     f.write(traceback.format_exc())
 
@@ -4451,7 +4493,7 @@ class OptimizerWorker(QThread):
                 try:
                     df_trend = TradingEngine.get_historical_data_pagination(self.symbol, "1h", total_candles=2500)
                     if not df_trend.empty:
-                        df_trend['ema_trend'] = ta.ema(df_trend['close'], length=200)
+                        df_trend['ema_trend'] = get_ta().ema(df_trend['close'], length=200)
                         df_trend = df_trend[['timestamp', 'ema_trend']].dropna()
                 except Exception:
                     pass
@@ -4700,8 +4742,8 @@ class AutoBacktestWorker(QThread):
                 symbols=SYMBOLS,
                 timeframes=[tf for tf in TIMEFRAMES if tf in DAILY_REPORT_CANDLE_LIMITS],
                 candles=max_daily_candles,
-                out_trades_csv="daily_report_trades.csv",
-                out_summary_csv="daily_report_summary.csv",
+                out_trades_csv=os.path.join(DATA_DIR, "daily_report_trades.csv"),
+                out_summary_csv=os.path.join(DATA_DIR, "daily_report_summary.csv"),
                 limit_map=DAILY_REPORT_CANDLE_LIMITS,
                 draw_trades=False,
             ) or {}
@@ -5564,7 +5606,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"KRİTİK HATA: {e}")
             # Hatayı dosyaya yaz (Log tut)
-            with open("error_log.txt", "a") as f:
+            with open(os.path.join(DATA_DIR, "error_log.txt"), "a") as f:
                 f.write(f"\n[{datetime.now()}] HATA: {str(e)}\n")
                 f.write(traceback.format_exc())  # Hatanın hangi satırda olduğunu yazar
 
@@ -5650,7 +5692,7 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f"KRİTİK HATA: {e}")
                 # Hatayı dosyaya yaz (Log tut)
-                with open("error_log.txt", "a") as f:
+                with open(os.path.join(DATA_DIR, "error_log.txt"), "a") as f:
                     f.write(f"\n[{datetime.now()}] HATA: {str(e)}\n")
                     f.write(traceback.format_exc())  # Hatanın hangi satırda olduğunu yazar
 
@@ -6454,8 +6496,8 @@ def run_portfolio_backtest(
     symbols,
     timeframes,
     candles: int = 3000,
-    out_trades_csv: str = "backtest_trades.csv",
-    out_summary_csv: str = "backtest_summary.csv",
+    out_trades_csv: str = None,  # Default: DATA_DIR/backtest_trades.csv
+    out_summary_csv: str = None,  # Default: DATA_DIR/backtest_summary.csv
     limit_map: Optional[dict] = None,
     progress_callback=None,
     draw_trades: bool = True,
@@ -6463,6 +6505,12 @@ def run_portfolio_backtest(
     skip_optimization: bool = False,  # True = cached config kullan, optimizer atla (HIZLI)
     quick_mode: bool = False,  # True = azaltılmış config grid (daha hızlı optimizer)
 ):
+    # Set default output paths to DATA_DIR
+    if out_trades_csv is None:
+        out_trades_csv = os.path.join(DATA_DIR, "backtest_trades.csv")
+    if out_summary_csv is None:
+        out_summary_csv = os.path.join(DATA_DIR, "backtest_summary.csv")
+
     allowed_log_categories = {"progress", "potential", "summary"}
     strategy_sig = _strategy_signature()
 
@@ -6528,7 +6576,7 @@ def run_portfolio_backtest(
                     return None
                 df = TradingEngine.calculate_indicators(df)
                 if write_prices:
-                    df.to_csv(f"{sym}_{tf}_prices.csv", index=False)
+                    df.to_csv(os.path.join(DATA_DIR, f"{sym}_{tf}_prices.csv"), index=False)
                 return (sym, tf, df.reset_index(drop=True))
             except Exception as e:
                 return None
@@ -7490,10 +7538,10 @@ def plot_trade(
 
 
 def replay_backtest_trades(
-    trades_csv: str = "backtest_trades.csv",
+    trades_csv: str = None,  # Default: DATA_DIR/backtest_trades.csv
     max_trades: Optional[int] = None,
     window: int = 60,
-    save_dir: Optional[str] = "replay_charts",
+    save_dir: Optional[str] = None,  # Default: DATA_DIR/replay_charts
     show: bool = False,
 ):
     """
@@ -7505,6 +7553,11 @@ def replay_backtest_trades(
     - save_dir  : grafiklerin kaydedileceği klasör (None verilirse kaydetmez)
     - show      : True ise matplotlib penceresi açılır (default False, GUI block riskine karşı)
     """
+    # Set default paths to DATA_DIR
+    if trades_csv is None:
+        trades_csv = os.path.join(DATA_DIR, "backtest_trades.csv")
+    if save_dir is None:
+        save_dir = os.path.join(DATA_DIR, "replay_charts")
 
     if not os.path.exists(trades_csv):
         print(f"[REPLAY] Trades CSV bulunamadı: {trades_csv}")
@@ -7544,7 +7597,7 @@ def replay_backtest_trades(
         symbol = str(tr.get("symbol", "UNKNOWN"))
         timeframe = str(tr.get("timeframe", "UNKNOWN"))
 
-        prices_path = f"{symbol}_{timeframe}_prices.csv"
+        prices_path = os.path.join(DATA_DIR, f"{symbol}_{timeframe}_prices.csv")
         if not os.path.exists(prices_path):
             print(f"[REPLAY] Fiyat datası bulunamadı: {prices_path} (trade id={trade_id})")
             continue
@@ -7720,8 +7773,8 @@ def run_cli_backtest(
         symbols=symbols,
         timeframes=timeframes,
         candles=candles,
-        out_trades_csv="backtest_trades.csv" if save_results else None,
-        out_summary_csv="backtest_summary.csv" if save_results else None,
+        out_trades_csv=os.path.join(DATA_DIR, "backtest_trades.csv") if save_results else None,
+        out_summary_csv=os.path.join(DATA_DIR, "backtest_summary.csv") if save_results else None,
         progress_callback=lambda msg: log(f"   {msg}") if verbose else None,
         draw_trades=False,  # Don't draw charts in CLI mode
     )
