@@ -49,7 +49,7 @@ from core import (
     SimTradeManager,
     BaseTradeManager,
     # Telegram
-    send_telegram,
+    send_telegram as _core_send_telegram,
     get_notifier,
     TelegramNotifier,
     save_telegram_config,
@@ -62,10 +62,15 @@ from core import (
     calculate_alphatrend as core_calculate_alphatrend,
     get_indicator_value,
     get_candle_data,
-    # Config
-    is_stream_blacklisted,
-    load_dynamic_blacklist,
-    update_dynamic_blacklist,
+    # Config - Blacklist functions imported from core (single source of truth)
+    is_stream_blacklisted as core_is_stream_blacklisted,
+    load_dynamic_blacklist as core_load_dynamic_blacklist,
+    update_dynamic_blacklist as core_update_dynamic_blacklist,
+    save_dynamic_blacklist as core_save_dynamic_blacklist,
+    DYNAMIC_BLACKLIST_CONFIG as CORE_DYNAMIC_BLACKLIST_CONFIG,
+    DYNAMIC_BLACKLIST_CACHE as CORE_DYNAMIC_BLACKLIST_CACHE,
+    POST_PORTFOLIO_BLACKLIST as CORE_POST_PORTFOLIO_BLACKLIST,
+    DYNAMIC_BLACKLIST_FILE as CORE_DYNAMIC_BLACKLIST_FILE,
 )
 
 # ==========================================
@@ -410,163 +415,20 @@ POST_PORTFOLIO_BLACKLIST = {
 }
 
 # ==========================================
-# 🔄 DYNAMIC BLACKLIST SYSTEM (v39.1)
+# 🔄 DYNAMIC BLACKLIST SYSTEM (v40.2 - REFACTORED)
 # ==========================================
-# Automatically updated after each backtest based on portfolio-level PnL.
-# Streams with significant negative PnL are blacklisted, positive ones are removed.
-# This allows the system to adapt to changing market conditions.
+# All blacklist logic is now in core.config module (single source of truth).
+# These are aliases for backward compatibility.
 # ==========================================
-DYNAMIC_BLACKLIST_CONFIG = {
-    "enabled": True,                    # Enable/disable dynamic blacklist
-    "negative_threshold": -20.0,        # PnL below this = blacklist (tolerates small losses)
-    "positive_threshold": 10.0,         # PnL above this = remove from blacklist
-    "min_trades_required": 3,           # Minimum trades to make a decision
-    "consecutive_losses_required": 1,   # How many backtests must show loss (future: track history)
-}
+DYNAMIC_BLACKLIST_CONFIG = CORE_DYNAMIC_BLACKLIST_CONFIG
+DYNAMIC_BLACKLIST_CACHE = CORE_DYNAMIC_BLACKLIST_CACHE
+DYNAMIC_BLACKLIST_FILE = CORE_DYNAMIC_BLACKLIST_FILE
 
-# Runtime cache for dynamic blacklist (loaded from file)
-DYNAMIC_BLACKLIST_CACHE = {}
-
-
-def load_dynamic_blacklist() -> dict:
-    """Load dynamic blacklist from file. Returns dict of {(symbol, timeframe): info}"""
-    global DYNAMIC_BLACKLIST_CACHE
-    try:
-        if os.path.exists(DYNAMIC_BLACKLIST_FILE):
-            with open(DYNAMIC_BLACKLIST_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                # Convert string keys back to tuples
-                DYNAMIC_BLACKLIST_CACHE = {}
-                for key, val in data.get("blacklist", {}).items():
-                    if "|" in key:
-                        sym, tf = key.split("|")
-                        DYNAMIC_BLACKLIST_CACHE[(sym, tf)] = val
-                return DYNAMIC_BLACKLIST_CACHE
-    except Exception as e:
-        print(f"[DYNAMIC_BLACKLIST] Yükleme hatası: {e}")
-    return {}
-
-
-def save_dynamic_blacklist(blacklist: dict, summary_info: dict = None):
-    """Save dynamic blacklist to file."""
-    global DYNAMIC_BLACKLIST_CACHE
-    DYNAMIC_BLACKLIST_CACHE = blacklist
-    try:
-        # Convert tuple keys to strings for JSON
-        serializable = {}
-        for (sym, tf), info in blacklist.items():
-            serializable[f"{sym}|{tf}"] = info
-
-        data = {
-            "blacklist": serializable,
-            "updated_at": datetime.utcnow().isoformat() + "Z",
-            "config": DYNAMIC_BLACKLIST_CONFIG,
-        }
-        if summary_info:
-            data["last_backtest_summary"] = summary_info
-
-        with open(DYNAMIC_BLACKLIST_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"[DYNAMIC_BLACKLIST] Kaydetme hatası: {e}")
-
-
-def update_dynamic_blacklist(summary_rows: list) -> dict:
-    """
-    Update dynamic blacklist based on backtest results.
-
-    - Streams with net_pnl < negative_threshold AND min_trades → ADD to blacklist
-    - Streams with net_pnl > positive_threshold → REMOVE from blacklist
-    - Streams in between → keep current state
-
-    Returns updated blacklist dict.
-    """
-    if not DYNAMIC_BLACKLIST_CONFIG.get("enabled", True):
-        return DYNAMIC_BLACKLIST_CACHE
-
-    neg_thresh = DYNAMIC_BLACKLIST_CONFIG.get("negative_threshold", -20.0)
-    pos_thresh = DYNAMIC_BLACKLIST_CONFIG.get("positive_threshold", 10.0)
-    min_trades = DYNAMIC_BLACKLIST_CONFIG.get("min_trades_required", 3)
-
-    # Load current blacklist
-    current_blacklist = load_dynamic_blacklist()
-
-    added = []
-    removed = []
-
-    for row in summary_rows:
-        sym = row.get("symbol")
-        tf = row.get("timeframe")
-        pnl = row.get("net_pnl", 0)
-        trades = row.get("trades", 0)
-        win_rate = row.get("win_rate_pct", 0)
-
-        if not sym or not tf:
-            continue
-
-        key = (sym, tf)
-
-        # Not enough trades to decide
-        if trades < min_trades:
-            continue
-
-        # Significant loss → blacklist
-        if pnl < neg_thresh:
-            if key not in current_blacklist:
-                added.append(f"{sym}-{tf} (PnL=${pnl:.2f}, {trades} trades)")
-            current_blacklist[key] = {
-                "reason": "negative_pnl",
-                "pnl": pnl,
-                "trades": trades,
-                "win_rate": win_rate,
-                "blacklisted_at": datetime.utcnow().isoformat() + "Z",
-            }
-
-        # Significant profit → remove from blacklist
-        elif pnl > pos_thresh:
-            if key in current_blacklist:
-                removed.append(f"{sym}-{tf} (PnL=${pnl:.2f}, {trades} trades)")
-                del current_blacklist[key]
-
-    # Log changes
-    if added:
-        print(f"\n🚫 [DYNAMIC_BLACKLIST] Blacklist'e eklendi:")
-        for item in added:
-            print(f"   - {item}")
-
-    if removed:
-        print(f"\n✅ [DYNAMIC_BLACKLIST] Blacklist'ten çıkarıldı:")
-        for item in removed:
-            print(f"   - {item}")
-
-    if not added and not removed:
-        print(f"\n📋 [DYNAMIC_BLACKLIST] Değişiklik yok. Mevcut blacklist: {len(current_blacklist)} stream")
-
-    # Save updated blacklist
-    summary_info = {
-        "total_streams": len(summary_rows),
-        "blacklisted_streams": len(current_blacklist),
-        "added_count": len(added),
-        "removed_count": len(removed),
-    }
-    save_dynamic_blacklist(current_blacklist, summary_info)
-
-    return current_blacklist
-
-
-def is_stream_blacklisted(symbol: str, timeframe: str) -> bool:
-    """Check if a stream is in any blacklist (static or dynamic)."""
-    key = (symbol, timeframe)
-
-    # Check static blacklist first
-    if POST_PORTFOLIO_BLACKLIST.get(key, False):
-        return True
-
-    # Check dynamic blacklist
-    if not DYNAMIC_BLACKLIST_CACHE:
-        load_dynamic_blacklist()
-
-    return key in DYNAMIC_BLACKLIST_CACHE
+# Use core implementations - eliminates shadowing risk
+load_dynamic_blacklist = core_load_dynamic_blacklist
+save_dynamic_blacklist = core_save_dynamic_blacklist
+update_dynamic_blacklist = core_update_dynamic_blacklist
+is_stream_blacklisted = core_is_stream_blacklisted
 
 
 # PBEMA_Reaction strategy blacklist: Streams where PBEMA_Reaction performs poorly
@@ -2886,7 +2748,37 @@ class PotentialTradeRecorder:
 
 
 potential_trades = PotentialTradeRecorder()
-trade_manager = TradeManager()
+
+# ==========================================
+# 🔧 LAZY TRADE MANAGER INITIALIZATION (v40.2)
+# ==========================================
+# trade_manager is now lazily initialized to avoid side effects at module import time.
+# This allows better testing and multiple import scenarios.
+# ==========================================
+_trade_manager = None
+
+
+def get_trade_manager() -> TradeManager:
+    """Get or create the global TradeManager instance (lazy initialization)."""
+    global _trade_manager
+    if _trade_manager is None:
+        _trade_manager = TradeManager()
+    return _trade_manager
+
+
+# For backward compatibility: create a module-level property-like accessor
+# Note: Direct access via `trade_manager` is deprecated, use `get_trade_manager()` instead
+# We keep this for existing code that references trade_manager directly
+class _TradeManagerProxy:
+    """Proxy object that lazily creates TradeManager on first access."""
+    def __getattr__(self, name):
+        return getattr(get_trade_manager(), name)
+
+    def __setattr__(self, name, value):
+        setattr(get_trade_manager(), name, value)
+
+
+trade_manager = _TradeManagerProxy()
 
 
 # --- TRADING ENGINE (ROBUST API & RETRY MECHANISM) ---
@@ -2898,7 +2790,7 @@ class TradingEngine:
     def send_telegram(token, chat_id, message):
         """Send Telegram message asynchronously.
 
-        Note: The core.telegram module provides an improved version with:
+        Uses core.telegram module which provides:
         - Thread pool (prevents thread accumulation)
         - Rate limiting (prevents API throttling)
         - Retry logic
@@ -2910,22 +2802,8 @@ class TradingEngine:
         if not token or not chat_id:
             return
 
-        # Use core package version if available (has thread pool and rate limiting)
-        if CORE_PACKAGE_AVAILABLE:
-            _core_send_telegram(token, chat_id, message)
-            return
-
-        # Fallback to simple thread-based sending
-        def sender():
-            try:
-                url = f"https://api.telegram.org/bot{token}/sendMessage"
-                data = {"chat_id": chat_id, "text": message}
-                requests.post(url, data=data, timeout=10)
-            except Exception as e:
-                print(f"TELEGRAM HATA: {e}")
-
-        import threading
-        threading.Thread(target=sender).start()
+        # Use core package version (has thread pool and rate limiting)
+        _core_send_telegram(token, chat_id, message)
 
     # --- YENİ: AKILLI İSTEK FONKSİYONU (RETRY LOGIC) ---
     @staticmethod
@@ -3077,39 +2955,11 @@ class TradingEngine:
 
     @staticmethod
     def calculate_alphatrend(df, coeff=1, ap=14):
-        try:
-            import warnings;
-            warnings.simplefilter(action='ignore', category=FutureWarning)
-            if 'volume' in df.columns: df['volume'] = df['volume'].astype(float)
-            ta = get_ta()  # Lazy load pandas_ta
-            df['tr'] = ta.true_range(df['high'], df['low'], df['close'])
-            df['atr_at'] = ta.sma(df['tr'], length=ap)
-            if 'volume' in df.columns and df['volume'].sum() > 0:
-                df['mfi'] = ta.mfi(df['high'], df['low'], df['close'], df['volume'], length=ap)
-                condition = df['mfi'] >= 50
-            else:
-                df['rsi_at'] = ta.rsi(df['close'], length=ap)
-                condition = df['rsi_at'] >= 50
-            df['upT'] = df['low'] - df['atr_at'] * coeff
-            df['downT'] = df['high'] + df['atr_at'] * coeff
-            alpha_trend = np.zeros(len(df))
-            upT_vals = df['upT'].values
-            downT_vals = df['downT'].values
-            cond_vals = condition.fillna(False).values.astype(bool)
-            close_vals = df['close'].values
-            alpha_trend[0] = close_vals[0]
-            for i in range(1, len(df)):
-                prev_at = alpha_trend[i - 1]
-                if cond_vals[i]:
-                    alpha_trend[i] = prev_at if upT_vals[i] < prev_at else upT_vals[i]
-                else:
-                    alpha_trend[i] = prev_at if downT_vals[i] > prev_at else downT_vals[i]
-            df['alphatrend'] = alpha_trend
-            df['alphatrend_2'] = df['alphatrend'].shift(2)
-            return df
-        except Exception:
-            df['alphatrend'] = df['close'];
-            return df
+        """Calculate AlphaTrend indicator.
+
+        NOTE: Implementation delegated to core.indicators.calculate_alphatrend for single source of truth.
+        """
+        return core_calculate_alphatrend(df, coeff=coeff, ap=ap)
 
     @staticmethod
     def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -3125,50 +2975,11 @@ class TradingEngine:
 
         PERFORMANCE NOTE: This function modifies the DataFrame in-place by adding indicator columns.
         If you need to preserve the original DataFrame, make a copy before calling this function.
+
+        NOTE: Implementation delegated to core.indicators.calculate_indicators for single source of truth.
         """
-        # PERFORMANCE: Removed df.copy() - function now modifies in-place (20-30% faster)
-        # Callers that need the original should copy before calling
-
-        # Temel kolonları float'a çevir
-        for col in ["open", "high", "low", "close"]:
-            if col in df.columns:
-                df[col] = df[col].astype(float)
-
-        # Lazy load pandas_ta for faster startup
-        ta = get_ta()
-
-        # RSI ve ADX
-        df["rsi"] = ta.rsi(df["close"], length=14)
-        adx_res = ta.adx(df["high"], df["low"], df["close"], length=14)
-        df["adx"] = adx_res["ADX_14"] if adx_res is not None and "ADX_14" in adx_res.columns else 0.0
-
-        # PBEMA cloud (EMA 200) - Base strateji için
-        df["pb_ema_top"] = ta.ema(df["high"], length=200)
-        df["pb_ema_bot"] = ta.ema(df["close"], length=200)
-
-        # PBEMA cloud (EMA 150) - PBEMA Reaction strateji için
-        df["pb_ema_top_150"] = ta.ema(df["high"], length=150)
-        df["pb_ema_bot_150"] = ta.ema(df["close"], length=150)
-
-        # Slope (şimdilik sadece bilgi amaçlı) - Base için
-        df["slope_top"] = (df["pb_ema_top"].diff(5) / df["pb_ema_top"]) * 1000
-        df["slope_bot"] = (df["pb_ema_bot"].diff(5) / df["pb_ema_bot"]) * 1000
-
-        # Slope - PBEMA Reaction için
-        df["slope_top_150"] = (df["pb_ema_top_150"].diff(5) / df["pb_ema_top_150"]) * 1000
-        df["slope_bot_150"] = (df["pb_ema_bot_150"].diff(5) / df["pb_ema_bot_150"]) * 1000
-
-        # SSL baseline (HMA60) ve Keltner bantları
-        df["baseline"] = ta.hma(df["close"], length=60)
-        tr = ta.true_range(df["high"], df["low"], df["close"])
-        range_ma = ta.ema(tr, length=60)
-        df["keltner_upper"] = df["baseline"] + range_ma * 0.2
-        df["keltner_lower"] = df["baseline"] - range_ma * 0.2
-
-        # AlphaTrend (isteğe göre filtrede kullanılacak)
-        df = TradingEngine.calculate_alphatrend(df, coeff=1, ap=14)
-
-        return df
+        # Use core implementation to avoid code duplication
+        return core_calculate_indicators(df)
 
     @staticmethod
     def check_signal_diagnostic(
