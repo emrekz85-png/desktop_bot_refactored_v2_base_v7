@@ -2969,37 +2969,118 @@ class TradingEngine:
         return prices
 
     @staticmethod
-    def get_historical_data_pagination(symbol, interval, total_candles=5000):
+    def get_historical_data_pagination(symbol, interval, total_candles=5000, start_date=None, end_date=None):
+        """
+        Binance'den tarihsel kline verisi çeker.
+
+        Args:
+            symbol: Trading pair (örn: "BTCUSDT")
+            interval: Timeframe (örn: "5m", "1h")
+            total_candles: Çekilecek mum sayısı (tarih aralığı verilmezse kullanılır)
+            start_date: Başlangıç tarihi (str "YYYY-MM-DD" veya datetime). Verilirse candle sayısı yerine tarih aralığı kullanılır.
+            end_date: Bitiş tarihi (str "YYYY-MM-DD" veya datetime). Verilmezse şu anki zaman kullanılır.
+
+        Returns:
+            DataFrame with columns: timestamp, open, high, low, close, volume
+        """
+        from datetime import datetime, timezone
+
         all_data = []
-        end_time = int(time.time() * 1000)
         limit_per_req = 1000
-        loops = int(np.ceil(total_candles / limit_per_req))
 
-        for _ in range(loops):
-            try:
-                url = "https://fapi.binance.com/fapi/v1/klines"
-                params = {'symbol': symbol, 'interval': interval, 'limit': limit_per_req, 'endTime': end_time}
+        # Tarih aralığı modu
+        if start_date is not None:
+            # String ise datetime'a çevir
+            if isinstance(start_date, str):
+                start_date = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            elif start_date.tzinfo is None:
+                start_date = start_date.replace(tzinfo=timezone.utc)
 
-                # Burada da akıllı retry kullanıyoruz
-                res = TradingEngine.http_get_with_retry(url, params)
-                if res is None: break
+            if end_date is not None:
+                if isinstance(end_date, str):
+                    # Bitiş tarihini günün sonuna ayarla
+                    end_date = datetime.strptime(end_date, "%Y-%m-%d").replace(
+                        hour=23, minute=59, second=59, tzinfo=timezone.utc
+                    )
+                elif end_date.tzinfo is None:
+                    end_date = end_date.replace(tzinfo=timezone.utc)
+            else:
+                end_date = datetime.now(timezone.utc)
 
-                data = res.json()
-                if not data or not isinstance(data, list): break
+            start_time_ms = int(start_date.timestamp() * 1000)
+            end_time_ms = int(end_date.timestamp() * 1000)
 
-                all_data = data + all_data  # Eskiden yeniye doğru birleştir
-                end_time = data[0][0] - 1
-                time.sleep(0.1)  # Kısa bir mola (Rate limit nezaketi)
-            except Exception:
-                break
+            # Tarih aralığı modunda startTime ile ileri doğru çekiyoruz
+            current_start = start_time_ms
 
-        if not all_data: return pd.DataFrame()
+            while current_start < end_time_ms:
+                try:
+                    url = "https://fapi.binance.com/fapi/v1/klines"
+                    params = {
+                        'symbol': symbol,
+                        'interval': interval,
+                        'limit': limit_per_req,
+                        'startTime': current_start,
+                        'endTime': end_time_ms
+                    }
+
+                    res = TradingEngine.http_get_with_retry(url, params)
+                    if res is None:
+                        break
+
+                    data = res.json()
+                    if not data or not isinstance(data, list):
+                        break
+
+                    all_data.extend(data)
+
+                    # Sonraki batch için start time'ı güncelle
+                    last_candle_time = data[-1][0]
+                    current_start = last_candle_time + 1
+
+                    # Tüm veriyi aldık mı kontrol et
+                    if len(data) < limit_per_req:
+                        break
+
+                    time.sleep(0.1)  # Rate limit nezaketi
+                except Exception:
+                    break
+        else:
+            # Candle sayısı modu (eski davranış)
+            end_time = int(time.time() * 1000)
+            loops = int(np.ceil(total_candles / limit_per_req))
+
+            for _ in range(loops):
+                try:
+                    url = "https://fapi.binance.com/fapi/v1/klines"
+                    params = {'symbol': symbol, 'interval': interval, 'limit': limit_per_req, 'endTime': end_time}
+
+                    res = TradingEngine.http_get_with_retry(url, params)
+                    if res is None:
+                        break
+
+                    data = res.json()
+                    if not data or not isinstance(data, list):
+                        break
+
+                    all_data = data + all_data  # Eskiden yeniye doğru birleştir
+                    end_time = data[0][0] - 1
+                    time.sleep(0.1)
+                except Exception:
+                    break
+
+        if not all_data:
+            return pd.DataFrame()
 
         df = pd.DataFrame(all_data).iloc[:, :6]
         df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
         for col in ['open', 'high', 'low', 'close', 'volume']:
             df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        # Tarih aralığı modunda candle sayısı ile kısıtlama yok
+        if start_date is not None:
+            return df.reset_index(drop=True)
         return df.tail(total_candles).reset_index(drop=True)
 
     @staticmethod
@@ -6687,6 +6768,8 @@ def run_portfolio_backtest(
     max_draw_trades: Optional[int] = None,
     skip_optimization: bool = False,  # True = cached config kullan, optimizer atla (HIZLI)
     quick_mode: bool = False,  # True = azaltılmış config grid (daha hızlı optimizer)
+    start_date: str = None,  # Başlangıç tarihi "YYYY-MM-DD" formatında (tutarlı backtest için)
+    end_date: str = None,  # Bitiş tarihi "YYYY-MM-DD" formatında (default: bugün)
 ):
     # Set default output paths to DATA_DIR
     if out_trades_csv is None:
@@ -6737,24 +6820,43 @@ def run_portfolio_backtest(
         result = {}
         active_limit_map = limit_map if limit_map else BACKTEST_CANDLE_LIMITS
 
+        # Tarih aralığı modu mu kontrol et
+        use_date_range = start_date is not None
+
         # Paralel veri çekme için iş listesi oluştur
         jobs = []
         for sym in symbols:
             for tf in timeframes:
-                tf_candle_limit = active_limit_map.get(tf, target_candles)
-                if tf_candle_limit:
-                    tf_candle_limit = min(target_candles, tf_candle_limit)
+                if use_date_range:
+                    # Tarih aralığı modunda candle limit kullanılmaz
+                    jobs.append((sym, tf, None))
                 else:
-                    tf_candle_limit = target_candles
-                jobs.append((sym, tf, tf_candle_limit))
+                    tf_candle_limit = active_limit_map.get(tf, target_candles)
+                    if tf_candle_limit:
+                        tf_candle_limit = min(target_candles, tf_candle_limit)
+                    else:
+                        tf_candle_limit = target_candles
+                    jobs.append((sym, tf, tf_candle_limit))
 
         total_jobs = len(jobs)
-        log(f"📥 {total_jobs} stream için veri indiriliyor...", category="summary")
+        if use_date_range:
+            date_info = f"{start_date} → {end_date or 'bugün'}"
+            log(f"📥 {total_jobs} stream için veri indiriliyor ({date_info})...", category="summary")
+        else:
+            log(f"📥 {total_jobs} stream için veri indiriliyor...", category="summary")
 
         def fetch_one(job):
             sym, tf, candle_limit = job
             try:
-                df = TradingEngine.get_historical_data_pagination(sym, tf, total_candles=candle_limit)
+                if use_date_range:
+                    # Tarih aralığı modu
+                    df = TradingEngine.get_historical_data_pagination(
+                        sym, tf, start_date=start_date, end_date=end_date
+                    )
+                else:
+                    # Candle sayısı modu
+                    df = TradingEngine.get_historical_data_pagination(sym, tf, total_candles=candle_limit)
+
                 if df is None or df.empty or len(df) < 400:
                     return None
                 df = TradingEngine.calculate_indicators(df)
@@ -7855,6 +7957,8 @@ def run_cli_backtest(
     walk_forward: bool = True,
     save_results: bool = True,
     verbose: bool = True,
+    start_date: str = None,
+    end_date: str = None,
 ) -> dict:
     """Run a complete backtest from CLI/Colab without GUI.
 
@@ -7866,6 +7970,8 @@ def run_cli_backtest(
         walk_forward: Enable walk-forward OOS validation (default: True)
         save_results: Save results to CSV and JSON (default: True)
         verbose: Print progress messages (default: True)
+        start_date: Start date in "YYYY-MM-DD" format (for consistent/reproducible backtests)
+        end_date: End date in "YYYY-MM-DD" format (default: today)
 
     Returns:
         dict with:
@@ -7882,10 +7988,20 @@ def run_cli_backtest(
         ...     candles=30000,
         ...     optimize=True
         ... )
+        >>> # For reproducible results with fixed date range:
+        >>> results = run_cli_backtest(
+        ...     symbols=['BTCUSDT'],
+        ...     timeframes=['15m'],
+        ...     start_date='2024-11-15',
+        ...     end_date='2024-12-15'
+        ... )
         >>> print(results['summary'])
     """
     symbols = symbols or SYMBOLS
     timeframes = timeframes or TIMEFRAMES
+
+    # Tarih aralığı modu mu kontrol et
+    use_date_range = start_date is not None
 
     def log(msg):
         if verbose:
@@ -7895,7 +8011,10 @@ def run_cli_backtest(
     log("🚀 CLI/Colab Backtest Başlatılıyor")
     log(f"   Symbols: {symbols}")
     log(f"   Timeframes: {timeframes}")
-    log(f"   Candles: {candles}")
+    if use_date_range:
+        log(f"   Date Range: {start_date} → {end_date or 'bugün'}")
+    else:
+        log(f"   Candles: {candles}")
     log(f"   Optimize: {optimize}")
     log(f"   Walk-Forward: {walk_forward}")
     log("=" * 60)
@@ -7910,11 +8029,17 @@ def run_cli_backtest(
 
     for sym, tf in iterator:
         try:
-            limit = BACKTEST_CANDLE_LIMITS.get(tf, candles)
-            limit = min(limit, candles)
+            if use_date_range:
+                # Tarih aralığı modu
+                df = TradingEngine.get_historical_data_pagination(
+                    sym, tf, start_date=start_date, end_date=end_date
+                )
+            else:
+                # Candle sayısı modu
+                limit = BACKTEST_CANDLE_LIMITS.get(tf, candles)
+                limit = min(limit, candles)
+                df = TradingEngine.get_historical_data_pagination(sym, tf, total_candles=limit)
 
-            # Fetch data using the existing TradingEngine method
-            df = TradingEngine.fetch_historical_data_paginated(sym, tf, limit)
             if df is not None and len(df) > 300:
                 # Calculate indicators
                 df = TradingEngine.calculate_indicators(df)
@@ -7966,6 +8091,8 @@ def run_cli_backtest(
         out_summary_csv=os.path.join(DATA_DIR, "backtest_summary.csv") if save_results else None,
         progress_callback=lambda msg: log(f"   {msg}") if verbose else None,
         draw_trades=False,  # Don't draw charts in CLI mode
+        start_date=start_date,
+        end_date=end_date,
     )
 
     # Extract results
@@ -8046,6 +8173,8 @@ if __name__ == "__main__":
     parser.add_argument('--symbols', nargs='+', help='Symbols to test (e.g., BTCUSDT ETHUSDT)')
     parser.add_argument('--timeframes', nargs='+', help='Timeframes to test (e.g., 5m 15m 1h)')
     parser.add_argument('--candles', type=int, default=50000, help='Number of candles (default: 50000)')
+    parser.add_argument('--start-date', type=str, help='Start date YYYY-MM-DD (for reproducible backtests)')
+    parser.add_argument('--end-date', type=str, help='End date YYYY-MM-DD (default: today)')
     parser.add_argument('--no-optimize', action='store_true', help='Skip optimization')
     parser.add_argument('--no-walk-forward', action='store_true', help='Disable walk-forward validation')
 
@@ -8061,6 +8190,8 @@ if __name__ == "__main__":
             candles=args.candles,
             optimize=not args.no_optimize,
             walk_forward=not args.no_walk_forward,
+            start_date=args.start_date,
+            end_date=args.end_date,
         )
         print("\n✅ Backtest tamamlandı!")
         if results['metrics']:
