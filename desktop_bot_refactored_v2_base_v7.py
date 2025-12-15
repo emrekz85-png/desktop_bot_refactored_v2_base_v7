@@ -149,7 +149,7 @@ if not IS_HEADLESS:
                                      QHBoxLayout, QGridLayout, QTabWidget, QTextEdit, QLabel,
                                      QTableWidget, QTableWidgetItem, QPushButton, QHeaderView,
                                      QGroupBox, QDoubleSpinBox, QComboBox, QMessageBox, QCheckBox,
-                                     QLineEdit, QSpinBox, QFrame)
+                                     QLineEdit, QSpinBox, QFrame, QRadioButton, QDateEdit)
         # QWebEngineView lazy import - sadece grafik gösterildiğinde yüklenir
         _QWebEngineView = None
         def get_QWebEngineView():
@@ -5466,7 +5466,6 @@ class MainWindow(QMainWindow):
         date_layout.addLayout(days_row)
 
         # Seçenek 2: Sabit tarih aralığı (tutarlı sonuçlar için)
-        from PyQt5.QtWidgets import QDateEdit
         from PyQt5.QtCore import QDate
 
         fixed_row = QHBoxLayout()
