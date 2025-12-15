@@ -4989,12 +4989,19 @@ class BacktestWorker(QThread):
     log_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(dict)
 
-    def __init__(self, symbols, timeframes, candles_or_days, skip_optimization=False, quick_mode=False, use_days=False):
+    def __init__(self, symbols, timeframes, candles_or_days, skip_optimization=False, quick_mode=False, use_days=False, start_date=None, end_date=None):
         super().__init__()
         self.symbols = symbols
         self.timeframes = timeframes
         self.use_days = use_days
-        if use_days:
+        self.start_date = start_date  # Sabit tarih modu için
+        self.end_date = end_date
+        if start_date is not None:
+            # Sabit tarih aralığı modu - tutarlı sonuçlar için
+            self.days = None
+            self.candles = None
+            self.limit_map = None
+        elif use_days:
             # Gün modunda: her TF için ayrı mum sayısı hesapla
             self.days = candles_or_days
             self.candles = None  # limit_map kullanılacak
@@ -5030,8 +5037,22 @@ class BacktestWorker(QThread):
         result = {}
 
         try:
-            # Gün modunda limit_map kullan, aksi halde eski candles
-            if self.use_days and self.limit_map:
+            # Sabit tarih aralığı modu (tutarlı sonuçlar için)
+            if self.start_date is not None:
+                result = run_portfolio_backtest(
+                    symbols=self.symbols,
+                    timeframes=self.timeframes,
+                    candles=50000,  # Tarih modunda kullanılmaz, fallback
+                    progress_callback=self._throttled_log,
+                    draw_trades=True,
+                    max_draw_trades=30,
+                    skip_optimization=self.skip_optimization,
+                    quick_mode=self.quick_mode,
+                    start_date=self.start_date,
+                    end_date=self.end_date,
+                ) or {}
+            # Gün modunda limit_map kullan
+            elif self.use_days and self.limit_map:
                 result = run_portfolio_backtest(
                     symbols=self.symbols,
                     timeframes=self.timeframes,
@@ -5044,6 +5065,7 @@ class BacktestWorker(QThread):
                     quick_mode=self.quick_mode,
                 ) or {}
             else:
+                # Eski candles modu
                 result = run_portfolio_backtest(
                     symbols=self.symbols,
                     timeframes=self.timeframes,
@@ -5424,12 +5446,64 @@ class MainWindow(QMainWindow):
             bt_tf_layout.addWidget(cb)
             self.backtest_tf_checks[tf] = cb
         bt_cfg.addLayout(bt_tf_layout)
-        bt_cfg.addWidget(QLabel("Gün Sayısı:"));
-        self.backtest_days = QSpinBox();
-        self.backtest_days.setRange(7, 365);  # 7 gün - 1 yıl arası
-        self.backtest_days.setValue(30);  # Varsayılan 30 gün
+
+        # Tarih/Gün seçimi - İKİ SEÇENEKLİ
+        date_group = QGroupBox("Veri Aralığı")
+        date_layout = QVBoxLayout()
+
+        # Seçenek 1: Gün sayısı (mevcut davranış)
+        days_row = QHBoxLayout()
+        self.radio_days = QRadioButton("Son X Gün:")
+        self.radio_days.setChecked(True)
+        self.radio_days.setToolTip("Şu andan geriye doğru belirtilen gün sayısı kadar veri çeker")
+        days_row.addWidget(self.radio_days)
+        self.backtest_days = QSpinBox()
+        self.backtest_days.setRange(7, 365)
+        self.backtest_days.setValue(30)
         self.backtest_days.setToolTip("Her timeframe için bu kadar günlük veri test edilecek")
-        bt_cfg.addWidget(self.backtest_days)
+        days_row.addWidget(self.backtest_days)
+        days_row.addStretch()
+        date_layout.addLayout(days_row)
+
+        # Seçenek 2: Sabit tarih aralığı (tutarlı sonuçlar için)
+        from PyQt5.QtWidgets import QDateEdit
+        from PyQt5.QtCore import QDate
+
+        fixed_row = QHBoxLayout()
+        self.radio_fixed_dates = QRadioButton("Sabit Tarih:")
+        self.radio_fixed_dates.setToolTip("Tutarlı/karşılaştırılabilir sonuçlar için sabit tarih aralığı")
+        fixed_row.addWidget(self.radio_fixed_dates)
+
+        fixed_row.addWidget(QLabel("Başlangıç:"))
+        self.backtest_start_date = QDateEdit()
+        self.backtest_start_date.setCalendarPopup(True)
+        self.backtest_start_date.setDate(QDate.currentDate().addDays(-30))
+        self.backtest_start_date.setDisplayFormat("yyyy-MM-dd")
+        self.backtest_start_date.setEnabled(False)
+        fixed_row.addWidget(self.backtest_start_date)
+
+        fixed_row.addWidget(QLabel("Bitiş:"))
+        self.backtest_end_date = QDateEdit()
+        self.backtest_end_date.setCalendarPopup(True)
+        self.backtest_end_date.setDate(QDate.currentDate())
+        self.backtest_end_date.setDisplayFormat("yyyy-MM-dd")
+        self.backtest_end_date.setEnabled(False)
+        fixed_row.addWidget(self.backtest_end_date)
+        fixed_row.addStretch()
+        date_layout.addLayout(fixed_row)
+
+        # Radio button toggle - tarih alanlarını aktif/pasif yap
+        def toggle_date_inputs():
+            use_fixed = self.radio_fixed_dates.isChecked()
+            self.backtest_days.setEnabled(not use_fixed)
+            self.backtest_start_date.setEnabled(use_fixed)
+            self.backtest_end_date.setEnabled(use_fixed)
+
+        self.radio_days.toggled.connect(toggle_date_inputs)
+        self.radio_fixed_dates.toggled.connect(toggle_date_inputs)
+
+        date_group.setLayout(date_layout)
+        bt_cfg.addWidget(date_group)
 
         # Hız ayarları
         speed_layout = QHBoxLayout()
@@ -6531,24 +6605,51 @@ class MainWindow(QMainWindow):
         else:
             self.backtest_logs.append("ℹ️ Önceki backtest kaydı bulunamadı.")
 
-        days = self.backtest_days.value()
         selected_tfs = self.get_selected_timeframes(getattr(self, "backtest_tf_checks", {}))
 
-        # Gün → Mum dönüşümü bilgisi
-        candles_info = ", ".join([f"{tf}:{days_to_candles(days, tf)}" for tf in selected_tfs[:3]])
-        if len(selected_tfs) > 3:
-            candles_info += "..."
-        self.backtest_logs.append(f"🧪 Backtest başlatıldı ({days} gün → {candles_info} mum)")
+        # Sabit tarih aralığı mı, gün sayısı mı?
+        use_fixed_dates = self.radio_fixed_dates.isChecked()
 
-        # Hız ayarlarını oku
-        skip_opt = self.chk_skip_optimization.isChecked()
-        quick = self.chk_quick_mode.isChecked()
-        if skip_opt:
-            self.backtest_logs.append("⚡ Optimizer atlanıyor (kayıtlı config kullanılacak)")
-        elif quick:
-            self.backtest_logs.append("🚀 Hızlı mod aktif (13 config)")
+        if use_fixed_dates:
+            # Sabit tarih aralığı modu - tutarlı sonuçlar için
+            start_date = self.backtest_start_date.date().toString("yyyy-MM-dd")
+            end_date = self.backtest_end_date.date().toString("yyyy-MM-dd")
+            self.backtest_logs.append(f"🧪 Backtest başlatıldı (📅 {start_date} → {end_date})")
+            self.backtest_logs.append("✅ Sabit tarih modu: Tutarlı/karşılaştırılabilir sonuçlar")
 
-        self.backtest_worker = BacktestWorker(SYMBOLS, selected_tfs, days, skip_opt, quick, use_days=True)
+            # Hız ayarlarını oku
+            skip_opt = self.chk_skip_optimization.isChecked()
+            quick = self.chk_quick_mode.isChecked()
+            if skip_opt:
+                self.backtest_logs.append("⚡ Optimizer atlanıyor (kayıtlı config kullanılacak)")
+            elif quick:
+                self.backtest_logs.append("🚀 Hızlı mod aktif (13 config)")
+
+            self.backtest_worker = BacktestWorker(
+                SYMBOLS, selected_tfs, 0, skip_opt, quick,
+                use_days=False, start_date=start_date, end_date=end_date
+            )
+        else:
+            # Gün sayısı modu (mevcut davranış)
+            days = self.backtest_days.value()
+
+            # Gün → Mum dönüşümü bilgisi
+            candles_info = ", ".join([f"{tf}:{days_to_candles(days, tf)}" for tf in selected_tfs[:3]])
+            if len(selected_tfs) > 3:
+                candles_info += "..."
+            self.backtest_logs.append(f"🧪 Backtest başlatıldı ({days} gün → {candles_info} mum)")
+            self.backtest_logs.append("⚠️ Gün modu: Her çalıştırmada farklı sonuçlar olabilir")
+
+            # Hız ayarlarını oku
+            skip_opt = self.chk_skip_optimization.isChecked()
+            quick = self.chk_quick_mode.isChecked()
+            if skip_opt:
+                self.backtest_logs.append("⚡ Optimizer atlanıyor (kayıtlı config kullanılacak)")
+            elif quick:
+                self.backtest_logs.append("🚀 Hızlı mod aktif (13 config)")
+
+            self.backtest_worker = BacktestWorker(SYMBOLS, selected_tfs, days, skip_opt, quick, use_days=True)
+
         self.backtest_worker.log_signal.connect(self.append_backtest_log)
         self.backtest_worker.finished_signal.connect(self.on_backtest_finished)
         self.btn_run_backtest.setEnabled(False)
