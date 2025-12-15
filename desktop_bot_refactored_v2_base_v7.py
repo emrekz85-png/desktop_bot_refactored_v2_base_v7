@@ -250,7 +250,9 @@ candles = 50000
 REFRESH_RATE = 3
 
 # Grafik güncelleme - False = daha hızlı başlatma, daha az CPU
-ENABLE_CHARTS = True  # Grafikler açık, UI'dan güncellemeler kapatılabilir
+# Grafikler: fast_start.py ile başlatıldığında Qt sırası sorunu oluşuyor
+# Doğrudan "python desktop_bot_refactored_v2_base_v7.py" ile çalıştırırsan True yapabilirsin
+ENABLE_CHARTS = False
 
 # ==========================================
 # 📁 DATA DIRECTORY SETUP
@@ -6034,8 +6036,25 @@ class MainWindow(QMainWindow):
                 """)
                 return
 
-            with open(BEST_CONFIGS_FILE, 'r', encoding='utf-8') as f:
-                best_cfgs = json.load(f)
+            try:
+                with open(BEST_CONFIGS_FILE, 'r', encoding='utf-8') as f:
+                    best_cfgs = json.load(f)
+            except json.JSONDecodeError:
+                self.config_age_label.setText("⚠️ Config bozuk")
+                self.config_age_label.setStyleSheet("""
+                    color: #ff6600;
+                    font-weight: bold;
+                    font-size: 12px;
+                    padding: 5px 10px;
+                    background-color: #332200;
+                    border-radius: 8px;
+                    border: 1px solid #ff6600;
+                """)
+                self.config_age_label.setToolTip("best_configs.json dosyası bozuk. Backtest çalıştırın.")
+                return
+
+            if not isinstance(best_cfgs, dict):
+                return
 
             meta = best_cfgs.get("_meta", {})
             saved_at_str = meta.get("saved_at", "")
@@ -6131,15 +6150,19 @@ class MainWindow(QMainWindow):
             # Disabled streams from best_configs.json
             disabled_streams = []
             if os.path.exists(BEST_CONFIGS_FILE):
-                with open(BEST_CONFIGS_FILE, 'r', encoding='utf-8') as f:
-                    best_cfgs = json.load(f)
-                for sym in SYMBOLS:
-                    sym_cfg = best_cfgs.get(sym, {})
-                    if isinstance(sym_cfg, dict):
-                        for tf in TIMEFRAMES:
-                            tf_cfg = sym_cfg.get(tf, {})
-                            if isinstance(tf_cfg, dict) and tf_cfg.get("disabled", False):
-                                disabled_streams.append((sym, tf))
+                try:
+                    with open(BEST_CONFIGS_FILE, 'r', encoding='utf-8') as f:
+                        best_cfgs = json.load(f)
+                    if isinstance(best_cfgs, dict):
+                        for sym in SYMBOLS:
+                            sym_cfg = best_cfgs.get(sym, {})
+                            if isinstance(sym_cfg, dict):
+                                for tf in TIMEFRAMES:
+                                    tf_cfg = sym_cfg.get(tf, {})
+                                    if isinstance(tf_cfg, dict) and tf_cfg.get("disabled", False):
+                                        disabled_streams.append((sym, tf))
+                except json.JSONDecodeError:
+                    pass  # JSON bozuksa disabled_streams boş kalır
 
             # Toplam sayıları hesapla
             total_streams = len(SYMBOLS) * len(TIMEFRAMES)
