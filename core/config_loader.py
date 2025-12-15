@@ -205,14 +205,24 @@ def save_best_configs(best_configs: dict):
     # Convert numpy/pandas types to Python native types for JSON serialization
     def _convert_to_native(obj):
         """Convert numpy/pandas types to Python native types for JSON serialization."""
+        if obj is None:
+            return None
         if isinstance(obj, dict):
             return {k: _convert_to_native(v) for k, v in obj.items()}
         elif isinstance(obj, (list, tuple)):
             return [_convert_to_native(v) for v in obj]
-        elif hasattr(obj, 'item'):  # numpy scalar types (np.float64, np.int64, etc.)
+        # pandas Timestamp, datetime, date objects -> ISO string
+        elif hasattr(obj, 'isoformat'):
+            return obj.isoformat()
+        # numpy scalar types (np.float64, np.int64, etc.) - check AFTER Timestamp
+        elif hasattr(obj, 'item') and not hasattr(obj, 'isoformat'):
             return obj.item()
-        elif hasattr(obj, 'tolist'):  # numpy arrays
+        # numpy arrays
+        elif hasattr(obj, 'tolist') and not hasattr(obj, 'isoformat'):
             return obj.tolist()
+        # pandas NaT (Not a Time) -> None
+        elif str(type(obj).__name__) == 'NaTType':
+            return None
         return obj
 
     cleaned = _convert_to_native(cleaned)
