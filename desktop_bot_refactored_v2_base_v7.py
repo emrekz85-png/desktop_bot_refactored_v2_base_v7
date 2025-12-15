@@ -319,6 +319,8 @@ BEST_CONFIG_CACHE = {}
 BEST_CONFIG_WARNING_FLAGS = {
     "missing_signature": False,
     "signature_mismatch": False,
+    "json_error": False,  # Bozuk JSON dosyası hatası için flag
+    "load_error": False,  # Genel yükleme hatası için flag
 }
 BACKTEST_META_FILE = os.path.join(DATA_DIR, "backtest_meta.json")
 POT_LOG_FILE = os.path.join(DATA_DIR, "potential_trades.json")  # Persistent storage for potential trade logs
@@ -1650,7 +1652,7 @@ def load_optimized_config(symbol, timeframe):
     """
 
     def _load_best_configs():
-        global BEST_CONFIG_CACHE
+        global BEST_CONFIG_CACHE, BEST_CONFIG_WARNING_FLAGS
         if BEST_CONFIG_CACHE:
             return BEST_CONFIG_CACHE
         if os.path.exists(BEST_CONFIGS_FILE):
@@ -1661,10 +1663,18 @@ def load_optimized_config(symbol, timeframe):
                 if isinstance(raw, dict):
                     BEST_CONFIG_CACHE.clear()
                     BEST_CONFIG_CACHE.update(raw)
+                    # Başarılı yükleme - hata flag'lerini sıfırla
+                    BEST_CONFIG_WARNING_FLAGS["json_error"] = False
+                    BEST_CONFIG_WARNING_FLAGS["load_error"] = False
             except json.JSONDecodeError as e:
-                print(f"[CFG] ⚠️ Config dosyası bozuk (JSON hatası): {e}")
+                if not BEST_CONFIG_WARNING_FLAGS.get("json_error", False):
+                    print(f"[CFG] ⚠️ Config dosyası bozuk (JSON hatası): {e}")
+                    print(f"[CFG] ℹ️ Bozuk dosyayı silip yeniden backtest çalıştırın: {BEST_CONFIGS_FILE}")
+                    BEST_CONFIG_WARNING_FLAGS["json_error"] = True
             except Exception as e:
-                print(f"[CFG] ⚠️ Config yükleme hatası: {e}")
+                if not BEST_CONFIG_WARNING_FLAGS.get("load_error", False):
+                    print(f"[CFG] ⚠️ Config yükleme hatası: {e}")
+                    BEST_CONFIG_WARNING_FLAGS["load_error"] = True
         return BEST_CONFIG_CACHE
 
     defaults = {
@@ -1742,9 +1752,11 @@ def save_best_configs(best_configs: dict):
 
     BEST_CONFIG_CACHE.clear()
     BEST_CONFIG_CACHE.update(cleaned)
-    # Flag'leri sıfırla (yeni dict oluşturmak yerine mevcut dict'i güncelle)
+    # Tüm flag'leri sıfırla (yeni dict oluşturmak yerine mevcut dict'i güncelle)
     BEST_CONFIG_WARNING_FLAGS["missing_signature"] = False
     BEST_CONFIG_WARNING_FLAGS["signature_mismatch"] = False
+    BEST_CONFIG_WARNING_FLAGS["json_error"] = False
+    BEST_CONFIG_WARNING_FLAGS["load_error"] = False
 
     try:
         with open(BEST_CONFIGS_FILE, "w", encoding="utf-8") as f:

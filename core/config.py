@@ -345,4 +345,6 @@ BEST_CONFIG_CACHE = {}
 BEST_CONFIG_WARNING_FLAGS = {
     "missing_signature": False,
     "signature_mismatch": False,
+    "json_error": False,  # Bozuk JSON dosyası hatası için flag
+    "load_error": False,  # Genel yükleme hatası için flag
 }
