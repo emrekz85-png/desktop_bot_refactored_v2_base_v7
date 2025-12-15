@@ -102,7 +102,7 @@ def _is_best_config_signature_valid(best_cfgs: dict) -> bool:
 
 def _load_best_configs() -> dict:
     """Load best configs from file, using cache if available."""
-    global BEST_CONFIG_CACHE
+    global BEST_CONFIG_CACHE, BEST_CONFIG_WARNING_FLAGS
 
     if BEST_CONFIG_CACHE:
         return BEST_CONFIG_CACHE
@@ -114,10 +114,18 @@ def _load_best_configs() -> dict:
             if isinstance(raw, dict):
                 BEST_CONFIG_CACHE.clear()
                 BEST_CONFIG_CACHE.update(raw)
+                # Başarılı yükleme - hata flag'lerini sıfırla
+                BEST_CONFIG_WARNING_FLAGS["json_error"] = False
+                BEST_CONFIG_WARNING_FLAGS["load_error"] = False
         except json.JSONDecodeError as e:
-            print(f"[CFG] ⚠️ Config file corrupted (JSON error): {e}")
+            if not BEST_CONFIG_WARNING_FLAGS.get("json_error", False):
+                print(f"[CFG] ⚠️ Config file corrupted (JSON error): {e}")
+                print(f"[CFG] ℹ️ Delete corrupted file and re-run backtest: {BEST_CONFIGS_FILE}")
+                BEST_CONFIG_WARNING_FLAGS["json_error"] = True
         except Exception as e:
-            print(f"[CFG] ⚠️ Config load error: {e}")
+            if not BEST_CONFIG_WARNING_FLAGS.get("load_error", False):
+                print(f"[CFG] ⚠️ Config load error: {e}")
+                BEST_CONFIG_WARNING_FLAGS["load_error"] = True
 
     return BEST_CONFIG_CACHE
 
@@ -211,9 +219,11 @@ def save_best_configs(best_configs: dict):
 
     BEST_CONFIG_CACHE.clear()
     BEST_CONFIG_CACHE.update(cleaned)
-    # Reset flags in-place instead of reassigning
+    # Reset all flags in-place instead of reassigning
     BEST_CONFIG_WARNING_FLAGS["missing_signature"] = False
     BEST_CONFIG_WARNING_FLAGS["signature_mismatch"] = False
+    BEST_CONFIG_WARNING_FLAGS["json_error"] = False
+    BEST_CONFIG_WARNING_FLAGS["load_error"] = False
 
     try:
         with open(BEST_CONFIGS_FILE, "w", encoding="utf-8") as f:
