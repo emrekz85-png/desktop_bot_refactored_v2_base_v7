@@ -5934,8 +5934,10 @@ class MainWindow(QMainWindow):
 
             # ISO format parse (2024-01-15T12:30:45Z)
             saved_at = datetime.fromisoformat(saved_at_str.replace("Z", "+00:00"))
-            now = datetime.now(saved_at.tzinfo) if saved_at.tzinfo else datetime.utcnow()
-            age = now - saved_at.replace(tzinfo=None)
+            # Her iki datetime'ı da naive UTC olarak karşılaştır
+            saved_at_naive = saved_at.replace(tzinfo=None)
+            now_naive = datetime.utcnow()
+            age = now_naive - saved_at_naive
             age_days = age.days
             age_hours = age.seconds // 3600
 
