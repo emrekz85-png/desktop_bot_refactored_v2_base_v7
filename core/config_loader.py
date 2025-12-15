@@ -71,11 +71,18 @@ def _is_best_config_signature_valid(best_cfgs: dict) -> bool:
     if not isinstance(best_cfgs, dict):
         return False
 
+    # Empty dict means no config file exists - return False silently
+    # to avoid warning spam during backtest
+    if not best_cfgs:
+        return False
+
     meta = best_cfgs.get("_meta", {}) if isinstance(best_cfgs.get("_meta"), dict) else {}
     stored_sig = meta.get("strategy_signature")
 
     if not stored_sig:
-        if not BEST_CONFIG_WARNING_FLAGS.get("missing_signature", False):
+        # Only warn if there are actual configs but no signature (old format)
+        has_any_config = any(k != "_meta" for k in best_cfgs.keys())
+        if has_any_config and not BEST_CONFIG_WARNING_FLAGS.get("missing_signature", False):
             print("[CFG] Warning: No saved backtest signature found. Best configs will be ignored.")
             BEST_CONFIG_WARNING_FLAGS["missing_signature"] = True
         return False
@@ -105,9 +112,12 @@ def _load_best_configs() -> dict:
             with open(BEST_CONFIGS_FILE, "r", encoding="utf-8") as f:
                 raw = json.load(f)
             if isinstance(raw, dict):
+                BEST_CONFIG_CACHE.clear()
                 BEST_CONFIG_CACHE.update(raw)
-        except Exception:
-            pass
+        except json.JSONDecodeError as e:
+            print(f"[CFG] ⚠️ Config file corrupted (JSON error): {e}")
+        except Exception as e:
+            print(f"[CFG] ⚠️ Config load error: {e}")
 
     return BEST_CONFIG_CACHE
 
@@ -184,18 +194,33 @@ def save_best_configs(best_configs: dict):
         "saved_at": datetime.utcnow().isoformat() + "Z",
     }
 
+    # Convert numpy/pandas types to Python native types for JSON serialization
+    def _convert_to_native(obj):
+        """Convert numpy/pandas types to Python native types for JSON serialization."""
+        if isinstance(obj, dict):
+            return {k: _convert_to_native(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [_convert_to_native(v) for v in obj]
+        elif hasattr(obj, 'item'):  # numpy scalar types (np.float64, np.int64, etc.)
+            return obj.item()
+        elif hasattr(obj, 'tolist'):  # numpy arrays
+            return obj.tolist()
+        return obj
+
+    cleaned = _convert_to_native(cleaned)
+
     BEST_CONFIG_CACHE.clear()
     BEST_CONFIG_CACHE.update(cleaned)
-    BEST_CONFIG_WARNING_FLAGS = {
-        "missing_signature": False,
-        "signature_mismatch": False,
-    }
+    # Reset flags in-place instead of reassigning
+    BEST_CONFIG_WARNING_FLAGS["missing_signature"] = False
+    BEST_CONFIG_WARNING_FLAGS["signature_mismatch"] = False
 
     try:
         with open(BEST_CONFIGS_FILE, "w", encoding="utf-8") as f:
             json.dump(cleaned, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+        print(f"[CFG] ✓ Best configs saved: {BEST_CONFIGS_FILE}")
+    except Exception as e:
+        print(f"[CFG] ⚠️ Config save error: {e}")
 
 
 def invalidate_config_cache():

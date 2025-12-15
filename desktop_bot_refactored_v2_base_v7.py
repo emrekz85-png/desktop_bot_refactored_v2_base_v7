@@ -1611,11 +1611,18 @@ def _is_best_config_signature_valid(best_cfgs: dict) -> bool:
     if not isinstance(best_cfgs, dict):
         return False
 
+    # Boş dict durumunda (dosya yok veya yüklenemedi) sessizce False dön
+    # Bu sayede backtest sırasında gereksiz uyarı spam'i önlenir
+    if not best_cfgs:
+        return False
+
     meta = best_cfgs.get("_meta", {}) if isinstance(best_cfgs.get("_meta"), dict) else {}
     stored_sig = meta.get("strategy_signature")
     if not stored_sig:
         # Eski kayıtlar imzasız olabilir; uyumsuzluk riskini azaltmak için uyarı ver.
-        if not BEST_CONFIG_WARNING_FLAGS.get("missing_signature", False):
+        # Sadece gerçekten config varsa ama imza yoksa uyar (eski format)
+        has_any_config = any(k != "_meta" for k in best_cfgs.keys())
+        if has_any_config and not BEST_CONFIG_WARNING_FLAGS.get("missing_signature", False):
             print("[CFG] Uyarı: Kaydedilmiş backtest imzası bulunamadı. En iyi ayarlar göz ardı edilecek.")
             BEST_CONFIG_WARNING_FLAGS["missing_signature"] = True
         return False
@@ -1652,9 +1659,12 @@ def load_optimized_config(symbol, timeframe):
                     raw = json.load(f)
                 # Beklenen format: {"SYMBOL": {"tf": {...}}}
                 if isinstance(raw, dict):
-                    BEST_CONFIG_CACHE = raw
-            except Exception:
-                BEST_CONFIG_CACHE = {}
+                    BEST_CONFIG_CACHE.clear()
+                    BEST_CONFIG_CACHE.update(raw)
+            except json.JSONDecodeError as e:
+                print(f"[CFG] ⚠️ Config dosyası bozuk (JSON hatası): {e}")
+            except Exception as e:
+                print(f"[CFG] ⚠️ Config yükleme hatası: {e}")
         return BEST_CONFIG_CACHE
 
     defaults = {
@@ -1715,16 +1725,33 @@ def save_best_configs(best_configs: dict):
         "saved_at": datetime.utcnow().isoformat() + "Z",
     }
 
-    BEST_CONFIG_CACHE = cleaned
-    BEST_CONFIG_WARNING_FLAGS = {
-        "missing_signature": False,
-        "signature_mismatch": False,
-    }
+    # JSON serileştirme için numpy/pandas tiplerini Python native tiplerine dönüştür
+    def _convert_to_native(obj):
+        """Convert numpy/pandas types to Python native types for JSON serialization."""
+        if isinstance(obj, dict):
+            return {k: _convert_to_native(v) for k, v in obj.items()}
+        elif isinstance(obj, (list, tuple)):
+            return [_convert_to_native(v) for v in obj]
+        elif hasattr(obj, 'item'):  # numpy scalar types (np.float64, np.int64, etc.)
+            return obj.item()
+        elif hasattr(obj, 'tolist'):  # numpy arrays
+            return obj.tolist()
+        return obj
+
+    cleaned = _convert_to_native(cleaned)
+
+    BEST_CONFIG_CACHE.clear()
+    BEST_CONFIG_CACHE.update(cleaned)
+    # Flag'leri sıfırla (yeni dict oluşturmak yerine mevcut dict'i güncelle)
+    BEST_CONFIG_WARNING_FLAGS["missing_signature"] = False
+    BEST_CONFIG_WARNING_FLAGS["signature_mismatch"] = False
+
     try:
         with open(BEST_CONFIGS_FILE, "w", encoding="utf-8") as f:
             json.dump(cleaned, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+        print(f"[CFG] ✓ En iyi ayarlar kaydedildi: {BEST_CONFIGS_FILE}")
+    except Exception as e:
+        print(f"[CFG] ⚠️ Config kaydetme hatası: {e}")
 
 
 
