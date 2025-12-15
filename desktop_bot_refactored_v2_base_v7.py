@@ -255,6 +255,8 @@ candles = 50000
 REFRESH_RATE = 3
 
 # Grafik güncelleme - False = daha hızlı başlatma, daha az CPU
+# Grafikler: fast_start.py ile başlatıldığında Qt sırası sorunu oluşuyor
+# Doğrudan "python desktop_bot_refactored_v2_base_v7.py" ile çalıştırırsan True yapabilirsin
 ENABLE_CHARTS = False
 
 # ==========================================
@@ -2368,180 +2370,117 @@ class TradeManager:
 
                 self.open_trades[i]["pnl"] = gross_pnl
 
-    def check_realtime_exit(self, symbol: str, latest_price: float) -> list:
-        """Check if any open trades for symbol have hit TP or SL at current price.
+    def check_realtime_sl(self, symbol: str, latest_price: float) -> list:
+        """Real-time SL check - mum kapanmasını beklemeden SL'e ulaşan pozisyonları kapat.
 
-        This provides faster exit detection than waiting for candle close.
-        When price approaches critical levels (TP or SL), this method can trigger
-        immediate exit to avoid slippage from waiting for candle completion.
-
-        Args:
-            symbol: Trading symbol
-            latest_price: Current market price
+        Bu fonksiyon kritik bir güvenlik mekanizmasıdır:
+        - Fiyat her güncellendiğinde çağrılır (her ~0.5 saniye)
+        - SL'e ulaşan pozisyonları anında kapatır
+        - Mum kapanmasını beklemekten kaynaklanan aşırı kayıpları önler
 
         Returns:
-            List of closed trades (can be processed by caller for notifications)
+            Kapatılan trade'lerin listesi (Telegram bildirimi için)
         """
-        closed_trades = []
-
         with self.lock:
-            trades_to_close = []
+            closed_indices = []
+            just_closed_trades = []
 
             for i, trade in enumerate(self.open_trades):
                 if trade.get("symbol") != symbol:
                     continue
 
-                entry = float(trade.get("entry", 0))
-                tp = float(trade.get("tp", 0))
-                sl = float(trade.get("sl", 0))
                 t_type = trade.get("type")
+                entry = float(trade.get("entry", 0))
+                sl = float(trade.get("sl", 0))
+                tp = float(trade.get("tp", 0))
 
-                if entry <= 0:
+                if entry <= 0 or sl <= 0:
                     continue
 
-                # Check TP/SL hit
+                # SL kontrolü
+                hit_sl = False
                 if t_type == "LONG":
-                    hit_tp = latest_price >= tp
                     hit_sl = latest_price <= sl
                 else:  # SHORT
-                    hit_tp = latest_price <= tp
                     hit_sl = latest_price >= sl
 
-                if hit_tp or hit_sl:
-                    trades_to_close.append({
-                        "index": i,
-                        "hit_tp": hit_tp,
-                        "hit_sl": hit_sl,
-                        "price": latest_price
-                    })
+                if not hit_sl:
+                    continue
 
-            # Process closes (in reverse order to maintain indices)
-            for close_info in reversed(trades_to_close):
-                idx = close_info["index"]
-                trade = self.open_trades[idx]
+                # --- POZİSYONU ACİL KAPAT ---
+                tf = trade.get("timeframe", "?")
+                size = float(trade.get("size", 0))
+                initial_margin = float(trade.get("margin", abs(size) * entry / TRADING_CONFIG["leverage"]))
+                margin_release = float(trade.get("margin", initial_margin))
 
-                # Determine exit reason
-                if close_info["hit_tp"] and close_info["hit_sl"]:
-                    reason = "STOP (BothHit-RT)"  # RT = Real-Time
-                    exit_level = float(trade.get("sl"))
-                elif close_info["hit_tp"]:
-                    reason = "WIN (TP-RT)"
-                    exit_level = float(trade.get("tp"))
+                # Slippage uygula
+                if t_type == "LONG":
+                    exit_fill = latest_price * (1 - self.slippage_pct)
+                    gross_pnl = (exit_fill - entry) * size
                 else:
-                    reason = "STOP-RT"
-                    exit_level = float(trade.get("sl"))
+                    exit_fill = latest_price * (1 + self.slippage_pct)
+                    gross_pnl = (entry - exit_fill) * size
 
-                # Close the trade
-                closed_trade = self._close_trade_at_price(
-                    idx,
-                    exit_level,
-                    reason,
-                    datetime.utcnow()
-                )
-                if closed_trade:
-                    closed_trades.append(closed_trade)
+                # Komisyon hesapla
+                commission_notional = abs(size) * abs(exit_fill)
+                commission = commission_notional * TRADING_CONFIG["total_fee"]
 
-        return closed_trades
+                # Funding maliyeti (basit)
+                funding_cost = 0.0
+                try:
+                    open_time_str = trade.get("open_time_utc", "")
+                    if open_time_str:
+                        open_dt = datetime.strptime(open_time_str, "%Y-%m-%dT%H:%M:%SZ")
+                        hours = max(0.0, (datetime.utcnow() - open_dt).total_seconds() / 3600.0)
+                        notional_entry = abs(size) * entry
+                        funding_cost = notional_entry * TRADING_CONFIG["funding_rate_8h"] * (hours / 8.0)
+                except Exception:
+                    funding_cost = 0.0
 
-    def _close_trade_at_price(
-        self,
-        trade_idx: int,
-        exit_price: float,
-        reason: str,
-        close_time
-    ) -> dict:
-        """Close a trade at a specific price.
+                final_net_pnl = gross_pnl - commission - funding_cost
 
-        Internal method used by both candle-based and real-time exits.
+                # Strateji cüzdanını güncelle
+                trade_strategy = trade.get("strategy_mode", "keltner_bounce")
+                strat_wallet = self._get_strategy_wallet(trade_strategy)
+                strat_wallet["wallet_balance"] += margin_release + final_net_pnl
+                strat_wallet["locked_margin"] -= margin_release
+                strat_wallet["total_pnl"] += final_net_pnl
+                # Geriye uyumluluk için global değişkenleri de güncelle
+                self.wallet_balance += margin_release + final_net_pnl
+                self.locked_margin -= margin_release
+                self.total_pnl += final_net_pnl
 
-        Args:
-            trade_idx: Index of trade in open_trades
-            exit_price: Price at which to close
-            reason: Exit reason string
-            close_time: Time of close (datetime)
+                # Cooldown ayarla
+                wait_minutes = 10 if tf == "1m" else (30 if tf == "5m" else 60)
+                self.cooldowns[(symbol, tf)] = datetime.utcnow() + pd.Timedelta(minutes=wait_minutes)
 
-        Returns:
-            Closed trade dict
-        """
-        if trade_idx >= len(self.open_trades):
-            return None
+                # BE statüsünü ayır
+                reason = "STOP [RT]"  # RT = Real-Time kapatma
+                if trade.get("breakeven") and abs(final_net_pnl) < 1e-6:
+                    reason = "BE [RT]"
 
-        trade = self.open_trades[trade_idx]
-        entry = float(trade["entry"])
-        t_type = trade["type"]
-        current_size = float(trade.get("size", 0))
-        tf = trade["timeframe"]
-        trade_strategy = trade.get("strategy_mode", "keltner_bounce")
+                trade["status"] = reason
+                trade["pnl"] = final_net_pnl
+                trade["close_time"] = (datetime.utcnow() + pd.Timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
+                trade["close_price"] = float(exit_fill)
 
-        # Calculate margin
-        initial_margin = float(trade.get("margin", abs(current_size) * entry / TRADING_CONFIG["leverage"]))
-        margin_release = initial_margin
+                serialized_trade = trade.copy()
+                serialized_trade["events"] = json.dumps(trade.get("events", []))
 
-        # Apply slippage
-        if t_type == "LONG":
-            exit_fill = exit_price * (1 - self.slippage_pct)
-            gross_pnl = (exit_fill - entry) * current_size
-        else:
-            exit_fill = exit_price * (1 + self.slippage_pct)
-            gross_pnl = (entry - exit_fill) * current_size
+                self.history.append(serialized_trade)
+                just_closed_trades.append(serialized_trade)
+                closed_indices.append(i)
 
-        # Calculate costs
-        commission_notional = abs(current_size) * abs(exit_fill)
-        commission = commission_notional * TRADING_CONFIG["total_fee"]
+                print(f"🚨 [RT-SL] {symbol}-{tf} {t_type} ACİL KAPATILDI | Fiyat: {latest_price:.4f}, SL: {sl:.4f}, PnL: ${final_net_pnl:+.2f}")
 
-        funding_cost = 0.0
-        try:
-            open_time_str = trade.get("open_time_utc", "")
-            if open_time_str:
-                open_dt = datetime.strptime(open_time_str, "%Y-%m-%dT%H:%M:%SZ")
-                hours = max(0.0, (close_time - open_dt).total_seconds() / 3600.0)
-                notional_entry = abs(current_size) * entry
-                funding_cost = notional_entry * TRADING_CONFIG["funding_rate_8h"] * (hours / 8.0)
-        except Exception:
-            funding_cost = 0.0
+            # Kapatılan trade'leri listeden çıkar
+            for idx in sorted(closed_indices, reverse=True):
+                del self.open_trades[idx]
 
-        final_net_pnl = gross_pnl - commission - funding_cost
+            if closed_indices:
+                self.save_trades()
 
-        # Update wallets
-        strat_wallet = self._get_strategy_wallet(trade_strategy)
-        strat_wallet["wallet_balance"] += margin_release + final_net_pnl
-        strat_wallet["locked_margin"] -= margin_release
-        strat_wallet["total_pnl"] += final_net_pnl
-        self.wallet_balance += margin_release + final_net_pnl
-        self.locked_margin -= margin_release
-        self.total_pnl += final_net_pnl
-
-        # Set cooldown on stops
-        if "STOP" in reason:
-            wait_minutes = 10 if tf == "1m" else (30 if tf == "5m" else 60)
-            cooldown_base = close_time
-            if isinstance(cooldown_base, datetime):
-                cooldown_base = pd.Timestamp(cooldown_base)
-            self.cooldowns[(trade["symbol"], tf)] = cooldown_base + pd.Timedelta(minutes=wait_minutes)
-
-        # Check for BE
-        if trade.get("breakeven") and abs(final_net_pnl) < 1e-6 and "STOP" in reason:
-            reason = "BE-RT"
-
-        # Finalize trade record
-        trade["status"] = reason
-        trade["pnl"] = final_net_pnl
-        if isinstance(close_time, datetime):
-            close_time_str = (pd.Timestamp(close_time) + pd.Timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
-        else:
-            close_time_str = close_time
-        trade["close_time"] = close_time_str
-        trade["close_price"] = float(exit_fill)
-        trade["events"] = json.dumps(trade.get("events", []))
-
-        # Move to history
-        self.history.append(trade)
-        del self.open_trades[trade_idx]
-
-        # Save and notify
-        self.save_trades()
-
-        return trade
+            return just_closed_trades
 
     def save_trades(self):
         if not self.persist:
@@ -4278,21 +4217,32 @@ class LiveBotWorker(QThread):
                                 price = float(df_price.iloc[-1]['close'])
                                 self.price_signal.emit(sym, price)
                                 trade_manager.update_live_pnl_with_price(sym, price)
-                                # Real-time TP/SL check for faster exits
-                                rt_closed = trade_manager.check_realtime_exit(sym, price)
-                                if rt_closed:
-                                    for ct in rt_closed:
-                                        self.trade_signal.emit(ct)
+                                # Real-time SL kontrolü - mum kapanmasını beklemeden SL'e ulaşan pozisyonları kapat
+                                rt_closed = trade_manager.check_realtime_sl(sym, price)
+                                for ct in rt_closed:
+                                    tf = ct.get('timeframe', '?')
+                                    pnl = float(ct.get('pnl', 0))
+                                    pnl_str = f"+${pnl:.2f}" if pnl > 0 else f"-${abs(pnl):.2f}"
+                                    close_log = f"🚨 {ct['symbol']} ACİL KAPATILDI ({tf}): {ct['status']} | {pnl_str}"
+                                    self.update_ui_signal.emit(sym, tf, "{}", f"⚠️ {close_log}")
+                                    # Telegram bildirimi
+                                    tg_msg = f"🚨 ACİL KAPATMA: {ct['symbol']}\nTF: {tf}\nSonuç: {ct['status']}\nNet PnL: {pnl_str}\n⚠️ Real-time SL tetiklendi"
+                                    TradingEngine.send_telegram(self.tg_token, self.tg_chat_id, tg_msg)
                         if not stream_snapshot:
                             latest_prices = TradingEngine.get_latest_prices(SYMBOLS)
                             for sym, price in latest_prices.items():
                                 self.price_signal.emit(sym, price)
                                 trade_manager.update_live_pnl_with_price(sym, price)
-                                # Real-time TP/SL check for faster exits
-                                rt_closed = trade_manager.check_realtime_exit(sym, price)
-                                if rt_closed:
-                                    for ct in rt_closed:
-                                        self.trade_signal.emit(ct)
+                                # Real-time SL kontrolü (REST fallback)
+                                rt_closed = trade_manager.check_realtime_sl(sym, price)
+                                for ct in rt_closed:
+                                    tf = ct.get('timeframe', '?')
+                                    pnl = float(ct.get('pnl', 0))
+                                    pnl_str = f"+${pnl:.2f}" if pnl > 0 else f"-${abs(pnl):.2f}"
+                                    close_log = f"🚨 {ct['symbol']} ACİL KAPATILDI ({tf}): {ct['status']} | {pnl_str}"
+                                    self.update_ui_signal.emit(sym, tf, "{}", f"⚠️ {close_log}")
+                                    tg_msg = f"🚨 ACİL KAPATMA: {ct['symbol']}\nTF: {tf}\nSonuç: {ct['status']}\nNet PnL: {pnl_str}\n⚠️ Real-time SL tetiklendi"
+                                    TradingEngine.send_telegram(self.tg_token, self.tg_chat_id, tg_msg)
                     except Exception as e:
                         print(f"[LIVE] Fiyat güncelleme hatası: {e}")
                     next_price_time = now + 0.5
@@ -5054,6 +5004,32 @@ class MainWindow(QMainWindow):
         """)
         ticker_layout.addWidget(self.status_label)
 
+        # Config yaşı göstergesi
+        self.config_age_label = QLabel("")
+        self.config_age_label.setStyleSheet("""
+            color: #888;
+            font-weight: bold;
+            font-size: 12px;
+            padding: 5px 10px;
+            background-color: #1a1a1a;
+            border-radius: 8px;
+        """)
+        ticker_layout.addWidget(self.config_age_label)
+        self._update_config_age_label()  # Başlangıçta config yaşını kontrol et
+
+        # Blacklist göstergesi
+        self.blacklist_label = QLabel("")
+        self.blacklist_label.setStyleSheet("""
+            color: #888;
+            font-weight: bold;
+            font-size: 12px;
+            padding: 5px 10px;
+            background-color: #1a1a1a;
+            border-radius: 8px;
+        """)
+        ticker_layout.addWidget(self.blacklist_label)
+        self._update_blacklist_label()  # Başlangıçta blacklist'i kontrol et
+
         main_layout.addWidget(ticker_widget)
         # ---------------------------------------------
 
@@ -5122,9 +5098,18 @@ class MainWindow(QMainWindow):
         self.chk_rr.setChecked(True);
         self.chk_rr.stateChanged.connect(self.toggle_rr)
         sets_layout.addWidget(self.chk_rr);
+        # Grafik güncelleme toggle
+        self.chk_charts = QCheckBox("📊 Grafik");
+        self.chk_charts.setChecked(True);
+        self.chk_charts.setToolTip("Grafik güncellemelerini açar/kapatır. Kapatmak CPU kullanımını azaltır.")
+        sets_layout.addWidget(self.chk_charts);
         settings_group.setLayout(sets_layout);
         top_panel.addWidget(settings_group, stretch=4)
         live_layout.addLayout(top_panel)
+
+        # Grafik güncelleme throttling için son güncelleme zamanları
+        self.last_chart_update = {tf: 0 for tf in TIMEFRAMES}
+        self.chart_update_interval = 3.0  # Saniye cinsinden minimum güncelleme aralığı
 
         self.web_views = {}
         chart_tabs = QTabWidget()
@@ -5492,11 +5477,18 @@ class MainWindow(QMainWindow):
             """)
 
     def render_chart_and_log(self, tf, json_data, log_msg):
-        # Grafik güncelleme sadece ENABLE_CHARTS=True ise
-        if ENABLE_CHARTS and self.views_ready.get(tf, False) and json_data and json_data != "{}":
-            safe_json = json_data.replace("'", "\\'").replace("\\", "\\\\")
-            js = f"if(window.updateChartData) window.updateChartData('{safe_json}');"
-            self.web_views[tf].page().runJavaScript(js)
+        # Grafik güncelleme sadece ENABLE_CHARTS=True ve UI toggle açıksa
+        import time as _time
+        charts_enabled = getattr(self, 'chk_charts', None) and self.chk_charts.isChecked()
+        if ENABLE_CHARTS and charts_enabled and self.views_ready.get(tf, False) and json_data and json_data != "{}":
+            # Throttling: Aynı timeframe için minimum güncelleme aralığı
+            now = _time.time()
+            last_update = self.last_chart_update.get(tf, 0)
+            if now - last_update >= self.chart_update_interval:
+                safe_json = json_data.replace("'", "\\'").replace("\\", "\\\\")
+                js = f"if(window.updateChartData) window.updateChartData('{safe_json}');"
+                self.web_views[tf].page().runJavaScript(js)
+                self.last_chart_update[tf] = now
         if log_msg:
             if "🔥" in log_msg:
                 fmt = f"<span style='color:#00ff00; font-weight:bold'>{log_msg}</span>"
@@ -5836,6 +5828,230 @@ class MainWindow(QMainWindow):
                     f.write(f"\n[{datetime.now()}] HATA: {str(e)}\n")
                     f.write(traceback.format_exc())  # Hatanın hangi satırda olduğunu yazar
 
+    def _update_config_age_label(self):
+        """Backtest config yaşını kontrol et ve UI'da göster.
+
+        Config 7 günden eskiyse sarı uyarı, 14 günden eskiyse kırmızı uyarı göster.
+        """
+        try:
+            if not os.path.exists(BEST_CONFIGS_FILE):
+                self.config_age_label.setText("⚠️ Config yok")
+                self.config_age_label.setStyleSheet("""
+                    color: #ff6600;
+                    font-weight: bold;
+                    font-size: 12px;
+                    padding: 5px 10px;
+                    background-color: #332200;
+                    border-radius: 8px;
+                    border: 1px solid #ff6600;
+                """)
+                return
+
+            try:
+                with open(BEST_CONFIGS_FILE, 'r', encoding='utf-8') as f:
+                    best_cfgs = json.load(f)
+            except json.JSONDecodeError:
+                self.config_age_label.setText("⚠️ Config bozuk")
+                self.config_age_label.setStyleSheet("""
+                    color: #ff6600;
+                    font-weight: bold;
+                    font-size: 12px;
+                    padding: 5px 10px;
+                    background-color: #332200;
+                    border-radius: 8px;
+                    border: 1px solid #ff6600;
+                """)
+                self.config_age_label.setToolTip("best_configs.json dosyası bozuk. Backtest çalıştırın.")
+                return
+
+            if not isinstance(best_cfgs, dict):
+                return
+
+            meta = best_cfgs.get("_meta", {})
+            saved_at_str = meta.get("saved_at", "")
+
+            if not saved_at_str:
+                self.config_age_label.setText("⚠️ Config tarihi yok")
+                self.config_age_label.setStyleSheet("""
+                    color: #ff6600;
+                    font-weight: bold;
+                    font-size: 12px;
+                    padding: 5px 10px;
+                    background-color: #332200;
+                    border-radius: 8px;
+                    border: 1px solid #ff6600;
+                """)
+                return
+
+            # ISO format parse (2024-01-15T12:30:45Z)
+            saved_at = datetime.fromisoformat(saved_at_str.replace("Z", "+00:00"))
+            now = datetime.now(saved_at.tzinfo) if saved_at.tzinfo else datetime.utcnow()
+            age = now - saved_at.replace(tzinfo=None)
+            age_days = age.days
+            age_hours = age.seconds // 3600
+
+            # Yaş metni
+            if age_days == 0:
+                age_text = f"{age_hours}s önce"
+            elif age_days == 1:
+                age_text = "1 gün önce"
+            else:
+                age_text = f"{age_days} gün önce"
+
+            # Renk ve stil
+            if age_days >= 14:
+                # Kırmızı - acil backtest gerekli
+                self.config_age_label.setText(f"🔴 Config: {age_text}")
+                self.config_age_label.setStyleSheet("""
+                    color: #ff4444;
+                    font-weight: bold;
+                    font-size: 12px;
+                    padding: 5px 10px;
+                    background-color: #441111;
+                    border-radius: 8px;
+                    border: 1px solid #ff4444;
+                """)
+                self.config_age_label.setToolTip("Config 14+ gün eski! Backtest çalıştırmanız önerilir.")
+            elif age_days >= 7:
+                # Sarı - uyarı
+                self.config_age_label.setText(f"🟡 Config: {age_text}")
+                self.config_age_label.setStyleSheet("""
+                    color: #ffaa00;
+                    font-weight: bold;
+                    font-size: 12px;
+                    padding: 5px 10px;
+                    background-color: #332200;
+                    border-radius: 8px;
+                    border: 1px solid #ffaa00;
+                """)
+                self.config_age_label.setToolTip("Config 7+ gün eski. Backtest çalıştırmayı düşünün.")
+            else:
+                # Yeşil - güncel
+                self.config_age_label.setText(f"🟢 Config: {age_text}")
+                self.config_age_label.setStyleSheet("""
+                    color: #44ff44;
+                    font-weight: bold;
+                    font-size: 12px;
+                    padding: 5px 10px;
+                    background-color: #114411;
+                    border-radius: 8px;
+                    border: 1px solid #44ff44;
+                """)
+                self.config_age_label.setToolTip("Config güncel.")
+
+        except Exception as e:
+            self.config_age_label.setText("⚠️ Config okunamadı")
+            self.config_age_label.setStyleSheet("""
+                color: #888;
+                font-weight: bold;
+                font-size: 12px;
+                padding: 5px 10px;
+                background-color: #1a1a1a;
+                border-radius: 8px;
+            """)
+            print(f"[UI] Config yaşı okunamadı: {e}")
+
+    def _update_blacklist_label(self):
+        """Blacklist durumunu kontrol et ve UI'da göster."""
+        try:
+            # Dinamik blacklist'i yükle
+            dynamic_bl = load_dynamic_blacklist()
+            static_bl = POST_PORTFOLIO_BLACKLIST
+
+            # Disabled streams from best_configs.json
+            disabled_streams = []
+            if os.path.exists(BEST_CONFIGS_FILE):
+                try:
+                    with open(BEST_CONFIGS_FILE, 'r', encoding='utf-8') as f:
+                        best_cfgs = json.load(f)
+                    if isinstance(best_cfgs, dict):
+                        for sym in SYMBOLS:
+                            sym_cfg = best_cfgs.get(sym, {})
+                            if isinstance(sym_cfg, dict):
+                                for tf in TIMEFRAMES:
+                                    tf_cfg = sym_cfg.get(tf, {})
+                                    if isinstance(tf_cfg, dict) and tf_cfg.get("disabled", False):
+                                        disabled_streams.append((sym, tf))
+                except json.JSONDecodeError:
+                    pass  # JSON bozuksa disabled_streams boş kalır
+
+            # Toplam sayıları hesapla
+            total_streams = len(SYMBOLS) * len(TIMEFRAMES)
+            blacklisted_count = len(dynamic_bl) + len([k for k in static_bl.keys() if static_bl.get(k)])
+            disabled_count = len(disabled_streams)
+            active_count = total_streams - blacklisted_count - disabled_count
+
+            # Tüm devre dışı streamlerin listesini hazırla (tooltip için)
+            all_inactive = []
+            for key in dynamic_bl.keys():
+                info = dynamic_bl[key]
+                pnl = info.get('pnl', 0)
+                all_inactive.append(f"{key[0]}-{key[1]} (PnL: ${pnl:.0f})")
+            for key, val in static_bl.items():
+                if val and key not in dynamic_bl:
+                    all_inactive.append(f"{key[0]}-{key[1]} (manuel)")
+            for key in disabled_streams:
+                if key not in dynamic_bl and key not in static_bl:
+                    all_inactive.append(f"{key[0]}-{key[1]} (disabled)")
+
+            if blacklisted_count + disabled_count == 0:
+                # Tümü aktif
+                self.blacklist_label.setText(f"✅ {active_count}/{total_streams} aktif")
+                self.blacklist_label.setStyleSheet("""
+                    color: #44ff44;
+                    font-weight: bold;
+                    font-size: 12px;
+                    padding: 5px 10px;
+                    background-color: #114411;
+                    border-radius: 8px;
+                    border: 1px solid #44ff44;
+                """)
+                self.blacklist_label.setToolTip("Tüm coin/timeframe kombinasyonları aktif.")
+            elif active_count > total_streams * 0.5:
+                # Çoğunluk aktif
+                self.blacklist_label.setText(f"📊 {active_count}/{total_streams} aktif")
+                self.blacklist_label.setStyleSheet("""
+                    color: #aaaaff;
+                    font-weight: bold;
+                    font-size: 12px;
+                    padding: 5px 10px;
+                    background-color: #222244;
+                    border-radius: 8px;
+                    border: 1px solid #6666aa;
+                """)
+                tooltip = "Devre dışı streamler:\n" + "\n".join(all_inactive[:20])
+                if len(all_inactive) > 20:
+                    tooltip += f"\n... ve {len(all_inactive) - 20} tane daha"
+                self.blacklist_label.setToolTip(tooltip)
+            else:
+                # Az sayıda aktif
+                self.blacklist_label.setText(f"⚠️ {active_count}/{total_streams} aktif")
+                self.blacklist_label.setStyleSheet("""
+                    color: #ffaa00;
+                    font-weight: bold;
+                    font-size: 12px;
+                    padding: 5px 10px;
+                    background-color: #332200;
+                    border-radius: 8px;
+                    border: 1px solid #ffaa00;
+                """)
+                tooltip = "Devre dışı streamler:\n" + "\n".join(all_inactive[:20])
+                if len(all_inactive) > 20:
+                    tooltip += f"\n... ve {len(all_inactive) - 20} tane daha"
+                self.blacklist_label.setToolTip(tooltip)
+
+        except Exception as e:
+            self.blacklist_label.setText("⚠️ Blacklist?")
+            self.blacklist_label.setStyleSheet("""
+                color: #888;
+                font-weight: bold;
+                font-size: 12px;
+                padding: 5px 10px;
+                background-color: #1a1a1a;
+                border-radius: 8px;
+            """)
+            print(f"[UI] Blacklist okunamadı: {e}")
+
     def load_tf_settings(self, tf):
         current_sym = self.combo_symbol.currentText();
         settings = SYMBOL_PARAMS.get(current_sym, SYMBOL_PARAMS["BTCUSDT"]);
@@ -5935,6 +6151,9 @@ class MainWindow(QMainWindow):
         if best_configs:
             save_best_configs(best_configs)
             self.backtest_logs.append("✅ En iyi ayarlar canlı trade'e aktarıldı.")
+            # Config yaşı ve blacklist göstergelerini güncelle
+            self._update_config_age_label()
+            self._update_blacklist_label()
 
     def save_backtest_meta(self, meta: dict):
         try:
