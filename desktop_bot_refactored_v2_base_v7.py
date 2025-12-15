@@ -5458,6 +5458,118 @@ class MainWindow(QMainWindow):
         opt_layout.addWidget(self.opt_logs)
         self.main_tabs.addTab(opt_widget, "🔧 Optimizasyon")
 
+        # ========== ⚙️ CONFIG TAB ==========
+        config_widget = QWidget()
+        config_layout = QVBoxLayout(config_widget)
+        config_layout.setSpacing(10)
+
+        # Üst bilgi satırı
+        config_header = QHBoxLayout()
+
+        # Config durumu grubu
+        status_group = QGroupBox("📋 Config Durumu")
+        status_group.setStyleSheet("QGroupBox { color: white; font-weight: bold; }")
+        status_layout = QVBoxLayout(status_group)
+
+        self.config_status_text = QTextEdit()
+        self.config_status_text.setReadOnly(True)
+        self.config_status_text.setMaximumHeight(150)
+        self.config_status_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #1a1a1a;
+                color: #00ff00;
+                font-family: Consolas, monospace;
+                font-size: 12px;
+                border: 1px solid #333;
+            }
+        """)
+        status_layout.addWidget(self.config_status_text)
+
+        self.btn_refresh_config = QPushButton("🔄 Yenile")
+        self.btn_refresh_config.clicked.connect(self._refresh_config_tab)
+        status_layout.addWidget(self.btn_refresh_config)
+
+        config_header.addWidget(status_group)
+
+        # İstatistik grubu
+        stats_group = QGroupBox("📊 İstatistikler")
+        stats_group.setStyleSheet("QGroupBox { color: white; font-weight: bold; }")
+        stats_layout = QVBoxLayout(stats_group)
+
+        self.config_stats_text = QTextEdit()
+        self.config_stats_text.setReadOnly(True)
+        self.config_stats_text.setMaximumHeight(150)
+        self.config_stats_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #1a1a1a;
+                color: #aaaaff;
+                font-family: Consolas, monospace;
+                font-size: 12px;
+                border: 1px solid #333;
+            }
+        """)
+        stats_layout.addWidget(self.config_stats_text)
+
+        self.btn_delete_config = QPushButton("🗑️ Config Dosyasını Sil")
+        self.btn_delete_config.setStyleSheet("QPushButton { background-color: #662222; } QPushButton:hover { background-color: #883333; }")
+        self.btn_delete_config.clicked.connect(self._delete_config_file)
+        stats_layout.addWidget(self.btn_delete_config)
+
+        config_header.addWidget(stats_group)
+        config_layout.addLayout(config_header)
+
+        # Aktif streamler tablosu
+        active_group = QGroupBox("✅ Aktif Streamler (Backtest'ten geçenler)")
+        active_group.setStyleSheet("QGroupBox { color: white; font-weight: bold; }")
+        active_layout = QVBoxLayout(active_group)
+
+        self.active_streams_table = QTableWidget()
+        self.active_streams_table.setColumnCount(7)
+        self.active_streams_table.setHorizontalHeaderLabels(["Symbol", "TF", "RR", "RSI", "AT", "Trailing", "Strateji"])
+        self.active_streams_table.horizontalHeader().setStretchLastSection(True)
+        self.active_streams_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #1a1a1a;
+                color: white;
+                gridline-color: #333;
+            }
+            QHeaderView::section {
+                background-color: #114411;
+                color: white;
+                font-weight: bold;
+                padding: 5px;
+            }
+        """)
+        active_layout.addWidget(self.active_streams_table)
+        config_layout.addWidget(active_group)
+
+        # Devre dışı streamler tablosu
+        disabled_group = QGroupBox("🚫 Devre Dışı Streamler (Blacklist + Disabled)")
+        disabled_group.setStyleSheet("QGroupBox { color: white; font-weight: bold; }")
+        disabled_layout = QVBoxLayout(disabled_group)
+
+        self.disabled_streams_table = QTableWidget()
+        self.disabled_streams_table.setColumnCount(4)
+        self.disabled_streams_table.setHorizontalHeaderLabels(["Symbol", "TF", "Sebep", "PnL"])
+        self.disabled_streams_table.horizontalHeader().setStretchLastSection(True)
+        self.disabled_streams_table.setStyleSheet("""
+            QTableWidget {
+                background-color: #1a1a1a;
+                color: white;
+                gridline-color: #333;
+            }
+            QHeaderView::section {
+                background-color: #441111;
+                color: white;
+                font-weight: bold;
+                padding: 5px;
+            }
+        """)
+        disabled_layout.addWidget(self.disabled_streams_table)
+        config_layout.addWidget(disabled_group)
+
+        self.main_tabs.addTab(config_widget, "⚙️ Config")
+
         # Açılışta canlı takip sekmesini öne çıkar
         self.main_tabs.setCurrentWidget(live_widget)
 
@@ -5483,6 +5595,11 @@ class MainWindow(QMainWindow):
         # Backtest geçmişini göster
         self.load_backtest_meta()
         self.show_saved_backtest_summary()
+
+        # Config sekmesini başlangıçta yükle
+        self._refresh_config_tab()
+        self._update_config_age_label()
+        self._update_blacklist_label()
 
     def on_load_finished(self, ok, tf):
         if ok: self.views_ready[tf] = True
@@ -6103,6 +6220,192 @@ class MainWindow(QMainWindow):
             """)
             print(f"[UI] Blacklist okunamadı: {e}")
 
+    def _refresh_config_tab(self):
+        """Config sekmesindeki tüm bilgileri yenile."""
+        try:
+            # --- Config Durumu ---
+            status_lines = []
+
+            if not os.path.exists(BEST_CONFIGS_FILE):
+                status_lines.append("❌ Config dosyası bulunamadı")
+                status_lines.append(f"   Dosya: {BEST_CONFIGS_FILE}")
+                status_lines.append("")
+                status_lines.append("💡 Backtest çalıştırarak config oluşturun.")
+                self.config_status_text.setPlainText("\n".join(status_lines))
+                self.config_stats_text.setPlainText("Config yok - istatistik hesaplanamadı")
+                self.active_streams_table.setRowCount(0)
+                self.disabled_streams_table.setRowCount(0)
+                return
+
+            try:
+                with open(BEST_CONFIGS_FILE, 'r', encoding='utf-8') as f:
+                    best_cfgs = json.load(f)
+            except json.JSONDecodeError as e:
+                status_lines.append("❌ Config dosyası bozuk (JSON hatası)")
+                status_lines.append(f"   Hata: {e}")
+                status_lines.append("")
+                status_lines.append("💡 'Config Dosyasını Sil' butonuna basıp yeni backtest çalıştırın.")
+                self.config_status_text.setPlainText("\n".join(status_lines))
+                self.config_stats_text.setPlainText("Config bozuk - istatistik hesaplanamadı")
+                self.active_streams_table.setRowCount(0)
+                self.disabled_streams_table.setRowCount(0)
+                return
+
+            if not isinstance(best_cfgs, dict):
+                status_lines.append("❌ Config formatı geçersiz")
+                self.config_status_text.setPlainText("\n".join(status_lines))
+                return
+
+            # Meta bilgileri
+            meta = best_cfgs.get("_meta", {})
+            saved_at_str = meta.get("saved_at", "Bilinmiyor")
+            signature = meta.get("strategy_signature", "Yok")
+
+            # Yaş hesapla
+            age_text = "Bilinmiyor"
+            if saved_at_str and saved_at_str != "Bilinmiyor":
+                try:
+                    saved_at = datetime.fromisoformat(saved_at_str.replace("Z", "+00:00"))
+                    saved_at_naive = saved_at.replace(tzinfo=None)
+                    now_naive = datetime.utcnow()
+                    age = now_naive - saved_at_naive
+                    age_days = age.days
+                    age_hours = age.seconds // 3600
+                    if age_days == 0:
+                        age_text = f"{age_hours} saat önce"
+                    elif age_days == 1:
+                        age_text = "1 gün önce"
+                    else:
+                        age_text = f"{age_days} gün önce"
+                except:
+                    pass
+
+            # İmza kontrolü
+            current_sig = _strategy_signature()
+            sig_match = signature == current_sig
+
+            status_lines.append(f"✅ Config dosyası mevcut")
+            status_lines.append(f"   Dosya: {BEST_CONFIGS_FILE}")
+            status_lines.append(f"   Kayıt: {saved_at_str}")
+            status_lines.append(f"   Yaş: {age_text}")
+            status_lines.append(f"   İmza: {signature[:12]}...")
+            if sig_match:
+                status_lines.append(f"   ✅ İmza eşleşiyor (güncel)")
+            else:
+                status_lines.append(f"   ⚠️ İmza eşleşmiyor! Backtest çalıştırın.")
+                status_lines.append(f"      Beklenen: {current_sig[:12]}...")
+
+            self.config_status_text.setPlainText("\n".join(status_lines))
+
+            # --- İstatistikler ---
+            dynamic_bl = load_dynamic_blacklist()
+            static_bl = POST_PORTFOLIO_BLACKLIST
+
+            active_streams = []
+            disabled_streams = []
+
+            for sym in SYMBOLS:
+                sym_cfg = best_cfgs.get(sym, {})
+                if not isinstance(sym_cfg, dict):
+                    continue
+                for tf in TIMEFRAMES:
+                    tf_cfg = sym_cfg.get(tf, {})
+                    if not isinstance(tf_cfg, dict):
+                        continue
+
+                    key = (sym, tf)
+                    is_disabled = tf_cfg.get("disabled", False)
+                    is_dynamic_bl = key in dynamic_bl
+                    is_static_bl = static_bl.get(key, False)
+
+                    if is_disabled or is_dynamic_bl or is_static_bl:
+                        reason = []
+                        pnl = 0
+                        if is_disabled:
+                            reason.append("disabled")
+                        if is_dynamic_bl:
+                            reason.append("dynamic_bl")
+                            pnl = dynamic_bl[key].get('pnl', 0)
+                        if is_static_bl:
+                            reason.append("static_bl")
+                        disabled_streams.append({
+                            "sym": sym, "tf": tf,
+                            "reason": ", ".join(reason),
+                            "pnl": pnl
+                        })
+                    else:
+                        active_streams.append({
+                            "sym": sym, "tf": tf,
+                            "rr": tf_cfg.get("rr", "-"),
+                            "rsi": tf_cfg.get("rsi", "-"),
+                            "at": "Açık" if tf_cfg.get("at_active", False) else "Kapalı",
+                            "trailing": "Açık" if tf_cfg.get("use_trailing", False) else "Kapalı",
+                            "strategy": tf_cfg.get("strategy_mode", "keltner_bounce")[:10]
+                        })
+
+            total_streams = len(SYMBOLS) * len(TIMEFRAMES)
+            stats_lines = [
+                f"📊 Toplam stream sayısı: {total_streams}",
+                f"✅ Aktif streamler: {len(active_streams)}",
+                f"🚫 Devre dışı: {len(disabled_streams)}",
+                f"   - Dinamik blacklist: {len(dynamic_bl)}",
+                f"   - Statik blacklist: {len([k for k,v in static_bl.items() if v])}",
+                f"   - Config disabled: {len([d for d in disabled_streams if 'disabled' in d['reason']])}",
+            ]
+            self.config_stats_text.setPlainText("\n".join(stats_lines))
+
+            # --- Aktif Streamler Tablosu ---
+            self.active_streams_table.setRowCount(len(active_streams))
+            for i, stream in enumerate(active_streams):
+                self.active_streams_table.setItem(i, 0, QTableWidgetItem(stream["sym"]))
+                self.active_streams_table.setItem(i, 1, QTableWidgetItem(stream["tf"]))
+                self.active_streams_table.setItem(i, 2, QTableWidgetItem(str(stream["rr"])))
+                self.active_streams_table.setItem(i, 3, QTableWidgetItem(str(stream["rsi"])))
+                self.active_streams_table.setItem(i, 4, QTableWidgetItem(stream["at"]))
+                self.active_streams_table.setItem(i, 5, QTableWidgetItem(stream["trailing"]))
+                self.active_streams_table.setItem(i, 6, QTableWidgetItem(stream["strategy"]))
+
+            # --- Devre Dışı Streamler Tablosu ---
+            self.disabled_streams_table.setRowCount(len(disabled_streams))
+            for i, stream in enumerate(disabled_streams):
+                self.disabled_streams_table.setItem(i, 0, QTableWidgetItem(stream["sym"]))
+                self.disabled_streams_table.setItem(i, 1, QTableWidgetItem(stream["tf"]))
+                self.disabled_streams_table.setItem(i, 2, QTableWidgetItem(stream["reason"]))
+                pnl_text = f"${stream['pnl']:.0f}" if stream['pnl'] != 0 else "-"
+                self.disabled_streams_table.setItem(i, 3, QTableWidgetItem(pnl_text))
+
+            # Ayrıca üstteki label'ları da güncelle
+            self._update_config_age_label()
+            self._update_blacklist_label()
+
+        except Exception as e:
+            self.config_status_text.setPlainText(f"❌ Hata: {e}")
+            print(f"[UI] Config sekmesi yenileme hatası: {e}")
+
+    def _delete_config_file(self):
+        """Config dosyasını sil ve UI'ı güncelle."""
+        try:
+            if os.path.exists(BEST_CONFIGS_FILE):
+                os.remove(BEST_CONFIGS_FILE)
+                print(f"[CFG] ✓ Config dosyası silindi: {BEST_CONFIGS_FILE}")
+
+                # Cache'i temizle
+                global BEST_CONFIG_CACHE, BEST_CONFIG_WARNING_FLAGS
+                BEST_CONFIG_CACHE.clear()
+                BEST_CONFIG_WARNING_FLAGS["missing_signature"] = False
+                BEST_CONFIG_WARNING_FLAGS["signature_mismatch"] = False
+                BEST_CONFIG_WARNING_FLAGS["json_error"] = False
+                BEST_CONFIG_WARNING_FLAGS["load_error"] = False
+
+                # UI'ı güncelle
+                self._refresh_config_tab()
+                self._update_config_age_label()
+                self._update_blacklist_label()
+            else:
+                print("[CFG] Config dosyası zaten yok.")
+        except Exception as e:
+            print(f"[CFG] ⚠️ Config silme hatası: {e}")
+
     def load_tf_settings(self, tf):
         current_sym = self.combo_symbol.currentText();
         settings = SYMBOL_PARAMS.get(current_sym, SYMBOL_PARAMS["BTCUSDT"]);
@@ -6205,6 +6508,8 @@ class MainWindow(QMainWindow):
             # Config yaşı ve blacklist göstergelerini güncelle
             self._update_config_age_label()
             self._update_blacklist_label()
+            # Config sekmesini de güncelle
+            self._refresh_config_tab()
 
     def save_backtest_meta(self, meta: dict):
         try:
