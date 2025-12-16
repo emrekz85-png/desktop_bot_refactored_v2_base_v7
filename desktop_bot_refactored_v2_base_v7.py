@@ -3087,6 +3087,19 @@ class BinanceWebSocketKlineStream(threading.Thread):
             finally:
                 self._close_socket()
 
+# ==========================================
+# 🖥️ UI COMPONENTS - Also available in ui/ package (v40.3)
+# ==========================================
+# GUI components have been extracted to the ui/ package for better modularity:
+# - ui/workers.py: LiveBotWorker, OptimizerWorker, BacktestWorker, AutoBacktestWorker
+# - ui/main_window.py: MainWindow
+#
+# You can import them from the ui package:
+#   from ui import MainWindow, LiveBotWorker, OptimizerWorker, BacktestWorker
+#
+# The classes below are kept for backward compatibility.
+# ==========================================
+
 # --- WORKERS ---
 class LiveBotWorker(QThread):
     update_ui_signal = pyqtSignal(str, str, str, str)
