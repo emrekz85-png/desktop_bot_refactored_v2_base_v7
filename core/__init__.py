@@ -74,6 +74,8 @@ from .logging_config import (
     print_to_log, info, debug, warning, error,
 )
 
+from .trading_engine import TradingEngine
+
 __all__ = [
     # Environment
     'IS_COLAB', 'IS_HEADLESS', 'IS_NOTEBOOK', 'HAS_TQDM',
@@ -114,4 +116,6 @@ __all__ = [
     'get_logger', 'set_log_level',
     'log_trade_event', 'log_signal', 'log_api_call',
     'print_to_log', 'info', 'debug', 'warning', 'error',
+    # Trading Engine
+    'TradingEngine',
 ]

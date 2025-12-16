@@ -73,6 +73,8 @@ from core import (
     DYNAMIC_BLACKLIST_FILE as CORE_DYNAMIC_BLACKLIST_FILE,
     # Strategy configs (single source of truth for signature generation)
     DEFAULT_STRATEGY_CONFIG, SYMBOL_PARAMS, TRADING_CONFIG,
+    # Trading Engine (core trading logic, signals, data fetching)
+    TradingEngine,
 )
 
 # ==========================================
@@ -2688,1247 +2690,208 @@ class _TradeManagerProxy:
 trade_manager = _TradeManagerProxy()
 
 
-# --- TRADING ENGINE (ROBUST API & RETRY MECHANISM) ---
-class TradingEngine:
-    # Ağ çökmelerinde tekrar tekrar DNS denemelerini önlemek için kısa süreli kilit
-    _network_cooldown_until = 0
+# ==========================================
+# 🔧 TRADING ENGINE - Imported from core.trading_engine
+# ==========================================
+# TradingEngine class is now in core/trading_engine.py
+# It provides: data fetching, signal detection, indicator calculations
+# Import: from core import TradingEngine
+#
+# GUI-specific functions (create_chart_data_json, debug_plot_backtest_trade)
+# remain here as standalone functions due to plotting/GUI dependencies.
+# ==========================================
 
-    @staticmethod
-    def send_telegram(token, chat_id, message):
-        """Send Telegram message asynchronously.
 
-        Uses core.telegram module which provides:
-        - Thread pool (prevents thread accumulation)
-        - Rate limiting (prevents API throttling)
-        - Retry logic
-        - Environment variable support for credentials
+def debug_plot_backtest_trade(symbol: str,
+                              timeframe: str,
+                              trade_id: int,
+                              trades_csv: str = None,
+                              window: int = 40):
+    """
+    Debug helper to visualize a specific backtest trade.
+    - run_portfolio_backtest must have been run first.
+    - <symbol>_<timeframe>_prices.csv and trades_csv must exist.
+    """
+    # Set default trades_csv path
+    if trades_csv is None:
+        trades_csv = os.path.join(DATA_DIR, "backtest_trades.csv")
 
-        Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment variables
-        for better security (instead of storing in config.json).
-        """
-        if not token or not chat_id:
-            return
+    # 1) Price data
+    prices_path = os.path.join(DATA_DIR, f"{symbol}_{timeframe}_prices.csv")
+    if not os.path.exists(prices_path):
+        raise FileNotFoundError(f"Price data not found: {prices_path}")
 
-        # Use core package version (has thread pool and rate limiting)
-        _core_send_telegram(token, chat_id, message)
+    df_prices = pd.read_csv(prices_path)
+    if "timestamp" in df_prices.columns:
+        df_prices["timestamp"] = pd.to_datetime(df_prices["timestamp"], utc=True)
 
-    # --- YENİ: AKILLI İSTEK FONKSİYONU (RETRY LOGIC) ---
-    @staticmethod
-    def http_get_with_retry(url, params, max_retries=3, timeout=10):
-        """Hata durumunda bekleyip tekrar deneyen güvenli istek fonksiyonu"""
+    # 2) Trade data
+    if not os.path.exists(trades_csv):
+        raise FileNotFoundError(f"Trades CSV not found: {trades_csv}")
 
-        # DNS çözememe gibi hatalar tekrar denense de çözülmeyecekse boşuna istek atma
-        now = time.time()
-        if now < TradingEngine._network_cooldown_until:
-            cooldown_left = int(TradingEngine._network_cooldown_until - now)
-            print(f"BAĞLANTI HATASI: Ağ erişimi yok. {cooldown_left}s sonra yeniden denenecek.")
-            return None
+    df_trades = pd.read_csv(trades_csv)
 
-        delay = 1
-        for attempt in range(max_retries):
-            try:
-                res = requests.get(url, params=params, timeout=timeout)
+    # 3) Plot
+    plot_trade(df_prices, df_trades, trade_id=trade_id, window=window)
+    get_plt().show()
 
-                # Eğer Binance "Çok Hızlısın" (429) veya "Sunucu Hatası" (5xx) derse:
-                if res.status_code == 429 or res.status_code >= 500:
-                    # Hatayı logla ama çökme
-                    print(f"API HATA {res.status_code} (Deneme {attempt + 1}/{max_retries}). Bekleniyor...")
-                    time.sleep(delay)
-                    delay *= 2  # Bekleme süresini katla (1sn -> 2sn -> 4sn)
-                    continue
 
-                # Diğer hatalarda (404 vb) direkt döndür
-                TradingEngine._network_cooldown_until = 0
-                return res
-            except requests.exceptions.RequestException as e:
-                is_dns_error = isinstance(e, requests.exceptions.ConnectionError) and "NameResolutionError" in str(e)
-                print(f"BAĞLANTI HATASI (Deneme {attempt + 1}/{max_retries}): {e}")
+def create_chart_data_json(df, interval, symbol="BTCUSDT", signal=None, active_trades=[], show_rr=True):
+    """Create JSON data for chart visualization (GUI/web).
 
-                # DNS çözememe (getaddrinfo) durumunda 5 dakikalığına istekleri durdur
-                if is_dns_error:
-                    TradingEngine._network_cooldown_until = time.time() + 300
-                    break
-
-                time.sleep(delay)
-                delay *= 2
-
-        return None  # Tüm denemeler başarısız olduysa
-
-    @staticmethod
-    def get_data(symbol, interval, limit=500):
-        try:
-            url = "https://fapi.binance.com/fapi/v1/klines"
-            params = {'symbol': symbol, 'interval': interval, 'limit': limit}
-
-            # Eski requests.get yerine yeni akıllı fonksiyonu kullanıyoruz
-            res = TradingEngine.http_get_with_retry(url, params)
-
-            if res is None: return pd.DataFrame()  # Başarısız oldu
-
-            data = res.json()
-            if not data or not isinstance(data, list): return pd.DataFrame()
-
-            df = pd.DataFrame(data).iloc[:, :6]
-            df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
-            for col in ['open', 'high', 'low', 'close', 'volume']:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-            return df
-        except Exception as e:
-            print(f"VERİ ÇEKME HATASI ({symbol}): {e}")
-            with open(os.path.join(DATA_DIR, "error_log.txt"), "a") as f:
-                f.write(f"\n[{datetime.now()}] GET_DATA HATA ({symbol}): {str(e)}\n")
-            return pd.DataFrame()
-
-    @staticmethod
-    def fetch_worker(args):
-        symbol, tf = args
-        try:
-            df = TradingEngine.get_data(symbol, tf, limit=500)
-            return (symbol, tf, df)
-        except Exception as e:
-            return (symbol, tf, pd.DataFrame())
-
-    @staticmethod
-    def get_all_candles_parallel(symbol_list, timeframe_list):
-        import concurrent.futures
-        tasks = list(itertools.product(symbol_list, timeframe_list))
-        results = {}
-
-        # --- DÜZELTME: Thread sayısını 20'den 5'e düşürdük (Rate Limit Koruması) ---
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            future_to_task = {executor.submit(TradingEngine.fetch_worker, t): t for t in tasks}
-            for future in concurrent.futures.as_completed(future_to_task):
-                try:
-                    sym, tf, df = future.result()
-                    results[(sym, tf)] = df
-                except Exception as e:
-                    print(f"Paralel Veri Hatası: {e}")
-        return results
-
-    @staticmethod
-    def get_latest_prices(symbols):
-        """Lightweight ticker fetcher to refresh UI prices without heavy kline calls."""
-
-        prices = {}
-        url = "https://fapi.binance.com/fapi/v1/ticker/price"
-
-        for sym in symbols:
-            try:
-                res = TradingEngine.http_get_with_retry(url, {"symbol": sym}, max_retries=2)
-                if res is None:
-                    continue
-                data = res.json()
-                if isinstance(data, dict) and "price" in data:
-                    prices[sym] = float(data["price"])
-            except Exception as e:
-                print(f"[PRICE] {sym} fiyatı alınamadı: {e}")
-
-        return prices
-
-    @staticmethod
-    def get_historical_data_pagination(symbol, interval, total_candles=5000, start_date=None, end_date=None):
-        """
-        Binance'den tarihsel kline verisi çeker.
-
-        Args:
-            symbol: Trading pair (örn: "BTCUSDT")
-            interval: Timeframe (örn: "5m", "1h")
-            total_candles: Çekilecek mum sayısı (tarih aralığı verilmezse kullanılır)
-            start_date: Başlangıç tarihi (str "YYYY-MM-DD" veya datetime). Verilirse candle sayısı yerine tarih aralığı kullanılır.
-            end_date: Bitiş tarihi (str "YYYY-MM-DD" veya datetime). Verilmezse şu anki zaman kullanılır.
-
-        Returns:
-            DataFrame with columns: timestamp, open, high, low, close, volume
-        """
-        from datetime import datetime, timezone
-
-        all_data = []
-        limit_per_req = 1000
-
-        # Tarih aralığı modu
-        if start_date is not None:
-            # String ise datetime'a çevir
-            if isinstance(start_date, str):
-                start_date = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-            elif start_date.tzinfo is None:
-                start_date = start_date.replace(tzinfo=timezone.utc)
-
-            if end_date is not None:
-                if isinstance(end_date, str):
-                    # Bitiş tarihini günün sonuna ayarla
-                    end_date = datetime.strptime(end_date, "%Y-%m-%d").replace(
-                        hour=23, minute=59, second=59, tzinfo=timezone.utc
-                    )
-                elif end_date.tzinfo is None:
-                    end_date = end_date.replace(tzinfo=timezone.utc)
+    This function creates Plotly-compatible chart data including:
+    - Candlestick chart
+    - PBEMA cloud
+    - Keltner bands
+    - Trade markers and TP/SL zones
+    """
+    try:
+        plot_df = df.tail(300).copy()
+        # Define candle time range for filtering trades
+        candle_start = plot_df['timestamp'].iloc[0] if len(plot_df) > 0 else pd.Timestamp.min.tz_localize('UTC')
+        candle_end = plot_df['timestamp'].iloc[-1] if len(plot_df) > 0 else pd.Timestamp.max.tz_localize('UTC')
+        if len(plot_df) > 1:
+            if interval.endswith('m'):
+                interval_mins = int(interval[:-1])
+            elif interval.endswith('h'):
+                interval_mins = int(interval[:-1]) * 60
             else:
-                end_date = datetime.now(timezone.utc)
+                interval_mins = 240
+        else:
+            interval_mins = 15
 
-            start_time_ms = int(start_date.timestamp() * 1000)
-            end_time_ms = int(end_date.timestamp() * 1000)
+        # Timestamp parsing
+        istanbul_time_series = plot_df['timestamp'] + pd.Timedelta(hours=3)
+        timestamps_str = istanbul_time_series.dt.strftime('%Y-%m-%d %H:%M').tolist()
 
-            # Tarih aralığı modunda startTime ile ileri doğru çekiyoruz
-            current_start = start_time_ms
+        traces = []
+        traces.append({
+            'type': 'candlestick', 'x': timestamps_str,
+            'open': plot_df['open'].tolist(), 'high': plot_df['high'].tolist(),
+            'low': plot_df['low'].tolist(), 'close': plot_df['close'].tolist(),
+            'name': symbol, 'increasing': {'line': {'color': '#26a69a'}},
+            'decreasing': {'line': {'color': '#ef5350'}}
+        })
 
-            while current_start < end_time_ms:
+        def add_line(name, data, color, width=1, dash=None):
+            line_data = {'type': 'scatter', 'mode': 'lines', 'x': timestamps_str, 'y': data.fillna(0).tolist(),
+                         'line': {'color': color, 'width': width}, 'name': name, 'hoverinfo': 'skip'}
+            if dash: line_data['line']['dash'] = dash
+            traces.append(line_data)
+
+        # PBEMA cloud
+        pb_color = '#42a5f5'
+        traces.append({
+            'type': 'scatter', 'mode': 'lines', 'x': timestamps_str,
+            'y': plot_df['pb_ema_bot'].fillna(0).tolist(),
+            'line': {'color': pb_color, 'width': 1},
+            'name': 'PB Bot', 'hoverinfo': 'skip',
+            'fill': None
+        })
+        traces.append({
+            'type': 'scatter', 'mode': 'lines', 'x': timestamps_str,
+            'y': plot_df['pb_ema_top'].fillna(0).tolist(),
+            'line': {'color': pb_color, 'width': 1},
+            'name': 'PB Top', 'hoverinfo': 'skip',
+            'fill': 'tonexty', 'fillcolor': 'rgba(66, 165, 245, 0.18)'
+        })
+
+        # Keltner bands and baseline
+        add_line('Keltner Up', plot_df['keltner_upper'], 'rgba(255, 50, 50, 0.8)', 1, 'dot')
+        add_line('Keltner Low', plot_df['keltner_lower'], 'rgba(50, 255, 50, 0.8)', 1, 'dot')
+        add_line('Baseline', plot_df['baseline'], 'rgba(255, 215, 0, 0.95)', 1)
+        if 'alphatrend' in plot_df.columns: add_line('AlphaTrend', plot_df['alphatrend'], '#00ccff', 2)
+
+        shapes = []
+        if show_rr:
+            time_diff = plot_df['timestamp'].iloc[-1] - plot_df['timestamp'].iloc[-2]
+            past_trades = [t for t in trade_manager.history if
+                           t['timeframe'] == interval and t['symbol'] == symbol][-5:]
+
+            def _trade_sort_key(trade: dict) -> float:
+                tid = trade.get('id')
+                if isinstance(tid, (int, float)):
+                    tid_val = float(tid)
+                    return tid_val / 1000 if tid_val > 1e12 else tid_val
+                ts_val = trade.get('timestamp') or trade.get('time') or ''
                 try:
-                    url = "https://fapi.binance.com/fapi/v1/klines"
-                    params = {
-                        'symbol': symbol,
-                        'interval': interval,
-                        'limit': limit_per_req,
-                        'startTime': current_start,
-                        'endTime': end_time_ms
-                    }
-
-                    res = TradingEngine.http_get_with_retry(url, params)
-                    if res is None:
-                        break
-
-                    data = res.json()
-                    if not data or not isinstance(data, list):
-                        break
-
-                    all_data.extend(data)
-
-                    # Sonraki batch için start time'ı güncelle
-                    last_candle_time = data[-1][0]
-                    current_start = last_candle_time + 1
-
-                    # Tüm veriyi aldık mı kontrol et
-                    if len(data) < limit_per_req:
-                        break
-
-                    time.sleep(0.1)  # Rate limit nezaketi
+                    return dateutil.parser.parse(ts_val).timestamp()
                 except Exception:
-                    break
-        else:
-            # Candle sayısı modu (eski davranış)
-            end_time = int(time.time() * 1000)
-            loops = int(np.ceil(total_candles / limit_per_req))
+                    return 0.0
 
-            for _ in range(loops):
+            # Deduplication
+            dedup = {}
+            for tr in active_trades + past_trades:
+                key = tr.get('id') or tr.get('timestamp') or tr.get('time') or id(tr)
+                dedup[key] = tr
+
+            all_trades_sorted = sorted(dedup.values(), key=_trade_sort_key)
+            all_trades_to_show = all_trades_sorted[-2:]
+
+            trades_with_visibility = []
+            for i, trade in enumerate(all_trades_to_show):
+                draw_box = True
+                if i < len(all_trades_to_show) - 1:
+                    next_trade = all_trades_to_show[i + 1]
+                    time_diff_secs = _trade_sort_key(next_trade) - _trade_sort_key(trade)
+                    time_diff_mins = time_diff_secs / 60
+                    if time_diff_mins < (interval_mins * 15): draw_box = False
+                trades_with_visibility.append((trade, draw_box))
+
+            for trade, draw_box in trades_with_visibility:
+                t_type = trade['type'];
+                entry = float(trade['entry']);
+                tp = float(trade['tp']);
+                sl = float(trade['sl'])
+
+                start_ts_raw = trade.get('timestamp', trade.get('time', ''))
                 try:
-                    url = "https://fapi.binance.com/fapi/v1/klines"
-                    params = {'symbol': symbol, 'interval': interval, 'limit': limit_per_req, 'endTime': end_time}
-
-                    res = TradingEngine.http_get_with_retry(url, params)
-                    if res is None:
-                        break
-
-                    data = res.json()
-                    if not data or not isinstance(data, list):
-                        break
-
-                    all_data = data + all_data  # Eskiden yeniye doğru birleştir
-                    end_time = data[0][0] - 1
-                    time.sleep(0.1)
-                except Exception:
-                    break
-
-        if not all_data:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(all_data).iloc[:, :6]
-        df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms', utc=True)
-        for col in ['open', 'high', 'low', 'close', 'volume']:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-
-        # Tarih aralığı modunda candle sayısı ile kısıtlama yok
-        if start_date is not None:
-            return df.reset_index(drop=True)
-        return df.tail(total_candles).reset_index(drop=True)
-
-    @staticmethod
-    def calculate_alphatrend(df, coeff=1, ap=14):
-        """Calculate AlphaTrend indicator.
-
-        NOTE: Implementation delegated to core.indicators.calculate_alphatrend for single source of truth.
-        """
-        return core_calculate_alphatrend(df, coeff=coeff, ap=ap)
-
-    @staticmethod
-    def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Base Setup için kullanılan tüm indikatörleri hesaplar.
-
-        - RSI(14)
-        - ADX(14)
-        - PBEMA cloud: EMA200(high) ve EMA200(close)
-        - SSL baseline: HMA60(close)
-        - Keltner bandı: baseline ± EMA60(TrueRange) * 0.2
-        - AlphaTrend: opsiyonel filtre için hazırlanır
-
-        PERFORMANCE NOTE: This function modifies the DataFrame in-place by adding indicator columns.
-        If you need to preserve the original DataFrame, make a copy before calling this function.
-
-        NOTE: Implementation delegated to core.indicators.calculate_indicators for single source of truth.
-        """
-        # Use core implementation to avoid code duplication
-        return core_calculate_indicators(df)
-
-    @staticmethod
-    def check_signal_diagnostic(
-            df: pd.DataFrame,
-            index: int = -2,
-            min_rr: float = 2.0,
-            rsi_limit: float = 60.0,
-            slope_thresh: float = 0.5,
-            use_alphatrend: bool = True,
-            hold_n: int = 5,
-            min_hold_frac: float = 0.8,
-            pb_touch_tolerance: float = 0.0012,
-            body_tolerance: float = 0.0015,
-            cloud_keltner_gap_min: float = 0.003,
-            tp_min_dist_ratio: float = 0.0015,
-            tp_max_dist_ratio: float = 0.03,
-            adx_min: float = 12.0,
-            return_debug: bool = False,
-    ) -> Tuple:
-        """
-        Base Setup için LONG / SHORT sinyali üretir.
-
-        Filtreler:
-        - ADX düşükse alma
-        - Keltner holding + retest
-        - PBEMA cloud hizalaması
-        - Keltner bandı ile PBEMA TP hedefi arasında minimum mesafe
-        - TP çok yakın / çok uzak değil
-        - RR >= min_rr   (RR = reward / risk)
-
-        Not: Bu kurgu trend-takip eden değil, PBEMA bulutunu mıknatıs gibi
-        kullanan mean reversion yaklaşımıdır; Keltner dokunuşları hem üstten
-        SHORT hem alttan LONG için tetikleyici olabilir.
-        """
-
-        debug_info = {
-            "adx_ok": None,
-            "trend_up_strong": None,
-            "trend_down_strong": None,
-            "holding_long": None,
-            "retest_long": None,
-            "pb_target_long": None,
-            "long_rsi_ok": None,
-            "holding_short": None,
-            "retest_short": None,
-            "pb_target_short": None,
-            "short_rsi_ok": None,
-            "tp_dist_ratio": None,
-            "rr_value": None,
-            "long_rr_ok": None,
-            "short_rr_ok": None,
-        }
-
-        def _ret(s_type, entry, tp, sl, reason):
-            if return_debug:
-                return s_type, entry, tp, sl, reason, debug_info
-            return s_type, entry, tp, sl, reason
-
-        if df is None or df.empty:
-            return _ret(None, None, None, None, "No Data")
-
-        required_cols = [
-            "open", "high", "low", "close",
-            "rsi", "adx",
-            "pb_ema_top", "pb_ema_bot",
-            "keltner_upper", "keltner_lower",
-        ]
-        for col in required_cols:
-            if col not in df.columns:
-                return _ret(None, None, None, None, f"Missing {col}")
-
-        try:
-            curr = df.iloc[index]
-        except Exception:
-            return _ret(None, None, None, None, "Index Error")
-
-        for c in required_cols:
-            v = curr.get(c)
-            if pd.isna(v):
-                return _ret(None, None, None, None, f"NaN in {c}")
-
-        abs_index = index if index >= 0 else (len(df) + index)
-        if abs_index < 0 or abs_index >= len(df):
-            return _ret(None, None, None, None, "Index Out of Range")
-
-        # --- Parametreler ---
-        hold_n = int(max(1, hold_n or 1))
-        min_hold_frac = float(min_hold_frac if min_hold_frac is not None else 0.8)
-        touch_tol = float(pb_touch_tolerance if pb_touch_tolerance is not None else 0.0012)
-        body_tol = float(body_tolerance if body_tolerance is not None else 0.0015)
-        cloud_keltner_gap_min = float(cloud_keltner_gap_min if cloud_keltner_gap_min is not None else 0.003)
-        tp_min_dist_ratio = float(tp_min_dist_ratio if tp_min_dist_ratio is not None else 0.0015)
-        tp_max_dist_ratio = float(tp_max_dist_ratio if tp_max_dist_ratio is not None else 0.03)
-        adx_min = float(adx_min if adx_min is not None else 12.0)
-
-        # ADX filtresi
-        debug_info["adx_ok"] = float(curr["adx"]) >= adx_min
-        if not debug_info["adx_ok"]:
-            return _ret(None, None, None, None, "ADX Low")
-
-        if abs_index < hold_n + 1:
-            return _ret(None, None, None, None, "Warmup")
-
-        slc = slice(abs_index - hold_n, abs_index)
-        closes_slice = df["close"].iloc[slc]
-        upper_slice = df["keltner_upper"].iloc[slc]
-        lower_slice = df["keltner_lower"].iloc[slc]
-
-        close = float(curr["close"])
-        open_ = float(curr["open"])
-        high = float(curr["high"])
-        low = float(curr["low"])
-        upper_band = float(curr["keltner_upper"])
-        lower_band = float(curr["keltner_lower"])
-        pb_top = float(curr["pb_ema_top"])
-        pb_bot = float(curr["pb_ema_bot"])
-
-        # --- Mean reversion: Slope filter DEVRE DIŞI ---
-        # PBEMA (200 EMA) çok yavaş hareket eder:
-        # - Slope değişmesini beklemek = trade kaçırmak
-        # - Mean reversion'da fiyat ortalamaya ÇEKİLİR
-        # - Slope değişene kadar hareketin çoğu bitmiş olur
-        # Sonuç: PBEMA için slope filter YANLIŞ yaklaşım
-        slope_top = float(curr.get("slope_top", 0.0) or 0.0)
-        slope_bot = float(curr.get("slope_bot", 0.0) or 0.0)
-
-        # Sadece debug için tut, FİLTRELEME YAPMA
-        debug_info["slope_top"] = slope_top
-        debug_info["slope_bot"] = slope_bot
-
-        # Mean reversion = yön kısıtı YOK
-        long_direction_ok = True
-        short_direction_ok = True
-        debug_info["long_direction_ok"] = long_direction_ok
-        debug_info["short_direction_ok"] = short_direction_ok
-
-        # ================= WICK REJECTION QUALITY =================
-        candle_range = high - low
-        if candle_range > 0:
-            upper_wick = high - max(open_, close)
-            lower_wick = min(open_, close) - low
-            upper_wick_ratio = upper_wick / candle_range
-            lower_wick_ratio = lower_wick / candle_range
-        else:
-            upper_wick_ratio = 0.0
-            lower_wick_ratio = 0.0
-
-        # Minimum wick ratio for quality rejection (0.15 = 15% of candle is wick)
-        # Lowered from 0.3 to 0.15 for softer filtering
-        min_wick_ratio = 0.15
-        long_rejection_quality = lower_wick_ratio >= min_wick_ratio
-        short_rejection_quality = upper_wick_ratio >= min_wick_ratio
-
-        debug_info.update({
-            "upper_wick_ratio": upper_wick_ratio,
-            "lower_wick_ratio": lower_wick_ratio,
-            "long_rejection_quality": long_rejection_quality,
-            "short_rejection_quality": short_rejection_quality,
-        })
-
-        # ================= PRICE-PBEMA POSITION CHECK =================
-        # LONG: Fiyat PBEMA'nın ALTINDA olmalı (PBEMA üstte/kırmızı)
-        # SHORT: Fiyat PBEMA'nın ÜSTÜNDE olmalı (PBEMA altta/yeşil)
-        price_below_pbema = close < pb_bot
-        price_above_pbema = close > pb_top
-
-        debug_info.update({
-            "price_below_pbema": price_below_pbema,
-            "price_above_pbema": price_above_pbema,
-        })
-
-        # ================= KELTNER PENETRATION (TRAP) DETECTION =================
-        # Son N mumda Keltner'ı aşıp geri dönen mum var mı? (daha güçlü sinyal)
-        penetration_lookback = min(3, len(df) - abs_index - 1) if abs_index < len(df) - 1 else 0
-
-        # Long: Son mumlarda alt Keltner'ın altına inip geri dönen var mı?
-        long_penetration = False
-        if penetration_lookback > 0:
-            for i in range(1, penetration_lookback + 1):
-                if abs_index - i >= 0:
-                    past_low = float(df["low"].iloc[abs_index - i])
-                    past_lower_band = float(df["keltner_lower"].iloc[abs_index - i])
-                    if past_low < past_lower_band:
-                        long_penetration = True
-                        break
-
-        # Short: Son mumlarda üst Keltner'ın üstüne çıkıp geri dönen var mı?
-        short_penetration = False
-        if penetration_lookback > 0:
-            for i in range(1, penetration_lookback + 1):
-                if abs_index - i >= 0:
-                    past_high = float(df["high"].iloc[abs_index - i])
-                    past_upper_band = float(df["keltner_upper"].iloc[abs_index - i])
-                    if past_high > past_upper_band:
-                        short_penetration = True
-                        break
-
-        debug_info.update({
-            "long_penetration": long_penetration,
-            "short_penetration": short_penetration,
-        })
-
-        # ================= LONG =================
-        holding_long = (closes_slice > lower_slice).mean() >= min_hold_frac
-
-        retest_long = (
-                (low <= lower_band * (1 + touch_tol))
-                and (close > lower_band)
-                and (min(open_, close) > lower_band * (1 - body_tol))
-        )
-
-        keltner_pb_gap_long = (pb_bot - lower_band) / lower_band if lower_band != 0 else 0.0
-
-        pb_target_long = (
-                long_direction_ok and
-                (keltner_pb_gap_long >= cloud_keltner_gap_min)
-        )
-
-        # Quality indicators (for analysis, NOT mandatory filters)
-        # These are kept for debugging and future optimization
-        long_quality_ok = long_rejection_quality or long_penetration
-
-        # SOFT VERSION: Only core filters are mandatory
-        # price_below_pbema and quality_ok are tracked but NOT required
-        is_long = holding_long and retest_long and pb_target_long
-        debug_info.update({
-            "holding_long": holding_long,
-            "retest_long": retest_long,
-            "pb_target_long": pb_target_long,
-            "long_quality_ok": long_quality_ok,
-            "price_below_pbema": price_below_pbema,
-        })
-
-        # ================= SHORT =================
-        holding_short = (closes_slice < upper_slice).mean() >= min_hold_frac
-
-        retest_short = (
-                (high >= upper_band * (1 - touch_tol))
-                and (close < upper_band)
-                and (max(open_, close) < upper_band * (1 + body_tol))
-        )
-
-        keltner_pb_gap_short = (upper_band - pb_top) / upper_band if upper_band != 0 else 0.0
-
-        pb_target_short = (
-                short_direction_ok and
-                (keltner_pb_gap_short >= cloud_keltner_gap_min)
-        )
-
-        # Quality indicators (for analysis, NOT mandatory filters)
-        # These are kept for debugging and future optimization
-        short_quality_ok = short_rejection_quality or short_penetration
-
-        # SOFT VERSION: Only core filters are mandatory
-        # price_above_pbema and quality_ok are tracked but NOT required
-        is_short = holding_short and retest_short and pb_target_short
-        debug_info.update({
-            "holding_short": holding_short,
-            "retest_short": retest_short,
-            "pb_target_short": pb_target_short,
-            "short_quality_ok": short_quality_ok,
-            "price_above_pbema": price_above_pbema,
-        })
-
-        # --- RSI filters (symmetric for LONG and SHORT) ---
-        rsi_val = float(curr["rsi"])
-        debug_info["rsi_value"] = rsi_val
-
-        # LONG: RSI should not be too high (overbought territory)
-        # Using rsi_limit + 10 as upper bound
-        long_rsi_limit = rsi_limit + 10.0
-        long_rsi_ok = rsi_val <= long_rsi_limit
-        debug_info["long_rsi_ok"] = long_rsi_ok
-        debug_info["long_rsi_limit"] = long_rsi_limit
-        if is_long and not long_rsi_ok:
-            is_long = False
-
-        # SHORT: RSI should not be too low (oversold territory)
-        # Mirror of long: 100 - (rsi_limit + 10) as lower bound
-        # If rsi_limit=45, long_upper=55, short_lower=100-55=45
-        short_rsi_limit = 100.0 - long_rsi_limit
-        short_rsi_ok = rsi_val >= short_rsi_limit
-        debug_info["short_rsi_ok"] = short_rsi_ok
-        debug_info["short_rsi_limit"] = short_rsi_limit
-        if is_short and not short_rsi_ok:
-            is_short = False
-
-        # --- AlphaTrend (opsiyonel) ---
-        if use_alphatrend and "alphatrend" in df.columns:
-            at_val = float(curr["alphatrend"])
-            if is_long and close < at_val:
-                is_long = False
-            if is_short and close > at_val:
-                is_short = False
-
-        # ---------- LONG ----------
-        debug_info["long_candidate"] = is_long
-        if is_long:
-            swing_n = 20
-            start = max(0, abs_index - swing_n)
-            swing_low = float(df["low"].iloc[start:abs_index].min())
-            if swing_low <= 0:
-                return _ret(None, None, None, None, "Invalid Swing Low")
-
-            sl_candidate = swing_low * 0.997
-            band_sl = lower_band * 0.998
-            sl = min(sl_candidate, band_sl)
-
-            entry = close
-            tp = pb_bot
-
-            if tp <= entry:
-                return _ret(None, None, None, None, "TP Below Entry")
-            if sl >= entry:
-                sl = min(swing_low * 0.995, entry * 0.997)
-
-            risk = entry - sl
-            reward = tp - entry
-            if risk <= 0 or reward <= 0:
-                return _ret(None, None, None, None, "Invalid RR")
-
-            rr = reward / risk
-            tp_dist_ratio = reward / entry
-
-            debug_info.update({
-                "tp_dist_ratio": tp_dist_ratio,
-                "rr_value": rr,
-                "long_rr_ok": rr >= min_rr,
-            })
-
-            if tp_dist_ratio < tp_min_dist_ratio:
-                return _ret(None, None, None, None, f"TP Too Close ({tp_dist_ratio:.4f})")
-            if tp_dist_ratio > tp_max_dist_ratio:
-                return _ret(None, None, None, None, f"TP Too Far ({tp_dist_ratio:.4f})")
-            if rr < min_rr:
-                return _ret(None, None, None, None, f"RR Too Low ({rr:.2f})")
-
-            reason = f"ACCEPTED(Base,R:{rr:.2f})"
-            return _ret("LONG", entry, tp, sl, reason)
-
-        # ---------- SHORT ----------
-        debug_info["short_candidate"] = is_short
-        if is_short:
-            swing_n = 20
-            start = max(0, abs_index - swing_n)
-            swing_high = float(df["high"].iloc[start:abs_index].max())
-            if swing_high <= 0:
-                return _ret(None, None, None, None, "Invalid Swing High")
-
-            sl_candidate = swing_high * 1.003
-            band_sl = upper_band * 1.002
-            sl = max(sl_candidate, band_sl)
-
-            entry = close
-            tp = pb_top
-
-            if tp >= entry:
-                return _ret(None, None, None, None, "TP Above Entry")
-            if sl <= entry:
-                sl = max(swing_high * 1.005, entry * 1.003)
-
-            risk = sl - entry
-            reward = entry - tp
-            if risk <= 0 or reward <= 0:
-                return _ret(None, None, None, None, "Invalid RR")
-
-            rr = reward / risk
-            tp_dist_ratio = reward / entry
-
-            debug_info.update({
-                "tp_dist_ratio": tp_dist_ratio,
-                "rr_value": rr,
-                "short_rr_ok": rr >= min_rr,
-            })
-
-            if tp_dist_ratio < tp_min_dist_ratio:
-                return _ret(None, None, None, None, f"TP Too Close ({tp_dist_ratio:.4f})")
-            if tp_dist_ratio > tp_max_dist_ratio:
-                return _ret(None, None, None, None, f"TP Too Far ({tp_dist_ratio:.4f})")
-            if rr < min_rr:
-                return _ret(None, None, None, None, f"RR Too Low ({rr:.2f})")
-
-            reason = f"ACCEPTED(Base,R:{rr:.2f})"
-            return _ret("SHORT", entry, tp, sl, reason)
-
-        return _ret(None, None, None, None, "No Signal")
-
-    @staticmethod
-    def check_pbema_reaction_signal(
-            df: pd.DataFrame,
-            index: int = -2,
-            min_rr: float = 2.0,
-            rsi_limit: float = 60.0,
-            slope_thresh: float = 0.5,
-            use_alphatrend: bool = False,
-            pbema_approach_tolerance: float = 0.003,
-            pbema_frontrun_margin: float = 0.002,
-            tp_min_dist_ratio: float = 0.0015,
-            tp_max_dist_ratio: float = 0.04,
-            adx_min: float = 12.0,
-            return_debug: bool = False,
-    ) -> Tuple:
-        """
-        PBEMA Reaction Strategy - Fiyat PBEMA bulutuna yaklaştığında/değdiğinde işlem aç.
-
-        Konsept:
-        - PBEMA bulutu güçlü bir destek/direnç bölgesi olarak çalışıyor
-        - Fiyat PBEMA'ya yaklaştığında oradan tepki alması bekleniyor
-        - SHORT: Fiyat aşağıdan PBEMA'ya yaklaşıyor → satış baskısı bekleniyor
-        - LONG: Fiyat yukarıdan PBEMA'ya yaklaşıyor → alış baskısı bekleniyor
-
-        Parametreler:
-        - pbema_approach_tolerance: PBEMA'ya ne kadar yaklaşınca sinyal üret (örn. 0.003 = %0.3)
-        - pbema_frontrun_margin: Frontrun marjı (SL için PBEMA + bu marj)
-        """
-
-        debug_info = {
-            "adx_ok": None,
-            "price_near_pbema_top": None,
-            "price_near_pbema_bot": None,
-            "approaching_from_below": None,
-            "approaching_from_above": None,
-            "short_rsi_ok": None,
-            "long_rsi_ok": None,
-            "tp_dist_ratio": None,
-            "rr_value": None,
-            "min_wick_ratio_pbema": None,
-            "upper_wick_ratio": None,
-            "lower_wick_ratio": None,
-            "wick_quality_short": None,
-            "wick_quality_long": None,
-        }
-
-        def _ret(s_type, entry, tp, sl, reason):
-            if return_debug:
-                return s_type, entry, tp, sl, reason, debug_info
-            return s_type, entry, tp, sl, reason
-
-        if df is None or df.empty:
-            return _ret(None, None, None, None, "No Data")
-
-        required_cols = [
-            "open", "high", "low", "close",
-            "rsi", "adx",
-            "pb_ema_top_150", "pb_ema_bot_150",
-            "keltner_upper", "keltner_lower",
-        ]
-        for col in required_cols:
-            if col not in df.columns:
-                return _ret(None, None, None, None, f"Missing {col}")
-
-        try:
-            curr = df.iloc[index]
-        except Exception:
-            return _ret(None, None, None, None, "Index Error")
-
-        abs_index = index if index >= 0 else (len(df) + index)
-        if abs_index < 30:  # Need enough history for swing detection
-            return _ret(None, None, None, None, "Not Enough Data")
-
-        # Extract current values
-        open_ = float(curr["open"])
-        high = float(curr["high"])
-        low = float(curr["low"])
-        close = float(curr["close"])
-        pb_top = float(curr["pb_ema_top_150"])
-        pb_bot = float(curr["pb_ema_bot_150"])
-        lower_band = float(curr["keltner_lower"])
-        upper_band = float(curr["keltner_upper"])
-        adx_val = float(curr["adx"])
-        rsi_val = float(curr["rsi"])
-
-        # Check for NaN values
-        if any(pd.isna([open_, high, low, close, pb_top, pb_bot, lower_band, upper_band, adx_val, rsi_val])):
-            return _ret(None, None, None, None, "NaN Values")
-
-        # Wick-quality filter calculations
-        min_wick_ratio_pbema = 0.12
-        candle_range = high - low
-        if candle_range <= 0:
-            upper_wick_ratio = 0.0
-            lower_wick_ratio = 0.0
-        else:
-            upper_wick = high - max(open_, close)
-            lower_wick = min(open_, close) - low
-            upper_wick_ratio = upper_wick / candle_range
-            lower_wick_ratio = lower_wick / candle_range
-
-        # Update debug_info with wick quality values
-        debug_info["min_wick_ratio_pbema"] = min_wick_ratio_pbema
-        debug_info["upper_wick_ratio"] = upper_wick_ratio
-        debug_info["lower_wick_ratio"] = lower_wick_ratio
-
-        # ADX filter - need some volatility
-        adx_ok = adx_val >= adx_min
-        debug_info["adx_ok"] = adx_ok
-        if not adx_ok:
-            return _ret(None, None, None, None, f"ADX Too Low ({adx_val:.1f})")
-
-        # Calculate distances to PBEMA cloud
-        dist_to_pb_top = abs(high - pb_top) / pb_top if pb_top > 0 else 1.0
-        dist_to_pb_bot = abs(low - pb_bot) / pb_bot if pb_bot > 0 else 1.0
-
-        # Check if price is approaching PBEMA from below (for SHORT)
-        # Conditions: Price was below PBEMA and now touching/near it
-        price_below_pbema = close < pb_bot
-        price_near_pbema_top = (high >= pb_top * (1 - pbema_approach_tolerance)) and (high <= pb_top * (1 + pbema_frontrun_margin))
-        approaching_from_below = (
-            not price_below_pbema and  # Currently at or above PBEMA
-            (dist_to_pb_top <= pbema_approach_tolerance or high >= pb_top)  # Near or touched pb_top
-        )
-
-        # Check if price is approaching PBEMA from above (for LONG)
-        # Conditions: Price was above PBEMA and now touching/near it
-        price_above_pbema = close > pb_top
-        price_near_pbema_bot = (low <= pb_bot * (1 + pbema_approach_tolerance)) and (low >= pb_bot * (1 - pbema_frontrun_margin))
-        approaching_from_above = (
-            not price_above_pbema and  # Currently at or below PBEMA
-            (dist_to_pb_bot <= pbema_approach_tolerance or low <= pb_bot)  # Near or touched pb_bot
-        )
-
-        debug_info.update({
-            "price_near_pbema_top": price_near_pbema_top,
-            "price_near_pbema_bot": price_near_pbema_bot,
-            "approaching_from_below": approaching_from_below,
-            "approaching_from_above": approaching_from_above,
-        })
-
-        # ================= SHORT (PBEMA Resistance) =================
-        # Price approached PBEMA from below - expecting rejection
-        is_short = price_near_pbema_top and close < pb_top
-
-        # Rejection candle check: wick into PBEMA but closed below
-        if is_short:
-            rejection_wick_short = (high >= pb_top * (1 - pbema_approach_tolerance)) and (close < pb_top)
-            candle_body_below = max(open_, close) < pb_top
-            wick_quality_short = (upper_wick_ratio >= min_wick_ratio_pbema)
-            debug_info["wick_quality_short"] = wick_quality_short
-            is_short = rejection_wick_short and candle_body_below and wick_quality_short
-
-        # RSI filter for SHORT - not too oversold
-        short_rsi_limit = 100.0 - (rsi_limit + 10.0)
-        short_rsi_ok = rsi_val >= short_rsi_limit
-        debug_info["short_rsi_ok"] = short_rsi_ok
-        if is_short and not short_rsi_ok:
-            is_short = False
-
-        # Slope filter - PBEMA should be sloping down or flat for SHORT
-        if is_short and "slope_top_150" in curr.index:
-            slope_val = float(curr["slope_top_150"])
-            if slope_val > slope_thresh:  # Strong uptrend - skip SHORT
-                is_short = False
-
-        if is_short:
-            # Find swing low for TP (sadece swing low kullan, Keltner çok hızlı hareket edebilir)
-            swing_n = 20
-            start = max(0, abs_index - swing_n)
-            swing_low = float(df["low"].iloc[start:abs_index].min())
-
-            # TP: swing low only (Keltner fiyatla birlikte çok hızlı hareket edebilir)
-            tp = swing_low * 0.998
-
-            # Entry at close
-            entry = close
-
-            # SL above PBEMA with frontrun margin
-            sl = pb_top * (1 + pbema_frontrun_margin + 0.002)
-
-            if tp >= entry:
-                return _ret(None, None, None, None, "TP Above Entry (SHORT)")
-            if sl <= entry:
-                sl = pb_top * (1 + pbema_frontrun_margin + 0.005)
-
-            risk = sl - entry
-            reward = entry - tp
-            if risk <= 0 or reward <= 0:
-                return _ret(None, None, None, None, "Invalid RR (SHORT)")
-
-            rr = reward / risk
-            tp_dist_ratio = reward / entry
-
-            debug_info.update({
-                "tp_dist_ratio": tp_dist_ratio,
-                "rr_value": rr,
-            })
-
-            if tp_dist_ratio < tp_min_dist_ratio:
-                return _ret(None, None, None, None, f"TP Too Close ({tp_dist_ratio:.4f})")
-            if tp_dist_ratio > tp_max_dist_ratio:
-                return _ret(None, None, None, None, f"TP Too Far ({tp_dist_ratio:.4f})")
-            if rr < min_rr:
-                return _ret(None, None, None, None, f"RR Too Low ({rr:.2f})")
-
-            reason = f"ACCEPTED(PBEMA_Reaction,R:{rr:.2f})"
-            return _ret("SHORT", entry, tp, sl, reason)
-
-        # ================= LONG (PBEMA Support) =================
-        # Price approached PBEMA from above - expecting bounce
-        is_long = price_near_pbema_bot and close > pb_bot
-
-        # Rejection candle check: wick into PBEMA but closed above
-        if is_long:
-            rejection_wick_long = (low <= pb_bot * (1 + pbema_approach_tolerance)) and (close > pb_bot)
-            candle_body_above = min(open_, close) > pb_bot
-            wick_quality_long = (lower_wick_ratio >= min_wick_ratio_pbema)
-            debug_info["wick_quality_long"] = wick_quality_long
-            is_long = rejection_wick_long and candle_body_above and wick_quality_long
-
-        # RSI filter for LONG - not too overbought
-        long_rsi_limit = rsi_limit + 10.0
-        long_rsi_ok = rsi_val <= long_rsi_limit
-        debug_info["long_rsi_ok"] = long_rsi_ok
-        if is_long and not long_rsi_ok:
-            is_long = False
-
-        # Slope filter - PBEMA should be sloping up or flat for LONG
-        if is_long and "slope_bot_150" in curr.index:
-            slope_val = float(curr["slope_bot_150"])
-            if slope_val < -slope_thresh:  # Strong downtrend - skip LONG
-                is_long = False
-
-        if is_long:
-            # Find swing high for TP (sadece swing high kullan, Keltner çok hızlı hareket edebilir)
-            swing_n = 20
-            start = max(0, abs_index - swing_n)
-            swing_high = float(df["high"].iloc[start:abs_index].max())
-
-            # TP: swing high only (Keltner fiyatla birlikte çok hızlı hareket edebilir)
-            tp = swing_high * 1.002
-
-            # Entry at close
-            entry = close
-
-            # SL below PBEMA with frontrun margin
-            sl = pb_bot * (1 - pbema_frontrun_margin - 0.002)
-
-            if tp <= entry:
-                return _ret(None, None, None, None, "TP Below Entry (LONG)")
-            if sl >= entry:
-                sl = pb_bot * (1 - pbema_frontrun_margin - 0.005)
-
-            risk = entry - sl
-            reward = tp - entry
-            if risk <= 0 or reward <= 0:
-                return _ret(None, None, None, None, "Invalid RR (LONG)")
-
-            rr = reward / risk
-            tp_dist_ratio = reward / entry
-
-            debug_info.update({
-                "tp_dist_ratio": tp_dist_ratio,
-                "rr_value": rr,
-            })
-
-            if tp_dist_ratio < tp_min_dist_ratio:
-                return _ret(None, None, None, None, f"TP Too Close ({tp_dist_ratio:.4f})")
-            if tp_dist_ratio > tp_max_dist_ratio:
-                return _ret(None, None, None, None, f"TP Too Far ({tp_dist_ratio:.4f})")
-            if rr < min_rr:
-                return _ret(None, None, None, None, f"RR Too Low ({rr:.2f})")
-
-            reason = f"ACCEPTED(PBEMA_Reaction,R:{rr:.2f})"
-            return _ret("LONG", entry, tp, sl, reason)
-
-        return _ret(None, None, None, None, "No Signal")
-
-    @staticmethod
-    def check_signal(
-            df: pd.DataFrame,
-            config: dict,
-            index: int = -2,
-            return_debug: bool = False,
-    ) -> Tuple:
-        """
-        Wrapper fonksiyon - strategy_mode'a göre uygun strateji fonksiyonunu çağırır.
-
-        strategy_mode değerleri:
-        - "keltner_bounce" (default): Keltner band bounce stratejisi
-        - "pbema_reaction": PBEMA tepki stratejisi
-
-        Args:
-            df: OHLCV + indikatör dataframe
-            config: Strateji konfigürasyonu (rr, rsi, slope, strategy_mode, vs.)
-            index: Sinyal kontrol edilecek mum indeksi
-            return_debug: Debug bilgisi döndür
-
-        Returns:
-            (s_type, entry, tp, sl, reason) veya debug ile birlikte
-        """
-        strategy_mode = config.get("strategy_mode", DEFAULT_STRATEGY_CONFIG.get("strategy_mode", "keltner_bounce"))
-
-        if strategy_mode == "pbema_reaction":
-            return TradingEngine.check_pbema_reaction_signal(
-                df,
-                index=index,
-                min_rr=config.get("rr", DEFAULT_STRATEGY_CONFIG["rr"]),
-                rsi_limit=config.get("rsi", DEFAULT_STRATEGY_CONFIG["rsi"]),
-                slope_thresh=config.get("slope", DEFAULT_STRATEGY_CONFIG["slope"]),
-                use_alphatrend=config.get("at_active", DEFAULT_STRATEGY_CONFIG["at_active"]),
-                pbema_approach_tolerance=config.get("pbema_approach_tolerance", DEFAULT_STRATEGY_CONFIG["pbema_approach_tolerance"]),
-                pbema_frontrun_margin=config.get("pbema_frontrun_margin", DEFAULT_STRATEGY_CONFIG["pbema_frontrun_margin"]),
-                tp_min_dist_ratio=config.get("tp_min_dist_ratio", DEFAULT_STRATEGY_CONFIG["tp_min_dist_ratio"]),
-                tp_max_dist_ratio=config.get("tp_max_dist_ratio", DEFAULT_STRATEGY_CONFIG["tp_max_dist_ratio"]),
-                adx_min=config.get("adx_min", DEFAULT_STRATEGY_CONFIG["adx_min"]),
-                return_debug=return_debug,
-            )
-        else:
-            # Default: keltner_bounce strategy
-            return TradingEngine.check_signal_diagnostic(
-                df,
-                index=index,
-                min_rr=config.get("rr", DEFAULT_STRATEGY_CONFIG["rr"]),
-                rsi_limit=config.get("rsi", DEFAULT_STRATEGY_CONFIG["rsi"]),
-                slope_thresh=config.get("slope", DEFAULT_STRATEGY_CONFIG["slope"]),
-                use_alphatrend=config.get("at_active", DEFAULT_STRATEGY_CONFIG["at_active"]),
-                hold_n=config.get("hold_n", DEFAULT_STRATEGY_CONFIG["hold_n"]),
-                min_hold_frac=config.get("min_hold_frac", DEFAULT_STRATEGY_CONFIG["min_hold_frac"]),
-                pb_touch_tolerance=config.get("pb_touch_tolerance", DEFAULT_STRATEGY_CONFIG["pb_touch_tolerance"]),
-                body_tolerance=config.get("body_tolerance", DEFAULT_STRATEGY_CONFIG["body_tolerance"]),
-                cloud_keltner_gap_min=config.get("cloud_keltner_gap_min", DEFAULT_STRATEGY_CONFIG["cloud_keltner_gap_min"]),
-                tp_min_dist_ratio=config.get("tp_min_dist_ratio", DEFAULT_STRATEGY_CONFIG["tp_min_dist_ratio"]),
-                tp_max_dist_ratio=config.get("tp_max_dist_ratio", DEFAULT_STRATEGY_CONFIG["tp_max_dist_ratio"]),
-                adx_min=config.get("adx_min", DEFAULT_STRATEGY_CONFIG["adx_min"]),
-                return_debug=return_debug,
-            )
-
-    def debug_plot_backtest_trade(symbol: str,
-                                  timeframe: str,
-                                  trade_id: int,
-                                  trades_csv: str = None,  # Default: DATA_DIR/backtest_trades.csv
-                                  window: int = 40):
-        """
-        Backtest sonrası belirli bir trade'i dahili grafikle görmek için yardımcı fonksiyon.
-        - Önce run_portfolio_backtest çalıştırılmış olmalı.
-        - <symbol>_<timeframe>_prices.csv ve trades_csv dosyaları mevcut olmalı.
-        """
-        # Set default trades_csv path
-        if trades_csv is None:
-            trades_csv = os.path.join(DATA_DIR, "backtest_trades.csv")
-
-        # 1) Fiyat datası
-        prices_path = os.path.join(DATA_DIR, f"{symbol}_{timeframe}_prices.csv")
-        if not os.path.exists(prices_path):
-            raise FileNotFoundError(f"Fiyat datası bulunamadı: {prices_path}")
-
-        df_prices = pd.read_csv(prices_path)
-        if "timestamp" in df_prices.columns:
-            df_prices["timestamp"] = pd.to_datetime(df_prices["timestamp"], utc=True)
-
-        # 2) Trade datası
-        if not os.path.exists(trades_csv):
-            raise FileNotFoundError(f"Trades CSV bulunamadı: {trades_csv}")
-
-        df_trades = pd.read_csv(trades_csv)
-
-        # 3) Plot
-        plot_trade(df_prices, df_trades, trade_id=trade_id, window=window)
-        get_plt().show()
-
-    @staticmethod
-    def debug_base_short(df, index):
-        """
-        Belirli bir mum için Base SHORT koşullarını tek tek döndürür.
-        index: df.iloc[index] mantığında (örn. -1 son mum)
-        """
-        import pandas as pd
-
-        curr = df.iloc[index]
-        abs_index = index if index >= 0 else (len(df) + index)
-
-        hold_n = 4
-        min_hold_frac = 0.50
-        touch_tol = 0.0012
-        slope_thresh = 0.5
-
-        # ADX ve slope
-        adx_ok = curr["adx"] >= 15
-        slope_ok_short = curr["slope_top"] <= slope_thresh
-
-        if abs_index >= hold_n + 1:
-            hold_slice = slice(abs_index - hold_n, abs_index)
-            holding_short = (
-                    (df["close"].iloc[hold_slice] < df["keltner_upper"].iloc[hold_slice])
-                    .mean() >= min_hold_frac
-            )
-        else:
-            holding_short = False
-
-        retest_short = (
-                               curr["high"] >= curr["keltner_upper"] * (1 - touch_tol)
-                       ) and (
-                               curr["close"] < curr["keltner_upper"]
-                       )
-
-        pb_target_short = curr["pb_ema_top"] < curr["close"]
-
-        # RSI limiti (Base short)
-        rsi_limit = 60  # 5m config'ine göre
-        rsi_thresh = (100 - rsi_limit) - 10
-        rsi_ok = curr["rsi"] >= rsi_thresh
-
-        return {
-            "time": str(getattr(curr, "name", "")),
-            "adx": float(curr["adx"]),
-            "rsi": float(curr["rsi"]),
-            "adx_ok": adx_ok,
-            "slope_ok_short": slope_ok_short,
-            "holding_short": bool(holding_short),
-            "retest_short": bool(retest_short),
-            "pb_target_short": bool(pb_target_short),
-            "rsi_ok": rsi_ok,
-        }
-
-    @staticmethod
-    def create_chart_data_json(df, interval, symbol="BTCUSDT", signal=None, active_trades=[], show_rr=True):
-        try:
-            plot_df = df.tail(300).copy()
-            # Define candle time range for filtering trades
-            candle_start = plot_df['timestamp'].iloc[0] if len(plot_df) > 0 else pd.Timestamp.min.tz_localize('UTC')
-            candle_end = plot_df['timestamp'].iloc[-1] if len(plot_df) > 0 else pd.Timestamp.max.tz_localize('UTC')
-            if len(plot_df) > 1:
-                if interval.endswith('m'):
-                    interval_mins = int(interval[:-1])
-                elif interval.endswith('h'):
-                    interval_mins = int(interval[:-1]) * 60
-                else:
-                    interval_mins = 240
-            else:
-                interval_mins = 15
-
-            # --- DÜZELTME: TIMESTAMP PARSING (Rapordaki Talep) ---
-            # Pandas zaten datetime nesnelerini iyi yönetir, string dönüşümünde .astype(str) veya .strftime en güvenlisidir.
-            istanbul_time_series = plot_df['timestamp'] + pd.Timedelta(hours=3)
-            timestamps_str = istanbul_time_series.dt.strftime('%Y-%m-%d %H:%M').tolist()
-            # -----------------------------------------------------
-
-            traces = []
-            traces.append({
-                'type': 'candlestick', 'x': timestamps_str,
-                'open': plot_df['open'].tolist(), 'high': plot_df['high'].tolist(),
-                'low': plot_df['low'].tolist(), 'close': plot_df['close'].tolist(),
-                'name': symbol, 'increasing': {'line': {'color': '#26a69a'}},
-                'decreasing': {'line': {'color': '#ef5350'}}
-            })
-
-            def add_line(name, data, color, width=1, dash=None):
-                line_data = {'type': 'scatter', 'mode': 'lines', 'x': timestamps_str, 'y': data.fillna(0).tolist(),
-                             'line': {'color': color, 'width': width}, 'name': name, 'hoverinfo': 'skip'}
-                if dash: line_data['line']['dash'] = dash
-                traces.append(line_data)
-
-            # PBEMA bulutu: açık mavi bant (Matplotlib backtest görünümüyle eşleştirildi)
-            pb_color = '#42a5f5'
-            traces.append({
-                'type': 'scatter', 'mode': 'lines', 'x': timestamps_str,
-                'y': plot_df['pb_ema_bot'].fillna(0).tolist(),
-                'line': {'color': pb_color, 'width': 1},
-                'name': 'PB Bot', 'hoverinfo': 'skip',
-                'fill': None
-            })
-            traces.append({
-                'type': 'scatter', 'mode': 'lines', 'x': timestamps_str,
-                'y': plot_df['pb_ema_top'].fillna(0).tolist(),
-                'line': {'color': pb_color, 'width': 1},
-                'name': 'PB Top', 'hoverinfo': 'skip',
-                'fill': 'tonexty', 'fillcolor': 'rgba(66, 165, 245, 0.18)'
-            })
-
-            # Keltner bantları ve baseline (rapor renkleriyle hizalı)
-            add_line('Keltner Up', plot_df['keltner_upper'], 'rgba(255, 50, 50, 0.8)', 1, 'dot')
-            add_line('Keltner Low', plot_df['keltner_lower'], 'rgba(50, 255, 50, 0.8)', 1, 'dot')
-            add_line('Baseline', plot_df['baseline'], 'rgba(255, 215, 0, 0.95)', 1)
-            if 'alphatrend' in plot_df.columns: add_line('AlphaTrend', plot_df['alphatrend'], '#00ccff', 2)
-
-            shapes = []
-            if show_rr:
-                time_diff = plot_df['timestamp'].iloc[-1] - plot_df['timestamp'].iloc[-2]
-                past_trades = [t for t in trade_manager.history if
-                               t['timeframe'] == interval and t['symbol'] == symbol][-5:]
-
-                def _trade_sort_key(trade: dict) -> float:
-                    tid = trade.get('id')
-                    if isinstance(tid, (int, float)):
-                        tid_val = float(tid)
-                        return tid_val / 1000 if tid_val > 1e12 else tid_val
-                    ts_val = trade.get('timestamp') or trade.get('time') or ''
-                    try:
-                        return dateutil.parser.parse(ts_val).timestamp()
-                    except Exception:
-                        return 0.0
-
-                # Aynı trade'i tekrar eklememek için ID/timestamp bazlı deduplikasyon
-                dedup = {}
-                for tr in active_trades + past_trades:
-                    key = tr.get('id') or tr.get('timestamp') or tr.get('time') or id(tr)
-                    dedup[key] = tr
-
-                all_trades_sorted = sorted(dedup.values(), key=_trade_sort_key)
-                all_trades_to_show = all_trades_sorted[-2:]  # Sadece en güncel 2 trade (açıklar dahil)
-
-                trades_with_visibility = []
-                for i, trade in enumerate(all_trades_to_show):
-                    draw_box = True
-                    if i < len(all_trades_to_show) - 1:
-                        next_trade = all_trades_to_show[i + 1]
-                        time_diff_secs = _trade_sort_key(next_trade) - _trade_sort_key(trade)
-                        time_diff_mins = time_diff_secs / 60
-                        if time_diff_mins < (interval_mins * 15): draw_box = False
-                    trades_with_visibility.append((trade, draw_box))
-
-                for trade, draw_box in trades_with_visibility:
-                    t_type = trade['type'];
-                    entry = float(trade['entry']);
-                    tp = float(trade['tp']);
-                    sl = float(trade['sl'])
-
-                    # Timestamp güvenli parse ve mum aralığı dahilinde mi kontrolü
-                    start_ts_raw = trade.get('timestamp', trade.get('time', ''))
-                    try:
-                        start_dt = dateutil.parser.parse(start_ts_raw)
-                        start_dt = pd.to_datetime(start_dt, utc=True)
-                        if pd.isna(start_dt) or start_dt < candle_start or start_dt > candle_end:
-                            continue
-                        future_dt = start_dt + (time_diff * 20)
-                        start_ts_str = start_dt.strftime('%Y-%m-%d %H:%M')
-                        future_ts_str = future_dt.strftime('%Y-%m-%d %H:%M')
-                    except Exception:
+                    start_dt = dateutil.parser.parse(start_ts_raw)
+                    start_dt = pd.to_datetime(start_dt, utc=True)
+                    if pd.isna(start_dt) or start_dt < candle_start or start_dt > candle_end:
                         continue
+                    future_dt = start_dt + (time_diff * 20)
+                    start_ts_str = start_dt.strftime('%Y-%m-%d %H:%M')
+                    future_ts_str = future_dt.strftime('%Y-%m-%d %H:%M')
+                except Exception:
+                    continue
 
-                    is_active = trade in active_trades;
-                    opacity = "0.3" if is_active else "0.1"
-                    fill_prof = f"rgba(0, 255, 0, {opacity})";
-                    fill_loss = f"rgba(255, 0, 0, {opacity})"
+                is_active = trade in active_trades;
+                opacity = "0.3" if is_active else "0.1"
+                fill_prof = f"rgba(0, 255, 0, {opacity})";
+                fill_loss = f"rgba(255, 0, 0, {opacity})"
 
-                    if draw_box:
-                        y0_prof, y1_prof = (entry, tp) if t_type == "LONG" else (tp, entry)
-                        y0_loss, y1_loss = (sl, entry) if t_type == "LONG" else (entry, sl)
+                if draw_box:
+                    y0_prof, y1_prof = (entry, tp) if t_type == "LONG" else (tp, entry)
+                    y0_loss, y1_loss = (sl, entry) if t_type == "LONG" else (entry, sl)
 
-                        shapes.append(
-                            {'type': 'rect', 'x0': start_ts_str, 'x1': future_ts_str, 'y0': y0_prof, 'y1': y1_prof,
-                             'fillcolor': fill_prof, 'line': {'width': 0}})
-                        shapes.append(
-                            {'type': 'rect', 'x0': start_ts_str, 'x1': future_ts_str, 'y0': y0_loss, 'y1': y1_loss,
-                             'fillcolor': fill_loss, 'line': {'width': 0}})
-                        shapes.append(
-                            {'type': 'line', 'x0': start_ts_str, 'x1': future_ts_str, 'y0': entry, 'y1': entry,
-                             'line': {'color': 'gray', 'width': 1, 'dash': 'solid'}})
-                        shapes.append({'type': 'line', 'x0': start_ts_str, 'x1': future_ts_str, 'y0': sl, 'y1': sl,
-                                       'line': {'color': 'red', 'width': 1, 'dash': 'dash'}})
+                    shapes.append(
+                        {'type': 'rect', 'x0': start_ts_str, 'x1': future_ts_str, 'y0': y0_prof, 'y1': y1_prof,
+                         'fillcolor': fill_prof, 'line': {'width': 0}})
+                    shapes.append(
+                        {'type': 'rect', 'x0': start_ts_str, 'x1': future_ts_str, 'y0': y0_loss, 'y1': y1_loss,
+                         'fillcolor': fill_loss, 'line': {'width': 0}})
+                    shapes.append(
+                        {'type': 'line', 'x0': start_ts_str, 'x1': future_ts_str, 'y0': entry, 'y1': entry,
+                         'line': {'color': 'gray', 'width': 1, 'dash': 'solid'}})
+                    shapes.append({'type': 'line', 'x0': start_ts_str, 'x1': future_ts_str, 'y0': sl, 'y1': sl,
+                                   'line': {'color': 'red', 'width': 1, 'dash': 'dash'}})
 
-                    m_color = '#00ff00' if t_type == "LONG" else '#ff0000';
-                    m_opacity = 1.0 if draw_box else 0.5
-                    traces.append({'type': 'scatter', 'x': [start_ts_str], 'y': [entry], 'mode': 'markers',
-                                   'marker': {'size': 12, 'color': m_color, 'symbol': 'star', 'opacity': m_opacity},
-                                   'name': f'{t_type}', 'showlegend': False})
+                m_color = '#00ff00' if t_type == "LONG" else '#ff0000';
+                m_opacity = 1.0 if draw_box else 0.5
+                traces.append({'type': 'scatter', 'x': [start_ts_str], 'y': [entry], 'mode': 'markers',
+                               'marker': {'size': 12, 'color': m_color, 'symbol': 'star', 'opacity': m_opacity},
+                               'name': f'{t_type}', 'showlegend': False})
 
-            _, plotly_utils = get_plotly()
-            return json.dumps({'traces': traces, 'shapes': shapes, 'symbol': symbol},
-                              cls=plotly_utils.PlotlyJSONEncoder)
-        except Exception as e:
-            return "{}"
+        _, plotly_utils = get_plotly()
+        return json.dumps({'traces': traces, 'shapes': shapes, 'symbol': symbol},
+                          cls=plotly_utils.PlotlyJSONEncoder)
+    except Exception as e:
+        return "{}"
+
+
+# NOTE: TradingEngine has been moved to core/trading_engine.py
+# See: from core import TradingEngine
 
 
 # --- REAL-TIME DATA STREAMER (Binance Futures WebSocket) ---
@@ -4374,7 +3337,7 @@ class LiveBotWorker(QThread):
                                         decision = "Rejected"
                                         reject_reason = "Open Position"
                                         log_msg = f"{tf} | {curr_price} | ⚠️ Pozisyon Var{live_pnl_str}"
-                                        json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
+                                        json_data = create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                          active_trades if self.show_rr else [])
                                         self.update_ui_signal.emit(sym, tf, json_data, log_msg)
 
@@ -4387,14 +3350,14 @@ class LiveBotWorker(QThread):
                                             decision = "Rejected"
                                             reject_reason = "Startup Sync"
                                             log_msg = f"{tf} | {curr_price} | 🔄 Başlangıç senkronizasyonu"
-                                            json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
+                                            json_data = create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                              active_trades if self.show_rr else [])
                                             self.update_ui_signal.emit(sym, tf, json_data, log_msg)
                                         elif trade_manager.check_cooldown(sym, tf, forming_ts_utc):
                                             decision = "Rejected"
                                             reject_reason = "Cooldown"
                                             log_msg = f"{tf} | {curr_price} | ❄️ SOĞUMA SÜRECİNDE"
-                                            json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
+                                            json_data = create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                              active_trades if self.show_rr else [])
                                             self.update_ui_signal.emit(sym, tf, json_data, log_msg)
                                         else:
@@ -4417,14 +3380,14 @@ class LiveBotWorker(QThread):
                                             self.last_signals[sym][tf] = closed_ts_utc
                                             decision = "Accepted"
                                             log_msg = f"{tf} | {curr_price} | 🔥 {s_type} ({setup_tag})"
-                                            json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
+                                            json_data = create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                              active_trades if self.show_rr else [])
                                             self.update_ui_signal.emit(sym, tf, json_data, log_msg)
                                     else:
                                         decision = "Rejected"
                                         reject_reason = "Duplicate Signal"
                                         log_msg = f"{tf} | {curr_price} | ⏳ İşlemde...{live_pnl_str}"
-                                        json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
+                                        json_data = create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                          active_trades if self.show_rr else [])
                                         self.update_ui_signal.emit(sym, tf, json_data, log_msg)
                                 else:
@@ -4435,7 +3398,7 @@ class LiveBotWorker(QThread):
                                     else:
                                         log_msg = f"{tf} | {curr_price} | {at_status_log}{live_pnl_str}"
 
-                                    json_data = TradingEngine.create_chart_data_json(df_closed, tf, sym, s_type,
+                                    json_data = create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                      active_trades if self.show_rr else [])
                                     self.update_ui_signal.emit(sym, tf, json_data, log_msg)
 
