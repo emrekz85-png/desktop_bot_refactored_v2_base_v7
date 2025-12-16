@@ -348,3 +348,138 @@ BEST_CONFIG_WARNING_FLAGS = {
     "json_error": False,  # Bozuk JSON dosyası hatası için flag
     "load_error": False,  # Genel yükleme hatası için flag
 }
+
+# ==========================================
+# DEFAULT STRATEGY CONFIGURATION
+# ==========================================
+# Single source of truth for strategy parameters
+# Used by both main file and config_loader for signature generation
+DEFAULT_STRATEGY_CONFIG = {
+    "rr": 2.0,
+    "rsi": 65,
+    "slope": 0.4,
+    "at_active": False,
+    "use_trailing": False,
+    "use_dynamic_pbema_tp": True,
+    "hold_n": 4,
+    # LOOSENED PARAMETERS for more trade opportunities:
+    "min_hold_frac": 0.50,           # Was 0.65 - now 50% holding is enough
+    "pb_touch_tolerance": 0.0025,    # Was 0.0018 - more tolerance for Keltner touch
+    "body_tolerance": 0.0025,        # Was 0.0020 - more tolerance for candle body
+    "cloud_keltner_gap_min": 0.0015, # Was 0.0025 - smaller gap required
+    "tp_min_dist_ratio": 0.0008,     # Was 0.0010 - allow closer TPs
+    "tp_max_dist_ratio": 0.040,      # Was 0.035 - allow further TPs
+    "adx_min": 8.0,                  # Was 10.0 - less strict ADX requirement
+    # Strategy mode: "keltner_bounce" (default) or "pbema_reaction"
+    "strategy_mode": "keltner_bounce",
+    # PBEMA reaction strategy parameters (used when strategy_mode="pbema_reaction")
+    "pbema_approach_tolerance": 0.003,  # 0.3% tolerance for PBEMA approach/touch
+    "pbema_frontrun_margin": 0.002,     # 0.2% margin for frontrunning
+}
+
+# ==========================================
+# SYMBOL-SPECIFIC PARAMETERS
+# ==========================================
+# Default params per symbol/timeframe - can be overridden by optimizer results
+SYMBOL_PARAMS = {
+    "BTCUSDT": {
+        "5m": {"rr": 2.4, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "15m": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "1h": {"rr": 2.1, "rsi": 45, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "4h": {"rr": 2.1, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
+        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
+    },
+    "ETHUSDT": {
+        "5m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "15m": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "1h": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "4h": {"rr": 2.0, "rsi": 30, "slope": 0.3, "at_active": True, "use_trailing": False},
+        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False},
+        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False}
+    },
+    "SOLUSDT": {
+        "5m": {"rr": 1.5, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": True},
+        "15m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "4h": {"rr": 2.0, "rsi": 30, "slope": 0.3, "at_active": True, "use_trailing": False},
+        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.4, "at_active": True, "use_trailing": False},
+        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.4, "at_active": True, "use_trailing": False}
+    },
+    "HYPEUSDT": {
+        "5m": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True},
+        "15m": {"rr": 1.5, "rsi": 55, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "4h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False},
+        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False}
+    },
+    "LINKUSDT": {
+        "5m": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True},
+        "15m": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
+        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
+        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
+    },
+    "BNBUSDT": {
+        "5m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True},
+        "15m": {"rr": 2.4, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "1h": {"rr": 1.2, "rsi": 55, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "4h": {"rr": 1.8, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
+        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
+    },
+    "XRPUSDT": {
+        "5m": {"rr": 2.4, "rsi": 35, "slope": 0.4, "at_active": False, "use_trailing": False},
+        "15m": {"rr": 2.4, "rsi": 45, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "4h": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
+        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
+    },
+    "LTCUSDT": {
+        "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True},
+        "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "1h": {"rr": 1.8, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
+        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
+        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
+    },
+    "DOGEUSDT": {
+        "5m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True},
+        "15m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
+        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
+        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
+    },
+    "SUIUSDT": {
+        "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True},
+        "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
+        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
+        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
+    },
+    "FARTCOINUSDT": {
+        # New memecoin - let optimizer find best params
+        "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True},
+        "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False},
+        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "1h": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
+        "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
+        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
+        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
+    }
+}

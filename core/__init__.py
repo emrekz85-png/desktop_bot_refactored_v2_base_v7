@@ -40,9 +40,13 @@ from .utils import (
     apply_1m_profit_lock, apply_partial_stop_protection,
 )
 
+from .config import (
+    # Strategy configs (single source of truth)
+    DEFAULT_STRATEGY_CONFIG, SYMBOL_PARAMS,
+)
+
 from .config_loader import (
     load_optimized_config, save_best_configs, invalidate_config_cache,
-    SYMBOL_PARAMS, DEFAULT_STRATEGY_CONFIG,
 )
 
 from .trade_manager import (
