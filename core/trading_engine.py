@@ -6,6 +6,7 @@
 # - Signal detection for multiple strategies (keltner_bounce, pbema_reaction)
 # - Indicator calculation wrappers
 #
+# Signal detection is delegated to the strategies/ module for modularity.
 # Plotting/GUI-dependent functions remain in the main file.
 
 import os
@@ -29,6 +30,13 @@ from .indicators import (
     calculate_alphatrend as core_calculate_alphatrend,
 )
 from .telegram import send_telegram as _core_send_telegram
+
+# Import strategy signal detection from strategies module
+from strategies import (
+    check_keltner_bounce_signal,
+    check_pbema_reaction_signal,
+    check_signal as strategies_check_signal,
+)
 
 
 class TradingEngine:
@@ -342,6 +350,8 @@ class TradingEngine:
         """
         Base Setup signal detection for LONG / SHORT.
 
+        Delegates to strategies.keltner_bounce.check_keltner_bounce_signal.
+
         Filters:
         - ADX minimum threshold
         - Keltner holding + retest
@@ -353,340 +363,23 @@ class TradingEngine:
         Note: This is a mean reversion approach using PBEMA cloud as magnet;
         Keltner touches trigger both SHORT from top and LONG from bottom.
         """
-
-        debug_info = {
-            "adx_ok": None,
-            "trend_up_strong": None,
-            "trend_down_strong": None,
-            "holding_long": None,
-            "retest_long": None,
-            "pb_target_long": None,
-            "long_rsi_ok": None,
-            "holding_short": None,
-            "retest_short": None,
-            "pb_target_short": None,
-            "short_rsi_ok": None,
-            "tp_dist_ratio": None,
-            "rr_value": None,
-            "long_rr_ok": None,
-            "short_rr_ok": None,
-        }
-
-        def _ret(s_type, entry, tp, sl, reason):
-            if return_debug:
-                return s_type, entry, tp, sl, reason, debug_info
-            return s_type, entry, tp, sl, reason
-
-        if df is None or df.empty:
-            return _ret(None, None, None, None, "No Data")
-
-        required_cols = [
-            "open", "high", "low", "close",
-            "rsi", "adx",
-            "pb_ema_top", "pb_ema_bot",
-            "keltner_upper", "keltner_lower",
-        ]
-        for col in required_cols:
-            if col not in df.columns:
-                return _ret(None, None, None, None, f"Missing {col}")
-
-        try:
-            curr = df.iloc[index]
-        except Exception:
-            return _ret(None, None, None, None, "Index Error")
-
-        for c in required_cols:
-            v = curr.get(c)
-            if pd.isna(v):
-                return _ret(None, None, None, None, f"NaN in {c}")
-
-        abs_index = index if index >= 0 else (len(df) + index)
-        if abs_index < 0 or abs_index >= len(df):
-            return _ret(None, None, None, None, "Index Out of Range")
-
-        # --- Parameters ---
-        hold_n = int(max(1, hold_n or 1))
-        min_hold_frac = float(min_hold_frac if min_hold_frac is not None else 0.8)
-        touch_tol = float(pb_touch_tolerance if pb_touch_tolerance is not None else 0.0012)
-        body_tol = float(body_tolerance if body_tolerance is not None else 0.0015)
-        cloud_keltner_gap_min = float(cloud_keltner_gap_min if cloud_keltner_gap_min is not None else 0.003)
-        tp_min_dist_ratio = float(tp_min_dist_ratio if tp_min_dist_ratio is not None else 0.0015)
-        tp_max_dist_ratio = float(tp_max_dist_ratio if tp_max_dist_ratio is not None else 0.03)
-        adx_min = float(adx_min if adx_min is not None else 12.0)
-
-        # ADX filter
-        debug_info["adx_ok"] = float(curr["adx"]) >= adx_min
-        if not debug_info["adx_ok"]:
-            return _ret(None, None, None, None, "ADX Low")
-
-        if abs_index < hold_n + 1:
-            return _ret(None, None, None, None, "Warmup")
-
-        slc = slice(abs_index - hold_n, abs_index)
-        closes_slice = df["close"].iloc[slc]
-        upper_slice = df["keltner_upper"].iloc[slc]
-        lower_slice = df["keltner_lower"].iloc[slc]
-
-        close = float(curr["close"])
-        open_ = float(curr["open"])
-        high = float(curr["high"])
-        low = float(curr["low"])
-        upper_band = float(curr["keltner_upper"])
-        lower_band = float(curr["keltner_lower"])
-        pb_top = float(curr["pb_ema_top"])
-        pb_bot = float(curr["pb_ema_bot"])
-
-        # --- Mean reversion: Slope filter DISABLED ---
-        # PBEMA (200 EMA) moves too slowly - slope filter is wrong for mean reversion
-        slope_top = float(curr.get("slope_top", 0.0) or 0.0)
-        slope_bot = float(curr.get("slope_bot", 0.0) or 0.0)
-
-        # Keep for debug, but NO filtering
-        debug_info["slope_top"] = slope_top
-        debug_info["slope_bot"] = slope_bot
-
-        # Mean reversion = no direction restriction
-        long_direction_ok = True
-        short_direction_ok = True
-        debug_info["long_direction_ok"] = long_direction_ok
-        debug_info["short_direction_ok"] = short_direction_ok
-
-        # ================= WICK REJECTION QUALITY =================
-        candle_range = high - low
-        if candle_range > 0:
-            upper_wick = high - max(open_, close)
-            lower_wick = min(open_, close) - low
-            upper_wick_ratio = upper_wick / candle_range
-            lower_wick_ratio = lower_wick / candle_range
-        else:
-            upper_wick_ratio = 0.0
-            lower_wick_ratio = 0.0
-
-        min_wick_ratio = 0.15
-        long_rejection_quality = lower_wick_ratio >= min_wick_ratio
-        short_rejection_quality = upper_wick_ratio >= min_wick_ratio
-
-        debug_info.update({
-            "upper_wick_ratio": upper_wick_ratio,
-            "lower_wick_ratio": lower_wick_ratio,
-            "long_rejection_quality": long_rejection_quality,
-            "short_rejection_quality": short_rejection_quality,
-        })
-
-        # ================= PRICE-PBEMA POSITION CHECK =================
-        price_below_pbema = close < pb_bot
-        price_above_pbema = close > pb_top
-
-        debug_info.update({
-            "price_below_pbema": price_below_pbema,
-            "price_above_pbema": price_above_pbema,
-        })
-
-        # ================= KELTNER PENETRATION (TRAP) DETECTION =================
-        penetration_lookback = min(3, len(df) - abs_index - 1) if abs_index < len(df) - 1 else 0
-
-        # Long: check if any recent candle broke below lower Keltner
-        long_penetration = False
-        if penetration_lookback > 0:
-            for i in range(1, penetration_lookback + 1):
-                if abs_index - i >= 0:
-                    past_low = float(df["low"].iloc[abs_index - i])
-                    past_lower_band = float(df["keltner_lower"].iloc[abs_index - i])
-                    if past_low < past_lower_band:
-                        long_penetration = True
-                        break
-
-        # Short: check if any recent candle broke above upper Keltner
-        short_penetration = False
-        if penetration_lookback > 0:
-            for i in range(1, penetration_lookback + 1):
-                if abs_index - i >= 0:
-                    past_high = float(df["high"].iloc[abs_index - i])
-                    past_upper_band = float(df["keltner_upper"].iloc[abs_index - i])
-                    if past_high > past_upper_band:
-                        short_penetration = True
-                        break
-
-        debug_info.update({
-            "long_penetration": long_penetration,
-            "short_penetration": short_penetration,
-        })
-
-        # ================= LONG =================
-        holding_long = (closes_slice > lower_slice).mean() >= min_hold_frac
-
-        retest_long = (
-                (low <= lower_band * (1 + touch_tol))
-                and (close > lower_band)
-                and (min(open_, close) > lower_band * (1 - body_tol))
+        return check_keltner_bounce_signal(
+            df=df,
+            index=index,
+            min_rr=min_rr,
+            rsi_limit=rsi_limit,
+            slope_thresh=slope_thresh,
+            use_alphatrend=use_alphatrend,
+            hold_n=hold_n,
+            min_hold_frac=min_hold_frac,
+            pb_touch_tolerance=pb_touch_tolerance,
+            body_tolerance=body_tolerance,
+            cloud_keltner_gap_min=cloud_keltner_gap_min,
+            tp_min_dist_ratio=tp_min_dist_ratio,
+            tp_max_dist_ratio=tp_max_dist_ratio,
+            adx_min=adx_min,
+            return_debug=return_debug,
         )
-
-        keltner_pb_gap_long = (pb_bot - lower_band) / lower_band if lower_band != 0 else 0.0
-
-        pb_target_long = (
-                long_direction_ok and
-                (keltner_pb_gap_long >= cloud_keltner_gap_min)
-        )
-
-        long_quality_ok = long_rejection_quality or long_penetration
-
-        # SOFT VERSION: Only core filters are mandatory
-        is_long = holding_long and retest_long and pb_target_long
-        debug_info.update({
-            "holding_long": holding_long,
-            "retest_long": retest_long,
-            "pb_target_long": pb_target_long,
-            "long_quality_ok": long_quality_ok,
-            "price_below_pbema": price_below_pbema,
-        })
-
-        # ================= SHORT =================
-        holding_short = (closes_slice < upper_slice).mean() >= min_hold_frac
-
-        retest_short = (
-                (high >= upper_band * (1 - touch_tol))
-                and (close < upper_band)
-                and (max(open_, close) < upper_band * (1 + body_tol))
-        )
-
-        keltner_pb_gap_short = (upper_band - pb_top) / upper_band if upper_band != 0 else 0.0
-
-        pb_target_short = (
-                short_direction_ok and
-                (keltner_pb_gap_short >= cloud_keltner_gap_min)
-        )
-
-        short_quality_ok = short_rejection_quality or short_penetration
-
-        # SOFT VERSION: Only core filters are mandatory
-        is_short = holding_short and retest_short and pb_target_short
-        debug_info.update({
-            "holding_short": holding_short,
-            "retest_short": retest_short,
-            "pb_target_short": pb_target_short,
-            "short_quality_ok": short_quality_ok,
-            "price_above_pbema": price_above_pbema,
-        })
-
-        # --- RSI filters (symmetric for LONG and SHORT) ---
-        rsi_val = float(curr["rsi"])
-        debug_info["rsi_value"] = rsi_val
-
-        # LONG: RSI should not be too high (overbought territory)
-        long_rsi_limit = rsi_limit + 10.0
-        long_rsi_ok = rsi_val <= long_rsi_limit
-        debug_info["long_rsi_ok"] = long_rsi_ok
-        debug_info["long_rsi_limit"] = long_rsi_limit
-        if is_long and not long_rsi_ok:
-            is_long = False
-
-        # SHORT: RSI should not be too low (oversold territory)
-        short_rsi_limit = 100.0 - long_rsi_limit
-        short_rsi_ok = rsi_val >= short_rsi_limit
-        debug_info["short_rsi_ok"] = short_rsi_ok
-        debug_info["short_rsi_limit"] = short_rsi_limit
-        if is_short and not short_rsi_ok:
-            is_short = False
-
-        # --- AlphaTrend (optional) ---
-        if use_alphatrend and "alphatrend" in df.columns:
-            at_val = float(curr["alphatrend"])
-            if is_long and close < at_val:
-                is_long = False
-            if is_short and close > at_val:
-                is_short = False
-
-        # ---------- LONG ----------
-        debug_info["long_candidate"] = is_long
-        if is_long:
-            swing_n = 20
-            start = max(0, abs_index - swing_n)
-            swing_low = float(df["low"].iloc[start:abs_index].min())
-            if swing_low <= 0:
-                return _ret(None, None, None, None, "Invalid Swing Low")
-
-            sl_candidate = swing_low * 0.997
-            band_sl = lower_band * 0.998
-            sl = min(sl_candidate, band_sl)
-
-            entry = close
-            tp = pb_bot
-
-            if tp <= entry:
-                return _ret(None, None, None, None, "TP Below Entry")
-            if sl >= entry:
-                sl = min(swing_low * 0.995, entry * 0.997)
-
-            risk = entry - sl
-            reward = tp - entry
-            if risk <= 0 or reward <= 0:
-                return _ret(None, None, None, None, "Invalid RR")
-
-            rr = reward / risk
-            tp_dist_ratio = reward / entry
-
-            debug_info.update({
-                "tp_dist_ratio": tp_dist_ratio,
-                "rr_value": rr,
-                "long_rr_ok": rr >= min_rr,
-            })
-
-            if tp_dist_ratio < tp_min_dist_ratio:
-                return _ret(None, None, None, None, f"TP Too Close ({tp_dist_ratio:.4f})")
-            if tp_dist_ratio > tp_max_dist_ratio:
-                return _ret(None, None, None, None, f"TP Too Far ({tp_dist_ratio:.4f})")
-            if rr < min_rr:
-                return _ret(None, None, None, None, f"RR Too Low ({rr:.2f})")
-
-            reason = f"ACCEPTED(Base,R:{rr:.2f})"
-            return _ret("LONG", entry, tp, sl, reason)
-
-        # ---------- SHORT ----------
-        debug_info["short_candidate"] = is_short
-        if is_short:
-            swing_n = 20
-            start = max(0, abs_index - swing_n)
-            swing_high = float(df["high"].iloc[start:abs_index].max())
-            if swing_high <= 0:
-                return _ret(None, None, None, None, "Invalid Swing High")
-
-            sl_candidate = swing_high * 1.003
-            band_sl = upper_band * 1.002
-            sl = max(sl_candidate, band_sl)
-
-            entry = close
-            tp = pb_top
-
-            if tp >= entry:
-                return _ret(None, None, None, None, "TP Above Entry")
-            if sl <= entry:
-                sl = max(swing_high * 1.005, entry * 1.003)
-
-            risk = sl - entry
-            reward = entry - tp
-            if risk <= 0 or reward <= 0:
-                return _ret(None, None, None, None, "Invalid RR")
-
-            rr = reward / risk
-            tp_dist_ratio = reward / entry
-
-            debug_info.update({
-                "tp_dist_ratio": tp_dist_ratio,
-                "rr_value": rr,
-                "short_rr_ok": rr >= min_rr,
-            })
-
-            if tp_dist_ratio < tp_min_dist_ratio:
-                return _ret(None, None, None, None, f"TP Too Close ({tp_dist_ratio:.4f})")
-            if tp_dist_ratio > tp_max_dist_ratio:
-                return _ret(None, None, None, None, f"TP Too Far ({tp_dist_ratio:.4f})")
-            if rr < min_rr:
-                return _ret(None, None, None, None, f"RR Too Low ({rr:.2f})")
-
-            reason = f"ACCEPTED(Base,R:{rr:.2f})"
-            return _ret("SHORT", entry, tp, sl, reason)
-
-        return _ret(None, None, None, None, "No Signal")
 
     @staticmethod
     def check_pbema_reaction_signal(
@@ -706,6 +399,8 @@ class TradingEngine:
         """
         PBEMA Reaction Strategy - Trade when price approaches/touches PBEMA cloud.
 
+        Delegates to strategies.pbema_reaction.check_pbema_reaction_signal.
+
         Concept:
         - PBEMA cloud acts as strong support/resistance
         - Expect reaction when price approaches PBEMA
@@ -716,239 +411,20 @@ class TradingEngine:
         - pbema_approach_tolerance: How close to PBEMA to generate signal (e.g., 0.003 = 0.3%)
         - pbema_frontrun_margin: Frontrun margin (SL = PBEMA + this margin)
         """
-
-        debug_info = {
-            "adx_ok": None,
-            "price_near_pbema_top": None,
-            "price_near_pbema_bot": None,
-            "approaching_from_below": None,
-            "approaching_from_above": None,
-            "short_rsi_ok": None,
-            "long_rsi_ok": None,
-            "tp_dist_ratio": None,
-            "rr_value": None,
-            "min_wick_ratio_pbema": None,
-            "upper_wick_ratio": None,
-            "lower_wick_ratio": None,
-            "wick_quality_short": None,
-            "wick_quality_long": None,
-        }
-
-        def _ret(s_type, entry, tp, sl, reason):
-            if return_debug:
-                return s_type, entry, tp, sl, reason, debug_info
-            return s_type, entry, tp, sl, reason
-
-        if df is None or df.empty:
-            return _ret(None, None, None, None, "No Data")
-
-        required_cols = [
-            "open", "high", "low", "close",
-            "rsi", "adx",
-            "pb_ema_top_150", "pb_ema_bot_150",
-            "keltner_upper", "keltner_lower",
-        ]
-        for col in required_cols:
-            if col not in df.columns:
-                return _ret(None, None, None, None, f"Missing {col}")
-
-        try:
-            curr = df.iloc[index]
-        except Exception:
-            return _ret(None, None, None, None, "Index Error")
-
-        abs_index = index if index >= 0 else (len(df) + index)
-        if abs_index < 30:  # Need enough history for swing detection
-            return _ret(None, None, None, None, "Not Enough Data")
-
-        # Extract current values
-        open_ = float(curr["open"])
-        high = float(curr["high"])
-        low = float(curr["low"])
-        close = float(curr["close"])
-        pb_top = float(curr["pb_ema_top_150"])
-        pb_bot = float(curr["pb_ema_bot_150"])
-        lower_band = float(curr["keltner_lower"])
-        upper_band = float(curr["keltner_upper"])
-        adx_val = float(curr["adx"])
-        rsi_val = float(curr["rsi"])
-
-        # Check for NaN values
-        if any(pd.isna([open_, high, low, close, pb_top, pb_bot, lower_band, upper_band, adx_val, rsi_val])):
-            return _ret(None, None, None, None, "NaN Values")
-
-        # Wick-quality filter calculations
-        min_wick_ratio_pbema = 0.12
-        candle_range = high - low
-        if candle_range <= 0:
-            upper_wick_ratio = 0.0
-            lower_wick_ratio = 0.0
-        else:
-            upper_wick = high - max(open_, close)
-            lower_wick = min(open_, close) - low
-            upper_wick_ratio = upper_wick / candle_range
-            lower_wick_ratio = lower_wick / candle_range
-
-        debug_info["min_wick_ratio_pbema"] = min_wick_ratio_pbema
-        debug_info["upper_wick_ratio"] = upper_wick_ratio
-        debug_info["lower_wick_ratio"] = lower_wick_ratio
-
-        # ADX filter
-        adx_ok = adx_val >= adx_min
-        debug_info["adx_ok"] = adx_ok
-        if not adx_ok:
-            return _ret(None, None, None, None, f"ADX Too Low ({adx_val:.1f})")
-
-        # Calculate distances to PBEMA cloud
-        dist_to_pb_top = abs(high - pb_top) / pb_top if pb_top > 0 else 1.0
-        dist_to_pb_bot = abs(low - pb_bot) / pb_bot if pb_bot > 0 else 1.0
-
-        # Check if price is approaching PBEMA from below (for SHORT)
-        price_below_pbema = close < pb_bot
-        price_near_pbema_top = (high >= pb_top * (1 - pbema_approach_tolerance)) and (high <= pb_top * (1 + pbema_frontrun_margin))
-        approaching_from_below = (
-            not price_below_pbema and
-            (dist_to_pb_top <= pbema_approach_tolerance or high >= pb_top)
+        return check_pbema_reaction_signal(
+            df=df,
+            index=index,
+            min_rr=min_rr,
+            rsi_limit=rsi_limit,
+            slope_thresh=slope_thresh,
+            use_alphatrend=use_alphatrend,
+            pbema_approach_tolerance=pbema_approach_tolerance,
+            pbema_frontrun_margin=pbema_frontrun_margin,
+            tp_min_dist_ratio=tp_min_dist_ratio,
+            tp_max_dist_ratio=tp_max_dist_ratio,
+            adx_min=adx_min,
+            return_debug=return_debug,
         )
-
-        # Check if price is approaching PBEMA from above (for LONG)
-        price_above_pbema = close > pb_top
-        price_near_pbema_bot = (low <= pb_bot * (1 + pbema_approach_tolerance)) and (low >= pb_bot * (1 - pbema_frontrun_margin))
-        approaching_from_above = (
-            not price_above_pbema and
-            (dist_to_pb_bot <= pbema_approach_tolerance or low <= pb_bot)
-        )
-
-        debug_info.update({
-            "price_near_pbema_top": price_near_pbema_top,
-            "price_near_pbema_bot": price_near_pbema_bot,
-            "approaching_from_below": approaching_from_below,
-            "approaching_from_above": approaching_from_above,
-        })
-
-        # ================= SHORT (PBEMA Resistance) =================
-        is_short = price_near_pbema_top and close < pb_top
-
-        # Rejection candle check
-        if is_short:
-            rejection_wick_short = (high >= pb_top * (1 - pbema_approach_tolerance)) and (close < pb_top)
-            candle_body_below = max(open_, close) < pb_top
-            wick_quality_short = (upper_wick_ratio >= min_wick_ratio_pbema)
-            debug_info["wick_quality_short"] = wick_quality_short
-            is_short = rejection_wick_short and candle_body_below and wick_quality_short
-
-        # RSI filter for SHORT
-        short_rsi_limit = 100.0 - (rsi_limit + 10.0)
-        short_rsi_ok = rsi_val >= short_rsi_limit
-        debug_info["short_rsi_ok"] = short_rsi_ok
-        if is_short and not short_rsi_ok:
-            is_short = False
-
-        # Slope filter
-        if is_short and "slope_top_150" in curr.index:
-            slope_val = float(curr["slope_top_150"])
-            if slope_val > slope_thresh:
-                is_short = False
-
-        if is_short:
-            swing_n = 20
-            start = max(0, abs_index - swing_n)
-            swing_low = float(df["low"].iloc[start:abs_index].min())
-
-            tp = swing_low * 0.998
-            entry = close
-            sl = pb_top * (1 + pbema_frontrun_margin + 0.002)
-
-            if tp >= entry:
-                return _ret(None, None, None, None, "TP Above Entry (SHORT)")
-            if sl <= entry:
-                sl = pb_top * (1 + pbema_frontrun_margin + 0.005)
-
-            risk = sl - entry
-            reward = entry - tp
-            if risk <= 0 or reward <= 0:
-                return _ret(None, None, None, None, "Invalid RR (SHORT)")
-
-            rr = reward / risk
-            tp_dist_ratio = reward / entry
-
-            debug_info.update({
-                "tp_dist_ratio": tp_dist_ratio,
-                "rr_value": rr,
-            })
-
-            if tp_dist_ratio < tp_min_dist_ratio:
-                return _ret(None, None, None, None, f"TP Too Close ({tp_dist_ratio:.4f})")
-            if tp_dist_ratio > tp_max_dist_ratio:
-                return _ret(None, None, None, None, f"TP Too Far ({tp_dist_ratio:.4f})")
-            if rr < min_rr:
-                return _ret(None, None, None, None, f"RR Too Low ({rr:.2f})")
-
-            reason = f"ACCEPTED(PBEMA_Reaction,R:{rr:.2f})"
-            return _ret("SHORT", entry, tp, sl, reason)
-
-        # ================= LONG (PBEMA Support) =================
-        is_long = price_near_pbema_bot and close > pb_bot
-
-        # Rejection candle check
-        if is_long:
-            rejection_wick_long = (low <= pb_bot * (1 + pbema_approach_tolerance)) and (close > pb_bot)
-            candle_body_above = min(open_, close) > pb_bot
-            wick_quality_long = (lower_wick_ratio >= min_wick_ratio_pbema)
-            debug_info["wick_quality_long"] = wick_quality_long
-            is_long = rejection_wick_long and candle_body_above and wick_quality_long
-
-        # RSI filter for LONG
-        long_rsi_limit = rsi_limit + 10.0
-        long_rsi_ok = rsi_val <= long_rsi_limit
-        debug_info["long_rsi_ok"] = long_rsi_ok
-        if is_long and not long_rsi_ok:
-            is_long = False
-
-        # Slope filter
-        if is_long and "slope_bot_150" in curr.index:
-            slope_val = float(curr["slope_bot_150"])
-            if slope_val < -slope_thresh:
-                is_long = False
-
-        if is_long:
-            swing_n = 20
-            start = max(0, abs_index - swing_n)
-            swing_high = float(df["high"].iloc[start:abs_index].max())
-
-            tp = swing_high * 1.002
-            entry = close
-            sl = pb_bot * (1 - pbema_frontrun_margin - 0.002)
-
-            if tp <= entry:
-                return _ret(None, None, None, None, "TP Below Entry (LONG)")
-            if sl >= entry:
-                sl = pb_bot * (1 - pbema_frontrun_margin - 0.005)
-
-            risk = entry - sl
-            reward = tp - entry
-            if risk <= 0 or reward <= 0:
-                return _ret(None, None, None, None, "Invalid RR (LONG)")
-
-            rr = reward / risk
-            tp_dist_ratio = reward / entry
-
-            debug_info.update({
-                "tp_dist_ratio": tp_dist_ratio,
-                "rr_value": rr,
-            })
-
-            if tp_dist_ratio < tp_min_dist_ratio:
-                return _ret(None, None, None, None, f"TP Too Close ({tp_dist_ratio:.4f})")
-            if tp_dist_ratio > tp_max_dist_ratio:
-                return _ret(None, None, None, None, f"TP Too Far ({tp_dist_ratio:.4f})")
-            if rr < min_rr:
-                return _ret(None, None, None, None, f"RR Too Low ({rr:.2f})")
-
-            reason = f"ACCEPTED(PBEMA_Reaction,R:{rr:.2f})"
-            return _ret("LONG", entry, tp, sl, reason)
-
-        return _ret(None, None, None, None, "No Signal")
 
     @staticmethod
     def check_signal(
@@ -959,6 +435,8 @@ class TradingEngine:
     ) -> Tuple:
         """
         Wrapper function - routes to appropriate strategy based on strategy_mode.
+
+        Delegates to strategies.router.check_signal.
 
         strategy_mode values:
         - "keltner_bounce" (default): Keltner band bounce strategy
@@ -973,42 +451,12 @@ class TradingEngine:
         Returns:
             (s_type, entry, tp, sl, reason) or with debug info
         """
-        strategy_mode = config.get("strategy_mode", DEFAULT_STRATEGY_CONFIG.get("strategy_mode", "keltner_bounce"))
-
-        if strategy_mode == "pbema_reaction":
-            return TradingEngine.check_pbema_reaction_signal(
-                df,
-                index=index,
-                min_rr=config.get("rr", DEFAULT_STRATEGY_CONFIG["rr"]),
-                rsi_limit=config.get("rsi", DEFAULT_STRATEGY_CONFIG["rsi"]),
-                slope_thresh=config.get("slope", DEFAULT_STRATEGY_CONFIG["slope"]),
-                use_alphatrend=config.get("at_active", DEFAULT_STRATEGY_CONFIG["at_active"]),
-                pbema_approach_tolerance=config.get("pbema_approach_tolerance", DEFAULT_STRATEGY_CONFIG["pbema_approach_tolerance"]),
-                pbema_frontrun_margin=config.get("pbema_frontrun_margin", DEFAULT_STRATEGY_CONFIG["pbema_frontrun_margin"]),
-                tp_min_dist_ratio=config.get("tp_min_dist_ratio", DEFAULT_STRATEGY_CONFIG["tp_min_dist_ratio"]),
-                tp_max_dist_ratio=config.get("tp_max_dist_ratio", DEFAULT_STRATEGY_CONFIG["tp_max_dist_ratio"]),
-                adx_min=config.get("adx_min", DEFAULT_STRATEGY_CONFIG["adx_min"]),
-                return_debug=return_debug,
-            )
-        else:
-            # Default: keltner_bounce strategy
-            return TradingEngine.check_signal_diagnostic(
-                df,
-                index=index,
-                min_rr=config.get("rr", DEFAULT_STRATEGY_CONFIG["rr"]),
-                rsi_limit=config.get("rsi", DEFAULT_STRATEGY_CONFIG["rsi"]),
-                slope_thresh=config.get("slope", DEFAULT_STRATEGY_CONFIG["slope"]),
-                use_alphatrend=config.get("at_active", DEFAULT_STRATEGY_CONFIG["at_active"]),
-                hold_n=config.get("hold_n", DEFAULT_STRATEGY_CONFIG["hold_n"]),
-                min_hold_frac=config.get("min_hold_frac", DEFAULT_STRATEGY_CONFIG["min_hold_frac"]),
-                pb_touch_tolerance=config.get("pb_touch_tolerance", DEFAULT_STRATEGY_CONFIG["pb_touch_tolerance"]),
-                body_tolerance=config.get("body_tolerance", DEFAULT_STRATEGY_CONFIG["body_tolerance"]),
-                cloud_keltner_gap_min=config.get("cloud_keltner_gap_min", DEFAULT_STRATEGY_CONFIG["cloud_keltner_gap_min"]),
-                tp_min_dist_ratio=config.get("tp_min_dist_ratio", DEFAULT_STRATEGY_CONFIG["tp_min_dist_ratio"]),
-                tp_max_dist_ratio=config.get("tp_max_dist_ratio", DEFAULT_STRATEGY_CONFIG["tp_max_dist_ratio"]),
-                adx_min=config.get("adx_min", DEFAULT_STRATEGY_CONFIG["adx_min"]),
-                return_debug=return_debug,
-            )
+        return strategies_check_signal(
+            df=df,
+            config=config,
+            index=index,
+            return_debug=return_debug,
+        )
 
     @staticmethod
     def debug_base_short(df, index):
