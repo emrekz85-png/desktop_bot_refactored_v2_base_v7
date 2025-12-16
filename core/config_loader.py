@@ -12,50 +12,30 @@ from typing import Dict, Optional
 
 from .config import (
     BEST_CONFIGS_FILE, BEST_CONFIG_CACHE, BEST_CONFIG_WARNING_FLAGS,
-    DATA_DIR,
+    DATA_DIR, TRADING_CONFIG,
+    # Strategy configs from central location (single source of truth)
+    DEFAULT_STRATEGY_CONFIG, SYMBOL_PARAMS,
 )
-
-
-# Default strategy configuration
-DEFAULT_STRATEGY_CONFIG = {
-    "rr": 3.0,
-    "rsi": 60,
-    "slope": 0.5,
-    "at_active": False,
-    "use_trailing": False,
-    "use_dynamic_pbema_tp": True,
-    "strategy_mode": "keltner_bounce",
-}
-
-# Symbol-specific parameters
-# These can be overridden by optimizer results
-SYMBOL_PARAMS = {
-    "BTCUSDT": {
-        "5m": {"rr": 2.4, "rsi": 35, "slope": 0.2, "at_active": False},
-        "15m": {"rr": 2.8, "rsi": 40, "slope": 0.3, "at_active": False},
-        "30m": {"rr": 3.0, "rsi": 45, "slope": 0.3, "at_active": False},
-        "1h": {"rr": 3.2, "rsi": 50, "slope": 0.4, "at_active": False},
-        "4h": {"rr": 3.5, "rsi": 55, "slope": 0.5, "at_active": False},
-        "12h": {"rr": 3.8, "rsi": 60, "slope": 0.5, "at_active": False},
-        "1d": {"rr": 4.0, "rsi": 60, "slope": 0.5, "at_active": False},
-    },
-    # Add more symbols as needed
-}
 
 
 def _strategy_signature() -> str:
     """
-    Generate a signature hash for the current strategy configuration.
+    Generate a deterministic fingerprint of the current strategy inputs.
 
-    This is used to detect when the strategy has changed and cached
-    configs should be invalidated.
+    The hash combines the live trading configuration, the default strategy
+    parameters and the symbol-specific overrides so that backtest results are
+    only consumed when they were produced with the exact same settings.
+
+    IMPORTANT: This must match the _strategy_signature() in the main file
+    to ensure saved configs are properly validated on load.
     """
-    sig_data = {
-        "default_config": DEFAULT_STRATEGY_CONFIG,
-        "version": "v39.0",
+    payload = {
+        "trading": TRADING_CONFIG,
+        "strategy": DEFAULT_STRATEGY_CONFIG,
+        "symbol_params": SYMBOL_PARAMS,
     }
-    sig_str = json.dumps(sig_data, sort_keys=True)
-    return hashlib.md5(sig_str.encode()).hexdigest()[:12]
+    serialized = json.dumps(payload, sort_keys=True)
+    return hashlib.sha256(serialized.encode()).hexdigest()
 
 
 def _is_best_config_signature_valid(best_cfgs: dict) -> bool:
