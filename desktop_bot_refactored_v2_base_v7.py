@@ -6629,15 +6629,17 @@ class MainWindow(QMainWindow):
                 use_days=False, start_date=start_date, end_date=end_date
             )
         else:
-            # Gün sayısı modu (mevcut davranış)
+            # Gün sayısı modu - ARTIK SABİT TARİH ARAILIĞINA DÖNÜŞTÜRÜLECek
+            # Bu şekilde her çalıştırmada tutarlı sonuçlar alınır
             days = self.backtest_days.value()
 
-            # Gün → Mum dönüşümü bilgisi
-            candles_info = ", ".join([f"{tf}:{days_to_candles(days, tf)}" for tf in selected_tfs[:3]])
-            if len(selected_tfs) > 3:
-                candles_info += "..."
-            self.backtest_logs.append(f"🧪 Backtest başlatıldı ({days} gün → {candles_info} mum)")
-            self.backtest_logs.append("⚠️ Gün modu: Her çalıştırmada farklı sonuçlar olabilir")
+            # Bugünden X gün öncesini hesapla
+            from datetime import date, timedelta
+            end_date = date.today().strftime("%Y-%m-%d")
+            start_date = (date.today() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+            self.backtest_logs.append(f"🧪 Backtest başlatıldı ({days} gün: {start_date} → {end_date})")
+            self.backtest_logs.append("✅ Tüm timeframe'ler aynı tarih aralığını kullanacak")
 
             # Hız ayarlarını oku
             skip_opt = self.chk_skip_optimization.isChecked()
@@ -6647,7 +6649,11 @@ class MainWindow(QMainWindow):
             elif quick:
                 self.backtest_logs.append("🚀 Hızlı mod aktif (13 config)")
 
-            self.backtest_worker = BacktestWorker(SYMBOLS, selected_tfs, days, skip_opt, quick, use_days=True)
+            # Artık tarih aralığı modunu kullan (tutarlı sonuçlar için)
+            self.backtest_worker = BacktestWorker(
+                SYMBOLS, selected_tfs, 0, skip_opt, quick,
+                use_days=False, start_date=start_date, end_date=end_date
+            )
 
         self.backtest_worker.log_signal.connect(self.append_backtest_log)
         self.backtest_worker.finished_signal.connect(self.on_backtest_finished)
@@ -7069,13 +7075,15 @@ def run_portfolio_backtest(
     heap = []
     ptr = {}
     total_events = 0
-    for (sym, tf), df in streams.items():
+    # DETERMINISTIC: Sorted iteration ensures consistent order across runs
+    for (sym, tf), df in sorted(streams.items()):
         warmup = 250
         end = len(df) - 2
         if end <= warmup:
             continue
         ptr[(sym, tf)] = warmup
         total_events += max(0, end - warmup)
+        # Heap tuple: (timestamp, symbol, timeframe) - symbol/tf provide stable secondary sort
         heapq.heappush(
             heap,
             (pd.Timestamp(df.loc[warmup, "timestamp"]) + tf_to_timedelta(tf), sym, tf),
