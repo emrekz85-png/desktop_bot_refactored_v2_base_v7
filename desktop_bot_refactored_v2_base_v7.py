@@ -1633,6 +1633,16 @@ class TradeManager:
         }
         # -----------------------------
 
+        # --- CIRCUIT BREAKER TRACKING (v40.2) ---
+        # Stream-level: {(sym, tf): {"cumulative_pnl": 0, "peak_pnl": 0, "trades": 0, "r_multiples": []}}
+        self._stream_pnl_tracker: Dict[Tuple[str, str], Dict] = {}
+        # Killed streams: {(sym, tf): {"reason": str, "at_pnl": float, "at_trade": int}}
+        self._circuit_breaker_killed: Dict[Tuple[str, str], Dict] = {}
+        # Global tracking
+        self._global_cumulative_pnl = 0.0
+        self._global_peak_pnl = 0.0
+        # -----------------------------
+
         # --- MERKEZİ AYARLARDAN OKUMA ---
         self.slippage_pct = TRADING_CONFIG["slippage_rate"]
         self.risk_per_trade_pct = TRADING_CONFIG.get("risk_per_trade_pct", 0.01)
@@ -1765,6 +1775,159 @@ class TradeManager:
             total_open_risk += open_risk_amount
 
         return total_open_risk / equity
+
+    # ==========================================
+    # CIRCUIT BREAKER METHODS (v40.2)
+    # ==========================================
+
+    def _update_circuit_breaker_tracking(self, sym: str, tf: str, pnl: float, r_multiple: float = None):
+        """Update circuit breaker tracking after a trade closes."""
+        key = (sym, tf)
+
+        # Initialize tracker if needed
+        if key not in self._stream_pnl_tracker:
+            self._stream_pnl_tracker[key] = {
+                "cumulative_pnl": 0.0,
+                "peak_pnl": 0.0,
+                "trades": 0,
+                "r_multiples": [],
+            }
+
+        tracker = self._stream_pnl_tracker[key]
+        tracker["cumulative_pnl"] += pnl
+        tracker["trades"] += 1
+        tracker["peak_pnl"] = max(tracker["peak_pnl"], tracker["cumulative_pnl"])
+
+        if r_multiple is not None:
+            tracker["r_multiples"].append(r_multiple)
+
+        # Update global tracking
+        self._global_cumulative_pnl += pnl
+        self._global_peak_pnl = max(self._global_peak_pnl, self._global_cumulative_pnl)
+
+    def check_stream_circuit_breaker(self, sym: str, tf: str) -> Tuple[bool, Optional[str]]:
+        """Check if stream circuit breaker should trigger.
+
+        Returns:
+            (should_kill, reason) - reason is None if not triggered
+        """
+        if not CIRCUIT_BREAKER_CONFIG.get("enabled", True):
+            return False, None
+
+        key = (sym, tf)
+
+        # Already killed?
+        if key in self._circuit_breaker_killed:
+            return True, self._circuit_breaker_killed[key].get("reason", "already_killed")
+
+        # No tracking yet?
+        if key not in self._stream_pnl_tracker:
+            return False, None
+
+        tracker = self._stream_pnl_tracker[key]
+
+        # Minimum trades before circuit breaker activates
+        min_trades = CIRCUIT_BREAKER_CONFIG.get("stream_min_trades_before_kill", 5)
+        if tracker["trades"] < min_trades:
+            return False, None
+
+        # Check 1: Absolute loss limit
+        max_loss = CIRCUIT_BREAKER_CONFIG.get("stream_max_loss", -200.0)
+        if tracker["cumulative_pnl"] < max_loss:
+            reason = f"max_loss_exceeded (PnL=${tracker['cumulative_pnl']:.2f} < ${max_loss})"
+            self._kill_stream(key, reason, tracker)
+            return True, reason
+
+        # Check 2: Drawdown from peak (DOLLAR-BASED)
+        max_dd_dollars = CIRCUIT_BREAKER_CONFIG.get("stream_max_drawdown_dollars", 100.0)
+        if tracker["peak_pnl"] > 0:
+            drawdown_dollars = tracker["peak_pnl"] - tracker["cumulative_pnl"]
+            if drawdown_dollars > max_dd_dollars:
+                reason = f"drawdown_exceeded (${drawdown_dollars:.2f} drop from peak ${tracker['peak_pnl']:.2f})"
+                self._kill_stream(key, reason, tracker)
+                return True, reason
+
+        # Check 3: Rolling E[R] check
+        if ROLLING_ER_CONFIG.get("enabled", True):
+            r_multiples = tracker.get("r_multiples", [])
+            min_trades_er = ROLLING_ER_CONFIG.get("min_trades_before_check", 10)
+
+            if len(r_multiples) >= min_trades_er:
+                window = ROLLING_ER_CONFIG.get("window_by_tf", {}).get(tf, 15)
+                recent_r = r_multiples[-window:] if len(r_multiples) >= window else r_multiples
+
+                if ROLLING_ER_CONFIG.get("use_confidence_band", True) and len(recent_r) >= 5:
+                    import statistics
+                    mean_r = statistics.mean(recent_r)
+                    stdev_r = statistics.stdev(recent_r) if len(recent_r) > 1 else 0
+                    factor = ROLLING_ER_CONFIG.get("confidence_band_factor", 0.5)
+                    lower_bound = mean_r - (stdev_r * factor)
+
+                    kill_thresh = ROLLING_ER_CONFIG.get("kill_threshold", -0.05)
+                    if lower_bound < kill_thresh:
+                        reason = f"rolling_er_negative (E[R]={mean_r:.3f}, lower_bound={lower_bound:.3f})"
+                        self._kill_stream(key, reason, tracker)
+                        return True, reason
+                else:
+                    # Simple threshold check
+                    rolling_er = sum(recent_r) / len(recent_r)
+                    kill_thresh = ROLLING_ER_CONFIG.get("kill_threshold", -0.05)
+                    if rolling_er < kill_thresh:
+                        reason = f"rolling_er_below_threshold (E[R]={rolling_er:.3f} < {kill_thresh})"
+                        self._kill_stream(key, reason, tracker)
+                        return True, reason
+
+        return False, None
+
+    def check_global_circuit_breaker(self) -> Tuple[bool, Optional[str]]:
+        """Check if global circuit breaker should trigger.
+
+        Returns:
+            (should_kill, reason) - reason is None if not triggered
+        """
+        if not CIRCUIT_BREAKER_CONFIG.get("enabled", True):
+            return False, None
+
+        # Check daily loss limit
+        daily_max = CIRCUIT_BREAKER_CONFIG.get("global_daily_max_loss", -400.0)
+        if self._global_cumulative_pnl < daily_max:
+            return True, f"daily_loss_exceeded (${self._global_cumulative_pnl:.2f} < ${daily_max})"
+
+        # Check global drawdown (equity-based)
+        initial_balance = TRADING_CONFIG.get("initial_balance", 2000.0)
+        peak_equity = initial_balance + self._global_peak_pnl
+        current_equity = initial_balance + self._global_cumulative_pnl
+        max_dd_pct = CIRCUIT_BREAKER_CONFIG.get("global_max_drawdown_pct", 0.20)
+
+        if peak_equity > initial_balance:  # Only check if we've had profits
+            dd_pct = (peak_equity - current_equity) / peak_equity
+            if dd_pct > max_dd_pct:
+                return True, f"global_drawdown_exceeded ({dd_pct:.1%} > {max_dd_pct:.1%})"
+
+        return False, None
+
+    def _kill_stream(self, key: Tuple[str, str], reason: str, tracker: Dict):
+        """Mark a stream as killed by circuit breaker."""
+        self._circuit_breaker_killed[key] = {
+            "reason": reason,
+            "at_pnl": tracker.get("cumulative_pnl", 0),
+            "at_trade": tracker.get("trades", 0),
+        }
+        if self.verbose:
+            print(f"🛑 CIRCUIT BREAKER: {key[0]}-{key[1]} killed - {reason}")
+
+    def is_stream_killed(self, sym: str, tf: str) -> bool:
+        """Check if a stream has been killed by circuit breaker."""
+        return (sym, tf) in self._circuit_breaker_killed
+
+    def get_circuit_breaker_report(self) -> Dict:
+        """Get circuit breaker status report."""
+        return {
+            "killed_streams": dict(self._circuit_breaker_killed),
+            "stream_trackers": dict(self._stream_pnl_tracker),
+            "global_pnl": self._global_cumulative_pnl,
+            "global_peak": self._global_peak_pnl,
+        }
 
     def open_trade(self, signal_data):
         with self.lock:
@@ -2210,6 +2373,13 @@ class TradeManager:
                 closed_indices.append(i)
                 trades_updated = True
 
+                # Update circuit breaker tracking
+                self._update_circuit_breaker_tracking(
+                    symbol, tf,
+                    final_net_pnl,
+                    serialized_trade.get("r_multiple")  # May be None in live
+                )
+
             for idx in sorted(closed_indices, reverse=True):
                 del self.open_trades[idx]
 
@@ -2342,6 +2512,13 @@ class TradeManager:
                 self.history.append(serialized_trade)
                 just_closed_trades.append(serialized_trade)
                 closed_indices.append(i)
+
+                # Update circuit breaker tracking
+                self._update_circuit_breaker_tracking(
+                    symbol, tf,
+                    final_net_pnl,
+                    serialized_trade.get("r_multiple")  # May be None in live
+                )
 
                 print(f"🚨 [RT-SL] {symbol}-{tf} {t_type} ACİL KAPATILDI | Fiyat: {latest_price:.4f}, SL: {sl:.4f}, PnL: ${final_net_pnl:+.2f}")
 
