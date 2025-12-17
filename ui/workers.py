@@ -260,6 +260,13 @@ class LiveBotWorker(QThread):
                                                       f"Sonuç: {reason}\nNet PnL: {pnl_str}")
                                             TradingEngine.send_telegram(self.tg_token, self.tg_chat_id, tg_msg)
 
+                                            # Check if circuit breaker should now kill this stream
+                                            cb_triggered, cb_reason = main.trade_manager.check_stream_circuit_breaker(sym, tf)
+                                            if cb_triggered and "already_killed" not in (cb_reason or ""):
+                                                cb_msg = f"🛑 CIRCUIT BREAKER TRIGGERED\n{sym}-{tf}\nReason: {cb_reason}"
+                                                TradingEngine.send_telegram(self.tg_token, self.tg_chat_id, cb_msg)
+                                                self.update_ui_signal.emit(sym, tf, "{}", f"🛑 CIRCUIT BREAKER: {cb_reason}")
+
                                 df_closed = df_ind.iloc[:-1].copy()
 
                                 if config.get("disabled", False):
@@ -330,6 +337,23 @@ class LiveBotWorker(QThread):
                                             decision = "Rejected"
                                             reject_reason = "Cooldown"
                                             log_msg = f"{tf} | {curr_price} | ❄️ SOĞUMA SÜRECİNDE"
+                                            json_data = main.create_chart_data_json(df_closed, tf, sym, s_type,
+                                                                                    active_trades if self.show_rr else [])
+                                            self.update_ui_signal.emit(sym, tf, json_data, log_msg)
+                                        elif main.trade_manager.is_stream_killed(sym, tf):
+                                            # Circuit breaker killed this stream
+                                            decision = "Rejected"
+                                            reject_reason = "Circuit Breaker"
+                                            log_msg = f"{tf} | {curr_price} | 🛑 CIRCUIT BREAKER - Stream devre dışı"
+                                            json_data = main.create_chart_data_json(df_closed, tf, sym, s_type,
+                                                                                    active_trades if self.show_rr else [])
+                                            self.update_ui_signal.emit(sym, tf, json_data, log_msg)
+                                        elif main.trade_manager.check_global_circuit_breaker()[0]:
+                                            # Global circuit breaker triggered
+                                            decision = "Rejected"
+                                            reject_reason = "Global Circuit Breaker"
+                                            _, cb_reason = main.trade_manager.check_global_circuit_breaker()
+                                            log_msg = f"{tf} | {curr_price} | 🛑 GLOBAL CB: {cb_reason}"
                                             json_data = main.create_chart_data_json(df_closed, tf, sym, s_type,
                                                                                     active_trades if self.show_rr else [])
                                             self.update_ui_signal.emit(sym, tf, json_data, log_msg)
