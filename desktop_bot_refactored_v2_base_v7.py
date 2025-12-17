@@ -75,6 +75,13 @@ from core import (
     DEFAULT_STRATEGY_CONFIG, SYMBOL_PARAMS, TRADING_CONFIG,
     # Trading Engine (core trading logic, signals, data fetching)
     TradingEngine,
+    # File paths - SINGLE SOURCE OF TRUTH (v40.2)
+    # All file paths come from core.config to avoid path mismatches
+    DATA_DIR, CSV_FILE, CONFIG_FILE, BEST_CONFIGS_FILE,
+    BACKTEST_META_FILE, POT_LOG_FILE,
+    BACKTEST_CANDLE_LIMITS, DAILY_REPORT_CANDLE_LIMITS,
+    CANDLES_PER_DAY, MINUTES_PER_CANDLE,
+    days_to_candles, days_to_candles_map,
 )
 
 # ==========================================
@@ -266,59 +273,16 @@ ENABLE_CHARTS = False
 # ==========================================
 # 📁 DATA DIRECTORY SETUP
 # ==========================================
-# Tüm CSV, JSON ve geçici dosyalar bu klasörde toplanır
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
-os.makedirs(DATA_DIR, exist_ok=True)
+# v40.2: All file paths now come from core.config (single source of truth)
+# DATA_DIR, CSV_FILE, CONFIG_FILE, BEST_CONFIGS_FILE, BACKTEST_CANDLE_LIMITS,
+# DAILY_REPORT_CANDLE_LIMITS, CANDLES_PER_DAY, days_to_candles are imported from core
+# This prevents path mismatches between main file and core modules
+os.makedirs(DATA_DIR, exist_ok=True)  # DATA_DIR imported from core
 
-CSV_FILE = os.path.join(DATA_DIR, "trades.csv")
-CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
-# Backtestler için maks. mum sayısı sınırları (yüksek limit - kullanıcının isteğine göre)
-BACKTEST_CANDLE_LIMITS = {
-    "1m": 100000,
-    "5m": 100000,
-    "15m": 100000,
-    "30m": 100000,
-    "1h": 100000,
-    "4h": 50000,
-    "12h": 30000,
-    "1d": 20000,
-}
-# Günlük raporlar için özel mum sayısı sınırı
-DAILY_REPORT_CANDLE_LIMITS = {
-    "1m": 15000,
-    "5m": 15000,
-    "15m": 15000,
-    "30m": 15000,
-    "1h": 15000,
-    "4h": 8000,
-    "12h": 5000,
-    "1d": 4000,
-}
+# v40.2: File paths (BEST_CONFIGS_FILE, BACKTEST_META_FILE, POT_LOG_FILE, DYNAMIC_BLACKLIST_FILE)
+# are now imported from core.config - no local definitions to avoid mismatches
 
-# Gün → Mum dönüşüm sabitleri (her TF için günde kaç mum)
-CANDLES_PER_DAY = {
-    "1m": 1440,   # 24 * 60
-    "5m": 288,    # 24 * 60 / 5
-    "15m": 96,    # 24 * 60 / 15
-    "30m": 48,    # 24 * 60 / 30
-    "1h": 24,     # 24
-    "4h": 6,      # 24 / 4
-    "12h": 2,     # 24 / 12
-    "1d": 1,      # 1
-}
-
-def days_to_candles(days: int, timeframe: str) -> int:
-    """Gün sayısını belirtilen timeframe için mum sayısına çevirir."""
-    cpd = CANDLES_PER_DAY.get(timeframe, 24)  # varsayılan 1h
-    return days * cpd
-
-def days_to_candles_map(days: int, timeframes: list = None) -> dict:
-    """Gün sayısını tüm timeframe'ler için mum sayısı dict'ine çevirir."""
-    if timeframes is None:
-        timeframes = TIMEFRAMES
-    return {tf: days_to_candles(days, tf) for tf in timeframes}
-
-BEST_CONFIGS_FILE = os.path.join(DATA_DIR, "best_configs.json")
+# Config cache - kept local for backward compatibility with existing code
 BEST_CONFIG_CACHE = {}
 BEST_CONFIG_WARNING_FLAGS = {
     "missing_signature": False,
@@ -326,9 +290,7 @@ BEST_CONFIG_WARNING_FLAGS = {
     "json_error": False,  # Bozuk JSON dosyası hatası için flag
     "load_error": False,  # Genel yükleme hatası için flag
 }
-BACKTEST_META_FILE = os.path.join(DATA_DIR, "backtest_meta.json")
-POT_LOG_FILE = os.path.join(DATA_DIR, "potential_trades.json")  # Persistent storage for potential trade logs
-DYNAMIC_BLACKLIST_FILE = os.path.join(DATA_DIR, "dynamic_blacklist.json")  # Auto-updated blacklist based on backtest results
+
 # Çökme veya kapanma durumlarında otomatik yeniden başlatma gecikmesi (saniye)
 AUTO_RESTART_DELAY_SECONDS = 5
 
@@ -6006,18 +5968,16 @@ def run_portfolio_backtest(
         if tracker["cumulative_pnl"] < max_loss:
             return True, f"max_loss_exceeded (PnL=${tracker['cumulative_pnl']:.2f} < ${max_loss})"
 
-        # Check 2: Drawdown from peak (EQUITY-BASED, not PnL-based)
-        # Bug fix: PnL-based drawdown gives absurd results (100%+) when PnL is small
-        # We need to calculate drawdown relative to initial balance + peak PnL
-        max_dd_pct = CIRCUIT_BREAKER_CONFIG.get("stream_max_drawdown_pct", 0.15)
-        # Use per-stream initial balance (simplified: assume equal split)
-        stream_initial = initial_balance / max(len(requested_pairs), 1)
-        peak_equity = stream_initial + tracker["peak_pnl"]
-        current_equity = stream_initial + tracker["cumulative_pnl"]
-        if peak_equity > stream_initial:  # Only check if we've had profits
-            dd_pct = (peak_equity - current_equity) / peak_equity
-            if dd_pct > max_dd_pct:
-                return True, f"drawdown_exceeded ({dd_pct:.1%} > {max_dd_pct:.1%})"
+        # Check 2: Drawdown from peak (DOLLAR-BASED for stream level)
+        # Note: Percentage-based drawdown at stream level is problematic because:
+        # - Initial balance is shared across all streams
+        # - Small profit followed by loss gives absurd percentages
+        # Solution: Use dollar-based drawdown for streams (simple and robust)
+        max_dd_dollars = CIRCUIT_BREAKER_CONFIG.get("stream_max_drawdown_dollars", 100.0)
+        if tracker["peak_pnl"] > 0:
+            drawdown_dollars = tracker["peak_pnl"] - tracker["cumulative_pnl"]
+            if drawdown_dollars > max_dd_dollars:
+                return True, f"drawdown_exceeded (${drawdown_dollars:.2f} drop from peak ${tracker['peak_pnl']:.2f})"
 
         # Check 3: Rolling E[R] check
         if new_r is not None and ROLLING_ER_CONFIG.get("enabled", True):
