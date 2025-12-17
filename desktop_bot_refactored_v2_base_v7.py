@@ -6006,10 +6006,16 @@ def run_portfolio_backtest(
         if tracker["cumulative_pnl"] < max_loss:
             return True, f"max_loss_exceeded (PnL=${tracker['cumulative_pnl']:.2f} < ${max_loss})"
 
-        # Check 2: Drawdown from peak
+        # Check 2: Drawdown from peak (EQUITY-BASED, not PnL-based)
+        # Bug fix: PnL-based drawdown gives absurd results (100%+) when PnL is small
+        # We need to calculate drawdown relative to initial balance + peak PnL
         max_dd_pct = CIRCUIT_BREAKER_CONFIG.get("stream_max_drawdown_pct", 0.15)
-        if tracker["peak_pnl"] > 0:
-            dd_pct = (tracker["peak_pnl"] - tracker["cumulative_pnl"]) / tracker["peak_pnl"]
+        # Use per-stream initial balance (simplified: assume equal split)
+        stream_initial = initial_balance / max(len(requested_pairs), 1)
+        peak_equity = stream_initial + tracker["peak_pnl"]
+        current_equity = stream_initial + tracker["cumulative_pnl"]
+        if peak_equity > stream_initial:  # Only check if we've had profits
+            dd_pct = (peak_equity - current_equity) / peak_equity
             if dd_pct > max_dd_pct:
                 return True, f"drawdown_exceeded ({dd_pct:.1%} > {max_dd_pct:.1%})"
 
@@ -6061,10 +6067,15 @@ def run_portfolio_backtest(
         if global_daily_pnl < daily_max:
             return True, f"daily_loss_exceeded (${global_daily_pnl:.2f} < ${daily_max})"
 
-        # Check global drawdown
+        # Check global drawdown (EQUITY-BASED, not PnL-based)
+        # Bug fix: PnL-based drawdown gives absurd results (100%+) when PnL is small
+        # Total initial balance = 2 portfolios (Base + PBEMA)
+        total_initial = initial_balance * 2
+        peak_equity = total_initial + global_peak_pnl
+        current_equity = total_initial + cumulative
         max_dd_pct = CIRCUIT_BREAKER_CONFIG.get("global_max_drawdown_pct", 0.20)
-        if global_peak_pnl > 0:
-            dd_pct = (global_peak_pnl - cumulative) / global_peak_pnl
+        if peak_equity > total_initial:  # Only check if we've had profits
+            dd_pct = (peak_equity - current_equity) / peak_equity
             if dd_pct > max_dd_pct:
                 return True, f"global_drawdown_exceeded ({dd_pct:.1%} > {max_dd_pct:.1%})"
 
