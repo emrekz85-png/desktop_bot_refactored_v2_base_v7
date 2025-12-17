@@ -1561,7 +1561,7 @@ class TradeManager:
         }
         # -----------------------------
 
-        # --- CIRCUIT BREAKER TRACKING (v40.2) ---
+        # --- CIRCUIT BREAKER TRACKING (v40.2, weekly added v40.4) ---
         # Stream-level: {(sym, tf): {"cumulative_pnl": 0, "peak_pnl": 0, "trades": 0, "r_multiples": []}}
         self._stream_pnl_tracker: Dict[Tuple[str, str], Dict] = {}
         # Killed streams: {(sym, tf): {"reason": str, "at_pnl": float, "at_trade": int}}
@@ -1569,6 +1569,9 @@ class TradeManager:
         # Global tracking
         self._global_cumulative_pnl = 0.0
         self._global_peak_pnl = 0.0
+        # Weekly tracking (v40.4)
+        self._global_weekly_pnl = 0.0
+        self._current_week_start: Optional[datetime] = None
         # -----------------------------
 
         # --- MERKEZİ AYARLARDAN OKUMA ---
@@ -1705,8 +1708,31 @@ class TradeManager:
         return total_open_risk / equity
 
     # ==========================================
-    # CIRCUIT BREAKER METHODS (v40.2)
+    # CIRCUIT BREAKER METHODS (v40.2, weekly added v40.4)
     # ==========================================
+
+    def _get_week_start(self, dt: datetime) -> datetime:
+        """Get the Monday 00:00 UTC of the week containing dt."""
+        days_since_monday = dt.weekday()
+        week_start = dt - timedelta(days=days_since_monday)
+        return week_start.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    def _check_and_reset_week(self, trade_time: datetime = None):
+        """Check if we've entered a new week and reset weekly PnL if so."""
+        if trade_time is None:
+            trade_time = datetime.utcnow()
+
+        # Normalize to naive datetime
+        if hasattr(trade_time, 'tzinfo') and trade_time.tzinfo is not None:
+            trade_time = trade_time.replace(tzinfo=None)
+
+        current_week_start = self._get_week_start(trade_time)
+
+        if self._current_week_start is None:
+            self._current_week_start = current_week_start
+        elif current_week_start > self._current_week_start:
+            self._global_weekly_pnl = 0.0
+            self._current_week_start = current_week_start
 
     def _update_circuit_breaker_tracking(self, sym: str, tf: str, pnl: float, r_multiple: float = None):
         """Update circuit breaker tracking after a trade closes."""
@@ -1732,6 +1758,10 @@ class TradeManager:
         # Update global tracking
         self._global_cumulative_pnl += pnl
         self._global_peak_pnl = max(self._global_peak_pnl, self._global_cumulative_pnl)
+
+        # Update weekly tracking (v40.4)
+        self._check_and_reset_week()
+        self._global_weekly_pnl += pnl
 
     def check_stream_circuit_breaker(self, sym: str, tf: str) -> Tuple[bool, Optional[str]]:
         """Check if stream circuit breaker should trigger.
@@ -1816,10 +1846,15 @@ class TradeManager:
         if not CIRCUIT_BREAKER_CONFIG.get("enabled", True):
             return False, None
 
-        # Check daily loss limit
+        # Check daily loss limit (session-based for live)
         daily_max = CIRCUIT_BREAKER_CONFIG.get("global_daily_max_loss", -400.0)
         if self._global_cumulative_pnl < daily_max:
             return True, f"daily_loss_exceeded (${self._global_cumulative_pnl:.2f} < ${daily_max})"
+
+        # Check weekly loss limit (v40.4)
+        weekly_max = CIRCUIT_BREAKER_CONFIG.get("global_weekly_max_loss", -800.0)
+        if self._global_weekly_pnl < weekly_max:
+            return True, f"weekly_loss_exceeded (${self._global_weekly_pnl:.2f} < ${weekly_max})"
 
         # Check global drawdown (equity-based)
         initial_balance = TRADING_CONFIG.get("initial_balance", 2000.0)
@@ -1855,6 +1890,8 @@ class TradeManager:
             "stream_trackers": dict(self._stream_pnl_tracker),
             "global_pnl": self._global_cumulative_pnl,
             "global_peak": self._global_peak_pnl,
+            "global_weekly_pnl": self._global_weekly_pnl,
+            "current_week_start": self._current_week_start.isoformat() if self._current_week_start else None,
         }
 
     def open_trade(self, signal_data):
@@ -2257,16 +2294,12 @@ class TradeManager:
                 commission_notional = abs(current_size) * abs(exit_fill)
                 commission = commission_notional * TRADING_CONFIG["total_fee"]
 
-                funding_cost = 0.0
-                try:
-                    open_time_str = trade.get("open_time_utc", "")
-                    if open_time_str:
-                        open_dt = datetime.strptime(open_time_str, "%Y-%m-%dT%H:%M:%SZ")
-                        hours = max(0.0, (candle_time_utc - open_dt).total_seconds() / 3600.0)
-                        notional_entry = abs(current_size) * entry
-                        funding_cost = notional_entry * TRADING_CONFIG["funding_rate_8h"] * (hours / 8.0)
-                except Exception:
-                    funding_cost = 0.0
+                # Funding cost - merkezi fonksiyon kullan (v40.4)
+                funding_cost = calculate_funding_cost(
+                    open_time=trade.get("open_time_utc", ""),
+                    close_time=candle_time_utc,
+                    notional_value=abs(current_size) * entry
+                )
 
                 final_net_pnl = gross_pnl - commission - funding_cost
 
@@ -2401,17 +2434,12 @@ class TradeManager:
                 commission_notional = abs(size) * abs(exit_fill)
                 commission = commission_notional * TRADING_CONFIG["total_fee"]
 
-                # Funding maliyeti (basit)
-                funding_cost = 0.0
-                try:
-                    open_time_str = trade.get("open_time_utc", "")
-                    if open_time_str:
-                        open_dt = datetime.strptime(open_time_str, "%Y-%m-%dT%H:%M:%SZ")
-                        hours = max(0.0, (datetime.utcnow() - open_dt).total_seconds() / 3600.0)
-                        notional_entry = abs(size) * entry
-                        funding_cost = notional_entry * TRADING_CONFIG["funding_rate_8h"] * (hours / 8.0)
-                except Exception:
-                    funding_cost = 0.0
+                # Funding cost - merkezi fonksiyon kullan (v40.4)
+                funding_cost = calculate_funding_cost(
+                    open_time=trade.get("open_time_utc", ""),
+                    close_time=datetime.utcnow(),
+                    notional_value=abs(size) * entry
+                )
 
                 final_net_pnl = gross_pnl - commission - funding_cost
 
@@ -6031,12 +6059,35 @@ def run_portfolio_backtest(
     circuit_breaker_killed = {}   # {(sym, tf): {"reason": str, "at_pnl": float, "at_trade": int}}
 
     # Global trackers (across all streams)
-    # NOT: Backtest'te gerçek günlük/haftalık reset YOK
-    # Bu değişkenler "session" bazında kümülatif PnL takip eder
-    # Live'da gerçek günlük reset için ayrı mekanizma gerekir
-    session_cumulative_pnl = 0.0  # Eski: global_daily_pnl (yanıltıcı isim)
-    session_peak_pnl = 0.0        # Eski: global_peak_pnl
+    # NOT: Backtest'te session bazında kümülatif PnL takip eder
+    # Weekly tracking simüle edilmiş zamanla çalışır (v40.4)
+    session_cumulative_pnl = 0.0  # Session bazında kümülatif PnL
+    session_peak_pnl = 0.0        # Session peak PnL
+    session_weekly_pnl = 0.0      # Haftalık PnL (v40.4)
+    current_week_start = None     # Mevcut haftanın başlangıcı (v40.4)
     global_circuit_breaker_triggered = False
+
+    def get_week_start(dt) -> datetime:
+        """Get the Monday 00:00 UTC of the week containing dt."""
+        if isinstance(dt, pd.Timestamp):
+            dt = dt.to_pydatetime()
+        if hasattr(dt, 'tzinfo') and dt.tzinfo is not None:
+            dt = dt.replace(tzinfo=None)
+        days_since_monday = dt.weekday()
+        week_start = dt - timedelta(days=days_since_monday)
+        return week_start.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    def check_and_reset_week(trade_time) -> None:
+        """Check if we've entered a new week and reset weekly PnL if so."""
+        nonlocal session_weekly_pnl, current_week_start
+
+        week_start = get_week_start(trade_time)
+
+        if current_week_start is None:
+            current_week_start = week_start
+        elif week_start > current_week_start:
+            session_weekly_pnl = 0.0
+            current_week_start = week_start
 
     def check_stream_circuit_breaker(sym: str, tf: str, new_pnl: float, new_r: float = None) -> tuple:
         """Check if stream circuit breaker should trigger.
@@ -6125,12 +6176,16 @@ def run_portfolio_backtest(
     active_strategies = set(stream_strategy_map.values())
     active_portfolio_count = len(active_strategies) if active_strategies else 1
 
-    def check_global_circuit_breaker(new_pnl: float) -> tuple:
+    def check_global_circuit_breaker(new_pnl: float, trade_time=None) -> tuple:
         """Check if global circuit breaker should trigger.
+
+        Args:
+            new_pnl: PnL from the trade
+            trade_time: Time of trade close (for weekly tracking)
 
         Returns: (should_kill, reason)
         """
-        nonlocal session_cumulative_pnl, session_peak_pnl
+        nonlocal session_cumulative_pnl, session_peak_pnl, session_weekly_pnl
 
         if not CIRCUIT_BREAKER_CONFIG.get("enabled", True):
             return False, None
@@ -6138,10 +6193,20 @@ def run_portfolio_backtest(
         session_cumulative_pnl += new_pnl
         session_peak_pnl = max(session_peak_pnl, session_cumulative_pnl)
 
+        # Update weekly tracking (v40.4)
+        if trade_time is not None:
+            check_and_reset_week(trade_time)
+        session_weekly_pnl += new_pnl
+
         # Check session loss limit (backtest'te günlük reset yok, session bazlı)
         session_max_loss = CIRCUIT_BREAKER_CONFIG.get("global_daily_max_loss", -400.0)
         if session_cumulative_pnl < session_max_loss:
             return True, f"session_loss_exceeded (${session_cumulative_pnl:.2f} < ${session_max_loss})"
+
+        # Check weekly loss limit (v40.4)
+        weekly_max_loss = CIRCUIT_BREAKER_CONFIG.get("global_weekly_max_loss", -800.0)
+        if session_weekly_pnl < weekly_max_loss:
+            return True, f"weekly_loss_exceeded (${session_weekly_pnl:.2f} < ${weekly_max_loss})"
 
         # Check global drawdown (EQUITY-BASED, not PnL-based)
         # Bug fix: PnL-based drawdown gives absurd results (100%+) when PnL is small
@@ -6212,7 +6277,7 @@ def run_portfolio_backtest(
                 )
 
             # Global circuit breaker kontrolü
-            should_kill_global, global_reason = check_global_circuit_breaker(trade_pnl)
+            should_kill_global, global_reason = check_global_circuit_breaker(trade_pnl, event_time)
             if should_kill_global and not global_circuit_breaker_triggered:
                 global_circuit_breaker_triggered = True
                 log(
