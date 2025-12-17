@@ -6664,7 +6664,7 @@ def run_portfolio_backtest(
     if global_circuit_breaker_triggered:
         log(
             f"\n🛑 [GLOBAL CIRCUIT BREAKER] Bot tamamen durduruldu! "
-            f"Daily PnL=${global_daily_pnl:.2f}",
+            f"Session PnL=${session_cumulative_pnl:.2f}",
             category="summary"
         )
 
