@@ -334,6 +334,62 @@ WALK_FORWARD_CONFIG = {
 }
 
 # ==========================================
+# CIRCUIT BREAKER CONFIGURATION
+# ==========================================
+# 2-Level kill switch to prevent catastrophic losses:
+# Level 1: Stream-level (individual symbol/timeframe)
+# Level 2: Global (entire portfolio)
+CIRCUIT_BREAKER_CONFIG = {
+    "enabled": True,
+
+    # --- LEVEL 1: STREAM CIRCUIT BREAKER ---
+    # Shuts down individual symbol/timeframe when loss limit reached
+    "stream_max_loss": -200.0,          # Max $ loss per stream before kill
+    "stream_max_drawdown_pct": 0.15,    # Max 15% drawdown from stream peak PnL
+    "stream_min_trades_before_kill": 5, # Minimum trades before circuit breaker activates
+
+    # --- LEVEL 2: GLOBAL CIRCUIT BREAKER ---
+    # Shuts down entire bot when portfolio-level limits reached
+    "global_daily_max_loss": -400.0,    # Max daily $ loss across all streams
+    "global_weekly_max_loss": -800.0,   # Max weekly $ loss across all streams
+    "global_max_drawdown_pct": 0.20,    # Max 20% drawdown from portfolio peak
+}
+
+# ==========================================
+# ROLLING E[R] CHECK CONFIGURATION
+# ==========================================
+# Monitors recent trade performance to detect regime shifts
+# Shuts down stream when edge disappears (rolling E[R] goes negative)
+ROLLING_ER_CONFIG = {
+    "enabled": True,
+
+    # Window sizes by timeframe (more trades needed for noisy TFs)
+    "window_by_tf": {
+        "1m": 30,
+        "5m": 25,
+        "15m": 20,
+        "30m": 15,
+        "1h": 12,
+        "4h": 8,
+        "1d": 5,
+    },
+
+    # EMA smoothing factor (0 = no smoothing, 1 = full smoothing)
+    "ema_alpha": 0.3,
+
+    # Minimum trades before rolling check activates
+    "min_trades_before_check": 10,
+
+    # Threshold: E[R] below this triggers warning, below negative triggers kill
+    "warning_threshold": 0.02,  # Warn when rolling E[R] < 0.02
+    "kill_threshold": -0.05,    # Kill stream when rolling E[R] < -0.05 (allowing some noise)
+
+    # Confidence band: mean - (stdev * factor) < 0 triggers kill
+    "use_confidence_band": True,
+    "confidence_band_factor": 0.5,  # More conservative than 1.0 stdev
+}
+
+# ==========================================
 # OTHER SETTINGS
 # ==========================================
 REFRESH_RATE = 3
