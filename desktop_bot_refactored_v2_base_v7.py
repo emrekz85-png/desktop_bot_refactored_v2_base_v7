@@ -3272,43 +3272,30 @@ class LiveBotWorker(QThread):
 
                 if now >= next_price_time:
                     try:
+                        # WebSocket stream'i candle verileri için al (later use)
                         stream_snapshot = self.ws_stream.get_latest_bulk()
-                        for sym in SYMBOLS:
-                            df_price = stream_snapshot.get((sym, "1m"))
 
-                            if (df_price is None or df_price.empty) and TIMEFRAMES:
-                                df_price = stream_snapshot.get((sym, TIMEFRAMES[0]))
-
-                            if df_price is not None and not df_price.empty:
-                                price = float(df_price.iloc[-1]['close'])
-                                self.price_signal.emit(sym, price)
-                                trade_manager.update_live_pnl_with_price(sym, price)
-                                # Real-time SL kontrolü - mum kapanmasını beklemeden SL'e ulaşan pozisyonları kapat
-                                rt_closed = trade_manager.check_realtime_sl(sym, price)
-                                for ct in rt_closed:
-                                    tf = ct.get('timeframe', '?')
-                                    pnl = float(ct.get('pnl', 0))
-                                    pnl_str = f"+${pnl:.2f}" if pnl > 0 else f"-${abs(pnl):.2f}"
-                                    close_log = f"🚨 {ct['symbol']} ACİL KAPATILDI ({tf}): {ct['status']} | {pnl_str}"
-                                    self.update_ui_signal.emit(sym, tf, "{}", f"⚠️ {close_log}")
-                                    # Telegram bildirimi
-                                    tg_msg = f"🚨 ACİL KAPATMA: {ct['symbol']}\nTF: {tf}\nSonuç: {ct['status']}\nNet PnL: {pnl_str}\n⚠️ Real-time SL tetiklendi"
-                                    TradingEngine.send_telegram(self.tg_token, self.tg_chat_id, tg_msg)
-                        if not stream_snapshot:
-                            latest_prices = TradingEngine.get_latest_prices(SYMBOLS)
-                            for sym, price in latest_prices.items():
-                                self.price_signal.emit(sym, price)
-                                trade_manager.update_live_pnl_with_price(sym, price)
-                                # Real-time SL kontrolü (REST fallback)
-                                rt_closed = trade_manager.check_realtime_sl(sym, price)
-                                for ct in rt_closed:
-                                    tf = ct.get('timeframe', '?')
-                                    pnl = float(ct.get('pnl', 0))
-                                    pnl_str = f"+${pnl:.2f}" if pnl > 0 else f"-${abs(pnl):.2f}"
-                                    close_log = f"🚨 {ct['symbol']} ACİL KAPATILDI ({tf}): {ct['status']} | {pnl_str}"
-                                    self.update_ui_signal.emit(sym, tf, "{}", f"⚠️ {close_log}")
-                                    tg_msg = f"🚨 ACİL KAPATMA: {ct['symbol']}\nTF: {tf}\nSonuç: {ct['status']}\nNet PnL: {pnl_str}\n⚠️ Real-time SL tetiklendi"
-                                    TradingEngine.send_telegram(self.tg_token, self.tg_chat_id, tg_msg)
+                        # KRITIK FIX (v40.4): Canlı fiyat için REST API kullan
+                        # WebSocket kline close değeri güvenilir bir anlık fiyat kaynağı DEĞİL:
+                        # - Farklı timeframe'ler farklı zamanlarda güncellenir
+                        # - 1m timeframe TIMEFRAMES listesinde yok
+                        # - Forming candle close değeri tick bazlı değil, kline update bazlı
+                        # REST API /ticker/price endpoint'i gerçek anlık fiyatı döndürür
+                        latest_prices = TradingEngine.get_latest_prices(SYMBOLS)
+                        for sym, price in latest_prices.items():
+                            self.price_signal.emit(sym, price)
+                            trade_manager.update_live_pnl_with_price(sym, price)
+                            # Real-time SL kontrolü - mum kapanmasını beklemeden SL'e ulaşan pozisyonları kapat
+                            rt_closed = trade_manager.check_realtime_sl(sym, price)
+                            for ct in rt_closed:
+                                tf = ct.get('timeframe', '?')
+                                pnl = float(ct.get('pnl', 0))
+                                pnl_str = f"+${pnl:.2f}" if pnl > 0 else f"-${abs(pnl):.2f}"
+                                close_log = f"🚨 {ct['symbol']} ACİL KAPATILDI ({tf}): {ct['status']} | {pnl_str}"
+                                self.update_ui_signal.emit(sym, tf, "{}", f"⚠️ {close_log}")
+                                # Telegram bildirimi
+                                tg_msg = f"🚨 ACİL KAPATMA: {ct['symbol']}\nTF: {tf}\nSonuç: {ct['status']}\nNet PnL: {pnl_str}\n⚠️ Real-time SL tetiklendi"
+                                TradingEngine.send_telegram(self.tg_token, self.tg_chat_id, tg_msg)
                     except Exception as e:
                         print(f"[LIVE] Fiyat güncelleme hatası: {e}")
                     next_price_time = now + 0.5
