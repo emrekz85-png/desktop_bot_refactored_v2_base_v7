@@ -344,15 +344,17 @@ CIRCUIT_BREAKER_CONFIG = {
 
     # --- LEVEL 1: STREAM CIRCUIT BREAKER ---
     # Shuts down individual symbol/timeframe when loss limit reached
-    "stream_max_loss": -200.0,          # Max $ loss per stream before kill
-    "stream_max_drawdown_pct": 0.15,    # Max 15% drawdown from stream peak PnL
-    "stream_min_trades_before_kill": 5, # Minimum trades before circuit breaker activates
+    "stream_max_loss": -200.0,              # Max $ loss per stream before kill
+    "stream_max_drawdown_dollars": 100.0,   # Max $ drawdown from stream peak PnL
+    "stream_min_trades_before_kill": 5,     # Minimum trades before circuit breaker activates
+    # Note: We use DOLLAR-based drawdown for streams (not percentage) because
+    # percentage-based gives absurd results when initial balance is shared across streams
 
     # --- LEVEL 2: GLOBAL CIRCUIT BREAKER ---
     # Shuts down entire bot when portfolio-level limits reached
     "global_daily_max_loss": -400.0,    # Max daily $ loss across all streams
     "global_weekly_max_loss": -800.0,   # Max weekly $ loss across all streams
-    "global_max_drawdown_pct": 0.20,    # Max 20% drawdown from portfolio peak
+    "global_max_drawdown_pct": 0.20,    # Max 20% drawdown from portfolio peak equity
 }
 
 # ==========================================
