@@ -101,7 +101,7 @@ from datetime import datetime, timedelta
 import traceback
 import tempfile
 import shutil
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict
 import matplotlib
 import hashlib
 
