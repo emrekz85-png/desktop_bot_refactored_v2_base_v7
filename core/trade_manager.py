@@ -773,6 +773,11 @@ class SimTradeManager(BaseTradeManager):
         tf = trade_data["timeframe"]
         sym = trade_data["symbol"]
 
+        # Circuit breaker kontrolü - tek noktadan garanti (defense in depth)
+        # Bu kontrol, sinyal tarafında atlanmış olsa bile trade'in açılmasını engeller
+        if self.is_stream_killed(sym, tf):
+            return False
+
         cooldown_ref_time = trade_data.get("open_time_utc") or datetime.utcnow()
         if self.check_cooldown(sym, tf, cooldown_ref_time):
             return False

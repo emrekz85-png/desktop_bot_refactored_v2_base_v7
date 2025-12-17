@@ -764,14 +764,15 @@ WALK_FORWARD_CONFIG = {
 # Timeframe-based minimum OOS trades (quant trader recommendation)
 # Lower timeframes need more OOS trades to be statistically significant
 # v39.1: Thresholds tightened to reduce false positives in noisy altcoin streams
+# v39.2: 4h/1d thresholds further increased for better statistical significance
 MIN_OOS_TRADES_BY_TF = {
     "1m": 20,   # 15 -> 20
     "5m": 15,   # 10 -> 15
     "15m": 12,  # 8 -> 12 (özellikle DOGE/SUI gibi gürültülü altcoinler için)
     "30m": 10,  # 6 -> 10
     "1h": 8,    # 5 -> 8
-    "4h": 5,    # 3 -> 5
-    "1d": 3,    # 2 -> 3
+    "4h": 8,    # 5 -> 8 (istatistiksel güvenilirlik için artırıldı)
+    "1d": 5,    # 3 -> 5 (uzun TF'lerde daha fazla OOS trade gerekli)
 }
 
 
@@ -1933,6 +1934,12 @@ class TradeManager:
         with self.lock:
             tf = signal_data["timeframe"]
             sym = signal_data["symbol"]
+
+            # Circuit breaker kontrolü - tek noktadan garanti (defense in depth)
+            # Bu kontrol, sinyal tarafında atlanmış olsa bile trade'in açılmasını engeller
+            if self.is_stream_killed(sym, tf):
+                print(f"🛑 [{sym}-{tf}] Circuit breaker aktif - trade açılmadı")
+                return
 
             cooldown_ref_time = signal_data.get("open_time_utc") or datetime.utcnow()
             if self.check_cooldown(sym, tf, cooldown_ref_time):
@@ -6097,9 +6104,11 @@ def run_portfolio_backtest(
     circuit_breaker_killed = {}   # {(sym, tf): {"reason": str, "at_pnl": float, "at_trade": int}}
 
     # Global trackers (across all streams)
-    global_daily_pnl = 0.0
-    global_weekly_pnl = 0.0
-    global_peak_pnl = 0.0
+    # NOT: Backtest'te gerçek günlük/haftalık reset YOK
+    # Bu değişkenler "session" bazında kümülatif PnL takip eder
+    # Live'da gerçek günlük reset için ayrı mekanizma gerekir
+    session_cumulative_pnl = 0.0  # Eski: global_daily_pnl (yanıltıcı isim)
+    session_peak_pnl = 0.0        # Eski: global_peak_pnl
     global_circuit_breaker_triggered = False
 
     def check_stream_circuit_breaker(sym: str, tf: str, new_pnl: float, new_r: float = None) -> tuple:
@@ -6184,32 +6193,35 @@ def run_portfolio_backtest(
 
         return False, None
 
+    # Aktif portföy sayısını hesapla (dinamik - hardcoded "2" yerine)
+    # stream_strategy_map'ten unique stratejileri bul
+    active_strategies = set(stream_strategy_map.values())
+    active_portfolio_count = len(active_strategies) if active_strategies else 1
+
     def check_global_circuit_breaker(new_pnl: float) -> tuple:
         """Check if global circuit breaker should trigger.
 
         Returns: (should_kill, reason)
         """
-        nonlocal global_daily_pnl, global_weekly_pnl, global_peak_pnl
+        nonlocal session_cumulative_pnl, session_peak_pnl
 
         if not CIRCUIT_BREAKER_CONFIG.get("enabled", True):
             return False, None
 
-        global_daily_pnl += new_pnl
-        global_weekly_pnl += new_pnl
-        cumulative = global_daily_pnl  # Simplified: use daily as proxy in backtest
-        global_peak_pnl = max(global_peak_pnl, cumulative)
+        session_cumulative_pnl += new_pnl
+        session_peak_pnl = max(session_peak_pnl, session_cumulative_pnl)
 
-        # Check daily loss limit
-        daily_max = CIRCUIT_BREAKER_CONFIG.get("global_daily_max_loss", -400.0)
-        if global_daily_pnl < daily_max:
-            return True, f"daily_loss_exceeded (${global_daily_pnl:.2f} < ${daily_max})"
+        # Check session loss limit (backtest'te günlük reset yok, session bazlı)
+        session_max_loss = CIRCUIT_BREAKER_CONFIG.get("global_daily_max_loss", -400.0)
+        if session_cumulative_pnl < session_max_loss:
+            return True, f"session_loss_exceeded (${session_cumulative_pnl:.2f} < ${session_max_loss})"
 
         # Check global drawdown (EQUITY-BASED, not PnL-based)
         # Bug fix: PnL-based drawdown gives absurd results (100%+) when PnL is small
-        # Total initial balance = 2 portfolios (Base + PBEMA)
-        total_initial = initial_balance * 2
-        peak_equity = total_initial + global_peak_pnl
-        current_equity = total_initial + cumulative
+        # Dinamik portföy sayısı: Sadece aktif stratejilerin bakiyelerini say
+        total_initial = initial_balance * active_portfolio_count
+        peak_equity = total_initial + session_peak_pnl
+        current_equity = total_initial + session_cumulative_pnl
         max_dd_pct = CIRCUIT_BREAKER_CONFIG.get("global_max_drawdown_pct", 0.20)
         if peak_equity > total_initial:  # Only check if we've had profits
             dd_pct = (peak_equity - current_equity) / peak_equity
