@@ -795,20 +795,21 @@ def _get_min_trades_for_timeframe(tf: str, num_candles: int = 20000) -> int:
 WALK_FORWARD_CONFIG = {
     "train_ratio": 0.70,        # %70 train, %30 test
     "min_test_trades": 3,       # Test için minimum trade sayısı (base)
-    "min_overfit_ratio": 0.50,  # Test E[R] / Train E[R] minimum oranı
+    "min_overfit_ratio": 0.70,  # Test E[R] / Train E[R] minimum oranı (0.50 -> 0.70 sıkılaştırıldı)
     "enabled": True,            # Walk-forward testi etkinleştir
 }
 
 # Timeframe-based minimum OOS trades (quant trader recommendation)
 # Lower timeframes need more OOS trades to be statistically significant
+# v39.1: Thresholds tightened to reduce false positives in noisy altcoin streams
 MIN_OOS_TRADES_BY_TF = {
-    "1m": 15,
-    "5m": 10,
-    "15m": 8,   # Higher bar for noisy 15m
-    "30m": 6,
-    "1h": 5,
-    "4h": 3,
-    "1d": 2,
+    "1m": 20,   # 15 -> 20
+    "5m": 15,   # 10 -> 15
+    "15m": 12,  # 8 -> 12 (özellikle DOGE/SUI gibi gürültülü altcoinler için)
+    "30m": 10,  # 6 -> 10
+    "1h": 8,    # 5 -> 8
+    "4h": 5,    # 3 -> 5
+    "1d": 3,    # 2 -> 3
 }
 
 
@@ -5945,12 +5946,141 @@ def run_portfolio_backtest(
         strategy = stream_strategy_map.get((sym, tf), "keltner_bounce")
         return tm_pbema if strategy == "pbema_reaction" else tm_base
 
+    # ==========================================
+    # CIRCUIT BREAKER & ROLLING E[R] TRACKING
+    # ==========================================
+    # Import config from core.config
+    from core.config import CIRCUIT_BREAKER_CONFIG, ROLLING_ER_CONFIG
+
+    # Stream-level trackers
+    stream_pnl_tracker = {}       # {(sym, tf): {"cumulative_pnl": 0, "peak_pnl": 0, "trades": 0}}
+    stream_r_tracker = {}         # {(sym, tf): {"r_multiples": [], "ema_er": None}}
+    circuit_breaker_killed = {}   # {(sym, tf): {"reason": str, "at_pnl": float, "at_trade": int}}
+
+    # Global trackers (across all streams)
+    global_daily_pnl = 0.0
+    global_weekly_pnl = 0.0
+    global_peak_pnl = 0.0
+    global_circuit_breaker_triggered = False
+
+    def check_stream_circuit_breaker(sym: str, tf: str, new_pnl: float, new_r: float = None) -> tuple:
+        """Check if stream circuit breaker should trigger.
+
+        Returns: (should_kill, reason)
+        """
+        if not CIRCUIT_BREAKER_CONFIG.get("enabled", True):
+            return False, None
+
+        key = (sym, tf)
+
+        # Initialize tracker if needed
+        if key not in stream_pnl_tracker:
+            stream_pnl_tracker[key] = {"cumulative_pnl": 0.0, "peak_pnl": 0.0, "trades": 0}
+
+        tracker = stream_pnl_tracker[key]
+        tracker["cumulative_pnl"] += new_pnl
+        tracker["trades"] += 1
+        tracker["peak_pnl"] = max(tracker["peak_pnl"], tracker["cumulative_pnl"])
+
+        # Track R-multiples for rolling E[R] check
+        if new_r is not None and ROLLING_ER_CONFIG.get("enabled", True):
+            if key not in stream_r_tracker:
+                stream_r_tracker[key] = {"r_multiples": [], "ema_er": None}
+
+            r_tracker = stream_r_tracker[key]
+            r_tracker["r_multiples"].append(new_r)
+
+            # Update EMA of E[R]
+            alpha = ROLLING_ER_CONFIG.get("ema_alpha", 0.3)
+            if r_tracker["ema_er"] is None:
+                r_tracker["ema_er"] = new_r
+            else:
+                r_tracker["ema_er"] = alpha * new_r + (1 - alpha) * r_tracker["ema_er"]
+
+        min_trades = CIRCUIT_BREAKER_CONFIG.get("stream_min_trades_before_kill", 5)
+        if tracker["trades"] < min_trades:
+            return False, None
+
+        # Check 1: Absolute loss limit
+        max_loss = CIRCUIT_BREAKER_CONFIG.get("stream_max_loss", -200.0)
+        if tracker["cumulative_pnl"] < max_loss:
+            return True, f"max_loss_exceeded (PnL=${tracker['cumulative_pnl']:.2f} < ${max_loss})"
+
+        # Check 2: Drawdown from peak
+        max_dd_pct = CIRCUIT_BREAKER_CONFIG.get("stream_max_drawdown_pct", 0.15)
+        if tracker["peak_pnl"] > 0:
+            dd_pct = (tracker["peak_pnl"] - tracker["cumulative_pnl"]) / tracker["peak_pnl"]
+            if dd_pct > max_dd_pct:
+                return True, f"drawdown_exceeded ({dd_pct:.1%} > {max_dd_pct:.1%})"
+
+        # Check 3: Rolling E[R] check
+        if new_r is not None and ROLLING_ER_CONFIG.get("enabled", True):
+            r_tracker = stream_r_tracker[key]
+            window = ROLLING_ER_CONFIG.get("window_by_tf", {}).get(tf, 15)
+            min_trades_er = ROLLING_ER_CONFIG.get("min_trades_before_check", 10)
+
+            if len(r_tracker["r_multiples"]) >= min_trades_er:
+                recent_r = r_tracker["r_multiples"][-window:] if len(r_tracker["r_multiples"]) >= window else r_tracker["r_multiples"]
+
+                if ROLLING_ER_CONFIG.get("use_confidence_band", True) and len(recent_r) >= 5:
+                    import statistics
+                    mean_r = statistics.mean(recent_r)
+                    stdev_r = statistics.stdev(recent_r) if len(recent_r) > 1 else 0
+                    factor = ROLLING_ER_CONFIG.get("confidence_band_factor", 0.5)
+                    lower_bound = mean_r - (stdev_r * factor)
+
+                    kill_thresh = ROLLING_ER_CONFIG.get("kill_threshold", -0.05)
+                    if lower_bound < kill_thresh:
+                        return True, f"rolling_er_negative (E[R]={mean_r:.3f}, lower_bound={lower_bound:.3f})"
+                else:
+                    # Simple threshold check
+                    rolling_er = sum(recent_r) / len(recent_r)
+                    kill_thresh = ROLLING_ER_CONFIG.get("kill_threshold", -0.05)
+                    if rolling_er < kill_thresh:
+                        return True, f"rolling_er_below_threshold (E[R]={rolling_er:.3f} < {kill_thresh})"
+
+        return False, None
+
+    def check_global_circuit_breaker(new_pnl: float) -> tuple:
+        """Check if global circuit breaker should trigger.
+
+        Returns: (should_kill, reason)
+        """
+        nonlocal global_daily_pnl, global_weekly_pnl, global_peak_pnl
+
+        if not CIRCUIT_BREAKER_CONFIG.get("enabled", True):
+            return False, None
+
+        global_daily_pnl += new_pnl
+        global_weekly_pnl += new_pnl
+        cumulative = global_daily_pnl  # Simplified: use daily as proxy in backtest
+        global_peak_pnl = max(global_peak_pnl, cumulative)
+
+        # Check daily loss limit
+        daily_max = CIRCUIT_BREAKER_CONFIG.get("global_daily_max_loss", -400.0)
+        if global_daily_pnl < daily_max:
+            return True, f"daily_loss_exceeded (${global_daily_pnl:.2f} < ${daily_max})"
+
+        # Check global drawdown
+        max_dd_pct = CIRCUIT_BREAKER_CONFIG.get("global_max_drawdown_pct", 0.20)
+        if global_peak_pnl > 0:
+            dd_pct = (global_peak_pnl - cumulative) / global_peak_pnl
+            if dd_pct > max_dd_pct:
+                return True, f"global_drawdown_exceeded ({dd_pct:.1%} > {max_dd_pct:.1%})"
+
+        return False, None
+
     logged_cfg_pairs = set()
     processed_events = 0
     next_progress = 10
 
     # Ana backtest döngüsü
     while heap:
+        # Global circuit breaker kontrolü
+        if global_circuit_breaker_triggered:
+            log(f"🛑 [CIRCUIT BREAKER] Global circuit breaker tetiklendi - backtest durduruluyor", category="summary")
+            break
+
         event_time, sym, tf = heapq.heappop(heap)
         df = streams[(sym, tf)]
         arrays = streams_arrays[(sym, tf)]
@@ -5961,7 +6091,7 @@ def run_portfolio_backtest(
         # Açık pozisyonları güncelle (her iki TM için de güncelle - açık trade varsa)
         # Her TM sadece kendi açık trade'lerini günceller
         tm_for_stream = get_tm_for_stream(sym, tf)
-        tm_for_stream.update_trades(
+        closed_trades = tm_for_stream.update_trades(
             sym,
             tf,
             candle_high=float(arrays["highs"][i]),
@@ -5972,6 +6102,37 @@ def run_portfolio_backtest(
             pb_bot=float(arrays["pb_bots"][i]),
         )
 
+        # ==========================================
+        # CIRCUIT BREAKER KONTROLÜ (trade kapandığında)
+        # ==========================================
+        for closed_trade in closed_trades:
+            trade_pnl = closed_trade.get("pnl", 0)
+            trade_risk = closed_trade.get("risk_amount", 1)  # Avoid division by zero
+            trade_r = trade_pnl / trade_risk if trade_risk > 0 else 0
+
+            # Stream circuit breaker kontrolü
+            should_kill, kill_reason = check_stream_circuit_breaker(sym, tf, trade_pnl, trade_r)
+            if should_kill and (sym, tf) not in circuit_breaker_killed:
+                tracker = stream_pnl_tracker.get((sym, tf), {})
+                circuit_breaker_killed[(sym, tf)] = {
+                    "reason": kill_reason,
+                    "at_pnl": tracker.get("cumulative_pnl", trade_pnl),
+                    "at_trade": tracker.get("trades", 1),
+                }
+                log(
+                    f"🛑 [CIRCUIT BREAKER] {sym}-{tf} DURDURULDU: {kill_reason}",
+                    category="summary"
+                )
+
+            # Global circuit breaker kontrolü
+            should_kill_global, global_reason = check_global_circuit_breaker(trade_pnl)
+            if should_kill_global and not global_circuit_breaker_triggered:
+                global_circuit_breaker_triggered = True
+                log(
+                    f"🛑 [CIRCUIT BREAKER] GLOBAL STOP: {global_reason}",
+                    category="summary"
+                )
+
         # Bu sembol/timeframe için optimize edilmiş config
         config = best_configs.get((sym, tf)) or load_optimized_config(sym, tf)
 
@@ -5981,6 +6142,10 @@ def run_portfolio_backtest(
         sym_params = SYMBOL_PARAMS.get(sym, {})
         tf_params = sym_params.get(tf, {}) if isinstance(sym_params, dict) else {}
         if tf_params.get("disabled", False) or config.get("disabled", False):
+            continue
+
+        # Skip if stream circuit breaker triggered
+        if (sym, tf) in circuit_breaker_killed:
             continue
 
         if (sym, tf) not in logged_cfg_pairs:
@@ -6374,6 +6539,47 @@ def run_portfolio_backtest(
                 category="summary"
             )
         log("  (Nedenler: portfolio constraint'ler, pozisyon çakışmaları, risk limitleri)", category="summary")
+
+    # ==========================================
+    # CIRCUIT BREAKER RAPORU
+    # ==========================================
+    if circuit_breaker_killed:
+        log(f"\n🛑 [CIRCUIT BREAKER] {len(circuit_breaker_killed)} stream otomatik durduruldu:", category="summary")
+        total_saved = 0.0
+        for (sym, tf), info in sorted(circuit_breaker_killed.items()):
+            reason = info.get("reason", "unknown")
+            at_pnl = info.get("at_pnl", 0)
+            at_trade = info.get("at_trade", 0)
+
+            # Bu stream'in backtest sonucundaki toplam PnL'i bul
+            stream_final_pnl = next(
+                (r["net_pnl"] for r in summary_rows if r["symbol"] == sym and r["timeframe"] == tf),
+                at_pnl
+            )
+            # Eğer durdurulmasaydı ne kadar daha kaybedilirdi (tahmin)
+            potential_loss_avoided = at_pnl - stream_final_pnl if stream_final_pnl < at_pnl else 0
+            total_saved += abs(potential_loss_avoided) if potential_loss_avoided < 0 else 0
+
+            log(
+                f"  - {sym}-{tf}: Durduğu PnL=${at_pnl:.2f} (trade #{at_trade}) | Sebep: {reason}",
+                category="summary"
+            )
+
+        # Özet istatistikler
+        stream_pnls_at_kill = [info.get("at_pnl", 0) for info in circuit_breaker_killed.values()]
+        avg_pnl_at_kill = sum(stream_pnls_at_kill) / len(stream_pnls_at_kill) if stream_pnls_at_kill else 0
+        log(
+            f"  📊 Circuit Breaker Özet: {len(circuit_breaker_killed)} stream durduruldu, "
+            f"ortalama duruş PnL=${avg_pnl_at_kill:.2f}",
+            category="summary"
+        )
+
+    if global_circuit_breaker_triggered:
+        log(
+            f"\n🛑 [GLOBAL CIRCUIT BREAKER] Bot tamamen durduruldu! "
+            f"Daily PnL=${global_daily_pnl:.2f}",
+            category="summary"
+        )
 
     # Her strateji için ayrı portföy sonuçları
     combined_wallet = tm_base.wallet_balance + tm_pbema.wallet_balance
