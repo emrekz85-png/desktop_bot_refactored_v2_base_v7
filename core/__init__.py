@@ -15,7 +15,7 @@
 
 from .config import (
     # Environment detection
-    IS_COLAB, IS_HEADLESS, IS_NOTEBOOK, HAS_TQDM,
+    IS_COLAB, IS_HEADLESS, IS_NOTEBOOK, HAS_TQDM, HTF_ONLY_MODE,
     # Symbols and timeframes
     SYMBOLS, TIMEFRAMES, LOWER_TIMEFRAMES, HTF_TIMEFRAMES,
     # Paths
@@ -33,6 +33,9 @@ from .config import (
     POST_PORTFOLIO_BLACKLIST,
     # Thresholds
     MIN_EXPECTANCY_R_MULTIPLE, MIN_SCORE_THRESHOLD, CONFIDENCE_RISK_MULTIPLIER,
+    # Walk-forward and circuit breaker configs
+    WALK_FORWARD_CONFIG, MIN_OOS_TRADES_BY_TF,
+    CIRCUIT_BREAKER_CONFIG, ROLLING_ER_CONFIG,
 )
 
 from .utils import (
@@ -80,7 +83,7 @@ from .trading_engine import TradingEngine
 
 __all__ = [
     # Environment
-    'IS_COLAB', 'IS_HEADLESS', 'IS_NOTEBOOK', 'HAS_TQDM',
+    'IS_COLAB', 'IS_HEADLESS', 'IS_NOTEBOOK', 'HAS_TQDM', 'HTF_ONLY_MODE',
     # Symbols and timeframes
     'SYMBOLS', 'TIMEFRAMES', 'LOWER_TIMEFRAMES', 'HTF_TIMEFRAMES',
     # Paths
@@ -97,6 +100,9 @@ __all__ = [
     'POST_PORTFOLIO_BLACKLIST',
     # Thresholds
     'MIN_EXPECTANCY_R_MULTIPLE', 'MIN_SCORE_THRESHOLD', 'CONFIDENCE_RISK_MULTIPLIER',
+    # Walk-forward and circuit breaker configs
+    'WALK_FORWARD_CONFIG', 'MIN_OOS_TRADES_BY_TF',
+    'CIRCUIT_BREAKER_CONFIG', 'ROLLING_ER_CONFIG',
     # Utils
     'normalize_datetime', 'tf_to_timedelta', 'tf_to_minutes',
     'calculate_funding_cost', 'format_time_utc', 'format_time_local',
