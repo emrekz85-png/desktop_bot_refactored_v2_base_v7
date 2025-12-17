@@ -82,6 +82,13 @@ from core import (
     BACKTEST_CANDLE_LIMITS, DAILY_REPORT_CANDLE_LIMITS,
     CANDLES_PER_DAY, MINUTES_PER_CANDLE,
     days_to_candles, days_to_candles_map,
+    # Symbols and Timeframes - SINGLE SOURCE OF TRUTH (v40.3)
+    SYMBOLS, TIMEFRAMES, LOWER_TIMEFRAMES, HTF_TIMEFRAMES, HTF_ONLY_MODE,
+    # Thresholds - SINGLE SOURCE OF TRUTH (v40.3)
+    MIN_EXPECTANCY_R_MULTIPLE, MIN_SCORE_THRESHOLD, CONFIDENCE_RISK_MULTIPLIER,
+    # Walk-forward and circuit breaker configs - SINGLE SOURCE OF TRUTH (v40.3)
+    WALK_FORWARD_CONFIG, MIN_OOS_TRADES_BY_TF,
+    CIRCUIT_BREAKER_CONFIG, ROLLING_ER_CONFIG,
 )
 
 # ==========================================
@@ -243,25 +250,11 @@ def get_plotly():
     return _plotly_go, _plotly_utils
 
 # ==========================================
-# ⚙️ GENEL AYARLAR VE SABİTLER (MERKEZİ YÖNETİM)
+# ⚙️ GENEL AYARLAR VE SABİTLER (MERKEZİ YÖNETİM - v40.3)
 # ==========================================
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "LINKUSDT", "BNBUSDT", "XRPUSDT", "LTCUSDT", "DOGEUSDT", "SUIUSDT", "FARTCOINUSDT"]
-
-# ==========================================
-# 🛡️ HTF ONLY MODE (Opsiyonel)
-# ==========================================
-# True = Sadece 1h+ timeframe kullan (daha az trade, daha az gürültü)
-# False = Tüm timeframe'leri kullan (5m, 15m, 1h, 4h, 12h, 1d)
-# NOT: Problem timeframe değil, optimizasyon periyodu. Canlı trading'de
-# düzenli re-optimizasyon (her 1-2 haftada) yapılması önerilir.
-HTF_ONLY_MODE = False
-
-# 1m removed - too noisy, inconsistent results across all symbols
-# 5m, 15m, 30m - Eğer HTF_ONLY_MODE aktifse devre dışı kalır
-_ALL_LOWER_TIMEFRAMES = ["5m", "15m", "30m", "1h"]
-LOWER_TIMEFRAMES = ["1h"] if HTF_ONLY_MODE else _ALL_LOWER_TIMEFRAMES
-HTF_TIMEFRAMES = ["4h", "12h", "1d"]
-TIMEFRAMES = LOWER_TIMEFRAMES + HTF_TIMEFRAMES
+# SYMBOLS, TIMEFRAMES, HTF_ONLY_MODE artık core.config'den import ediliyor
+# Bu değişiklik tutarsızlıkları önler ve tek kaynak prensibini uygular.
+# Değişiklik yapmak için: core/config.py dosyasını düzenleyin.
 candles = 50000
 REFRESH_RATE = 3
 
@@ -298,35 +291,19 @@ AUTO_RESTART_DELAY_SECONDS = 5
 # (ensures signature consistency for backtest config validation)
 
 # ==========================================
-# 🎯 v39.0 - R-MULTIPLE BASED OPTIMIZER GATING
+# 🎯 v40.3 - R-MULTIPLE BASED OPTIMIZER GATING
 # ==========================================
-# Multi-layer gating to prevent weak-edge configs from trading:
-# 1. Minimum E[R] threshold (account-size independent)
-# 2. Minimum score threshold (varies by timeframe)
-# 3. Confidence-based risk multiplier
-# 4. Walk-forward out-of-sample validation
-# ==========================================
-
-# R-Multiple = PnL / Risk Amount
-# E[R] = Expected R-multiple per trade (average R across all trades)
-# - E[R] > 0: Positive expectancy (profitable system)
-# - E[R] = 1.0: Average win equals average risk
-# - E[R] = -1.0: Average loss equals average risk (typical SL hit)
+# Tüm threshold'lar artık core.config'den import ediliyor:
+# - MIN_EXPECTANCY_R_MULTIPLE
+# - MIN_SCORE_THRESHOLD
+# - CONFIDENCE_RISK_MULTIPLIER
+# - WALK_FORWARD_CONFIG
+# - MIN_OOS_TRADES_BY_TF
+# - CIRCUIT_BREAKER_CONFIG
+# - ROLLING_ER_CONFIG
 #
-# Bu metrik hesap büyüklüğünden, kaldıraçtan ve komisyondan bağımsızdır.
-# Modelin gerçek "edge"ini ölçer.
-
-# Minimum E[R] (expected R-multiple) threshold by timeframe
-# Configs with lower E[R] are considered "barely positive" and rejected
-MIN_EXPECTANCY_R_MULTIPLE = {
-    "1m": 0.10,   # Very noisy - need strong edge
-    "5m": 0.06,   # Noisy - need decent edge per trade
-    "15m": 0.05,  # Moderate noise
-    "30m": 0.04,
-    "1h": 0.04,   # Cleaner signals
-    "4h": 0.03,   # Low noise
-    "1d": 0.02,   # Very clean
-}
+# Değişiklik yapmak için: core/config.py dosyasını düzenleyin.
+# ==========================================
 
 # DEPRECATED: Eski $/trade eşikleri (geriye uyumluluk için korunuyor)
 # Bu değerler artık kullanılmıyor, E[R] kullanılıyor
@@ -340,34 +317,9 @@ MIN_EXPECTANCY_PER_TRADE = {
     "1d": 1.0,   # Very clean
 }
 
-# Minimum optimizer score threshold by timeframe
-# Higher timeframes have lower bars because fewer trades naturally
-MIN_SCORE_THRESHOLD = {
-    "1m": 80.0,
-    "5m": 40.0,   # High bar for noisy timeframe
-    "15m": 15.0,  # Medium bar
-    "30m": 10.0,
-    "1h": 8.0,    # Lower bar
-    "4h": 5.0,    # Lower bar
-    "1d": 3.0,
-}
-
-# Confidence-based risk multiplier
-# Reduces position size for medium-confidence streams
-CONFIDENCE_RISK_MULTIPLIER = {
-    "high": 1.0,    # Full risk
-    "medium": 0.5,  # Half risk - protects against optimizer overfitting
-    "low": 0.0,     # No trades (effectively disabled)
-}
-
-# Post-portfolio pruning: Streams that consistently lose money
-# These are auto-populated after first backtest run based on net_pnl < 0
-# Format: {(symbol, timeframe): True}
-POST_PORTFOLIO_BLACKLIST = {
-    # Will be populated dynamically, but manual overrides can be added here:
-    # ("HYPEUSDT", "15m"): True,
-    # ("BNBUSDT", "15m"): True,
-}
+# POST_PORTFOLIO_BLACKLIST artık core.config'den import ediliyor
+# Lokal alias kullanılıyor (backward compatibility için)
+POST_PORTFOLIO_BLACKLIST = CORE_POST_PORTFOLIO_BLACKLIST
 
 # ==========================================
 # 🔄 DYNAMIC BLACKLIST SYSTEM (v40.2 - REFACTORED)
@@ -744,36 +696,11 @@ def _get_min_trades_for_timeframe(tf: str, num_candles: int = 20000) -> int:
 
 
 # ==========================================
-# 🔬 WALK-FORWARD / OUT-OF-SAMPLE TESTING
+# 🔬 WALK-FORWARD / OUT-OF-SAMPLE TESTING (v40.3)
 # ==========================================
-# Overfitting'i önlemek için:
-# 1. Veriyi train (in-sample) ve test (out-of-sample) olarak böl
-# 2. Train verisinde optimize et
-# 3. Test verisinde sadece test et (tekrar optimize etme)
-# 4. Test E[R] / Train E[R] oranı "overfit ratio"
-# 5. Overfit ratio < 0.5 ise config reddedilir
+# WALK_FORWARD_CONFIG ve MIN_OOS_TRADES_BY_TF artık core.config'den import ediliyor.
+# Değişiklik yapmak için: core/config.py dosyasını düzenleyin.
 # ==========================================
-
-WALK_FORWARD_CONFIG = {
-    "train_ratio": 0.70,        # %70 train, %30 test
-    "min_test_trades": 3,       # Test için minimum trade sayısı (base)
-    "min_overfit_ratio": 0.70,  # Test E[R] / Train E[R] minimum oranı (0.50 -> 0.70 sıkılaştırıldı)
-    "enabled": True,            # Walk-forward testi etkinleştir
-}
-
-# Timeframe-based minimum OOS trades (quant trader recommendation)
-# Lower timeframes need more OOS trades to be statistically significant
-# v39.1: Thresholds tightened to reduce false positives in noisy altcoin streams
-# v39.2: 4h/1d thresholds further increased for better statistical significance
-MIN_OOS_TRADES_BY_TF = {
-    "1m": 20,   # 15 -> 20
-    "5m": 15,   # 10 -> 15
-    "15m": 12,  # 8 -> 12 (özellikle DOGE/SUI gibi gürültülü altcoinler için)
-    "30m": 10,  # 6 -> 10
-    "1h": 8,    # 5 -> 8
-    "4h": 8,    # 5 -> 8 (istatistiksel güvenilirlik için artırıldı)
-    "1d": 5,    # 3 -> 5 (uzun TF'lerde daha fazla OOS trade gerekli)
-}
 
 
 def _split_data_walk_forward(df: pd.DataFrame, train_ratio: float = 0.70) -> tuple:

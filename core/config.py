@@ -326,11 +326,29 @@ def is_stream_blacklisted(symbol: str, timeframe: str) -> bool:
 # ==========================================
 # WALK-FORWARD CONFIGURATION
 # ==========================================
+# Overfitting'i önlemek için:
+# 1. Veriyi train (in-sample) ve test (out-of-sample) olarak böl
+# 2. Train verisinde optimize et
+# 3. Test verisinde sadece test et (tekrar optimize etme)
+# 4. Test E[R] / Train E[R] oranı "overfit ratio"
+# 5. Overfit ratio < min_overfit_ratio ise config reddedilir
 WALK_FORWARD_CONFIG = {
-    "enabled": True,
-    "train_ratio": 0.70,
-    "oos_min_trades": 3,
-    "overfit_ratio_threshold": 0.30,
+    "enabled": True,            # Walk-forward testi etkinleştir
+    "train_ratio": 0.70,        # %70 train, %30 test
+    "min_test_trades": 3,       # Test için minimum trade sayısı (base)
+    "min_overfit_ratio": 0.70,  # Test E[R] / Train E[R] minimum oranı
+}
+
+# Timeframe-based minimum OOS trades (quant trader recommendation)
+# Lower timeframes need more OOS trades to be statistically significant
+MIN_OOS_TRADES_BY_TF = {
+    "1m": 20,
+    "5m": 15,
+    "15m": 12,
+    "30m": 10,
+    "1h": 8,
+    "4h": 8,
+    "1d": 5,
 }
 
 # ==========================================
