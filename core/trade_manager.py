@@ -12,7 +12,7 @@ import json
 import threading
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Tuple, Union
 from abc import ABC, abstractmethod
 
@@ -77,6 +77,9 @@ class BaseTradeManager(ABC):
         # Global tracking
         self._global_cumulative_pnl = 0.0
         self._global_peak_pnl = 0.0
+        # Weekly tracking (v40.4)
+        self._global_weekly_pnl = 0.0
+        self._current_week_start: Optional[datetime] = None
 
     def _next_id(self) -> int:
         """Generate next trade ID."""
@@ -548,10 +551,41 @@ class BaseTradeManager(ABC):
         pass
 
     # ==========================================
-    # CIRCUIT BREAKER METHODS (v40.2)
+    # CIRCUIT BREAKER METHODS (v40.2, weekly added v40.4)
     # ==========================================
 
-    def _update_circuit_breaker_tracking(self, sym: str, tf: str, pnl: float, r_multiple: float = None):
+    def _get_week_start(self, dt: datetime) -> datetime:
+        """Get the Monday 00:00 UTC of the week containing dt."""
+        # Monday = 0, Sunday = 6
+        days_since_monday = dt.weekday()
+        week_start = dt - timedelta(days=days_since_monday)
+        return week_start.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    def _check_and_reset_week(self, trade_time: datetime = None):
+        """Check if we've entered a new week and reset weekly PnL if so.
+
+        Args:
+            trade_time: The time of the trade (for backtest). None = use current time.
+        """
+        if trade_time is None:
+            trade_time = datetime.utcnow()
+
+        # Normalize to naive datetime
+        if hasattr(trade_time, 'tzinfo') and trade_time.tzinfo is not None:
+            trade_time = trade_time.replace(tzinfo=None)
+
+        current_week_start = self._get_week_start(trade_time)
+
+        if self._current_week_start is None:
+            # First trade - initialize week
+            self._current_week_start = current_week_start
+        elif current_week_start > self._current_week_start:
+            # New week started - reset weekly PnL
+            self._global_weekly_pnl = 0.0
+            self._current_week_start = current_week_start
+
+    def _update_circuit_breaker_tracking(self, sym: str, tf: str, pnl: float,
+                                          r_multiple: float = None, trade_time: datetime = None):
         """Update circuit breaker tracking after a trade closes.
 
         Args:
@@ -559,6 +593,7 @@ class BaseTradeManager(ABC):
             tf: Timeframe
             pnl: Trade PnL (net)
             r_multiple: Trade R-multiple (optional)
+            trade_time: Time of trade close (for backtest weekly tracking)
         """
         key = (sym, tf)
 
@@ -582,6 +617,10 @@ class BaseTradeManager(ABC):
         # Update global tracking
         self._global_cumulative_pnl += pnl
         self._global_peak_pnl = max(self._global_peak_pnl, self._global_cumulative_pnl)
+
+        # Update weekly tracking (v40.4)
+        self._check_and_reset_week(trade_time)
+        self._global_weekly_pnl += pnl
 
     def check_stream_circuit_breaker(self, sym: str, tf: str) -> Tuple[bool, Optional[str]]:
         """Check if stream circuit breaker should trigger.
@@ -670,10 +709,15 @@ class BaseTradeManager(ABC):
         if not CIRCUIT_BREAKER_CONFIG.get("enabled", True):
             return False, None
 
-        # Check daily loss limit
+        # Check daily loss limit (session-based for live)
         daily_max = CIRCUIT_BREAKER_CONFIG.get("global_daily_max_loss", -400.0)
         if self._global_cumulative_pnl < daily_max:
             return True, f"daily_loss_exceeded (${self._global_cumulative_pnl:.2f} < ${daily_max})"
+
+        # Check weekly loss limit (v40.4)
+        weekly_max = CIRCUIT_BREAKER_CONFIG.get("global_weekly_max_loss", -800.0)
+        if self._global_weekly_pnl < weekly_max:
+            return True, f"weekly_loss_exceeded (${self._global_weekly_pnl:.2f} < ${weekly_max})"
 
         # Check global drawdown (equity-based)
         initial_balance = TRADING_CONFIG.get("initial_balance", 2000.0)
@@ -710,6 +754,8 @@ class BaseTradeManager(ABC):
             "stream_trackers": dict(self._stream_pnl_tracker),
             "global_pnl": self._global_cumulative_pnl,
             "global_peak": self._global_peak_pnl,
+            "global_weekly_pnl": self._global_weekly_pnl,
+            "current_week_start": self._current_week_start.isoformat() if self._current_week_start else None,
         }
 
     @abstractmethod
