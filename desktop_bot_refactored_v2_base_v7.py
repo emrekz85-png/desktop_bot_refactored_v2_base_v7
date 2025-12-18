@@ -7452,6 +7452,369 @@ def colab_quick_test(
     )
 
 
+# ==========================================
+# 🧪 BASELINE TEST - Optimizer'sız Karşılaştırma (v40.5)
+# ==========================================
+# Bu fonksiyonlar optimizer'ın gerçekten değer katıp katmadığını test eder.
+# Sabit config ile backtest yapılır, sonuçlar optimized ile karşılaştırılır.
+# ==========================================
+
+# Baseline config - "makul" sabit değerler
+BASELINE_CONFIG = {
+    "rr": 1.5,
+    "rsi": 45,
+    "slope": 0.5,
+    "at_active": False,
+    "use_trailing": False,
+    "use_dynamic_pbema_tp": True,
+    "strategy_mode": "keltner_bounce",
+    "disabled": False,
+    "confidence": "high",
+}
+
+# Alternatif baseline configs (karşılaştırma için)
+BASELINE_CONFIGS_ALT = {
+    "conservative": {
+        "rr": 1.2, "rsi": 45, "slope": 0.5, "at_active": False,
+        "use_trailing": False, "use_dynamic_pbema_tp": True,
+        "strategy_mode": "keltner_bounce", "disabled": False, "confidence": "high",
+    },
+    "aggressive": {
+        "rr": 2.1, "rsi": 35, "slope": 0.5, "at_active": False,
+        "use_trailing": False, "use_dynamic_pbema_tp": True,
+        "strategy_mode": "keltner_bounce", "disabled": False, "confidence": "high",
+    },
+    "with_at": {
+        "rr": 1.5, "rsi": 45, "slope": 0.5, "at_active": True,
+        "use_trailing": False, "use_dynamic_pbema_tp": True,
+        "strategy_mode": "keltner_bounce", "disabled": False, "confidence": "high",
+    },
+}
+
+
+def run_baseline_test(
+    symbols: list = None,
+    timeframes: list = None,
+    start_date: str = None,
+    end_date: str = None,
+    candles: int = 50000,
+    baseline_config: dict = None,
+    verbose: bool = True,
+) -> dict:
+    """Run backtest with fixed config (no optimization).
+
+    Bu fonksiyon optimizer'ı tamamen atlar ve tüm streamler için
+    aynı sabit config kullanır. Optimizer'ın değer katıp katmadığını
+    test etmek için kullanılır.
+
+    Args:
+        symbols: Test edilecek semboller (default: SYMBOLS)
+        timeframes: Test edilecek zaman dilimleri (default: TIMEFRAMES)
+        start_date: Başlangıç tarihi "YYYY-MM-DD" (zorunlu)
+        end_date: Bitiş tarihi "YYYY-MM-DD" (default: bugün)
+        candles: Mum sayısı (start_date verilmezse kullanılır)
+        baseline_config: Sabit config (default: BASELINE_CONFIG)
+        verbose: Detaylı çıktı
+
+    Returns:
+        dict with:
+        - 'summary': DataFrame with backtest summary
+        - 'trades': DataFrame with all trades
+        - 'metrics': dict of aggregate metrics
+        - 'config_used': Kullanılan sabit config
+    """
+    symbols = symbols or SYMBOLS
+    timeframes = timeframes or TIMEFRAMES
+    baseline_config = baseline_config or BASELINE_CONFIG
+
+    def log(msg):
+        if verbose:
+            print(msg)
+
+    log("=" * 60)
+    log("🧪 BASELINE TEST - Optimizer KAPALI")
+    log("=" * 60)
+    log(f"   Config: RR={baseline_config['rr']}, RSI={baseline_config['rsi']}, "
+        f"AT={'Açık' if baseline_config['at_active'] else 'Kapalı'}")
+    log(f"   Symbols: {len(symbols)} adet")
+    log(f"   Timeframes: {timeframes}")
+    if start_date:
+        log(f"   Date Range: {start_date} → {end_date or 'bugün'}")
+    else:
+        log(f"   Candles: {candles}")
+    log("=" * 60)
+
+    # Step 1: Fetch data
+    log("\n📊 Veri indiriliyor...")
+    streams = {}
+    pairs = [(s, tf) for s in symbols for tf in timeframes]
+
+    for sym, tf in pairs:
+        try:
+            if start_date:
+                df = TradingEngine.get_historical_data_pagination(
+                    sym, tf, start_date=start_date, end_date=end_date
+                )
+            else:
+                limit = BACKTEST_CANDLE_LIMITS.get(tf, candles)
+                limit = min(limit, candles)
+                df = TradingEngine.get_historical_data_pagination(sym, tf, total_candles=limit)
+
+            if df is not None and len(df) > 300:
+                df = TradingEngine.calculate_indicators(df)
+                streams[(sym, tf)] = df
+                log(f"   ✓ {sym}-{tf}: {len(df)} mum")
+            else:
+                log(f"   ✗ {sym}-{tf}: Yetersiz veri")
+        except Exception as e:
+            log(f"   ✗ {sym}-{tf}: Hata - {e}")
+
+    if not streams:
+        log("❌ Hiç veri indirilemedi!")
+        return {"summary": None, "trades": None, "metrics": {}, "config_used": baseline_config}
+
+    log(f"\n✓ {len(streams)} stream hazır")
+
+    # Step 2: Create fixed configs for all streams (NO OPTIMIZATION)
+    log("\n⚙️ Sabit config tüm streamlere uygulanıyor (optimizer YOK)...")
+    best_configs = {}
+    for (sym, tf) in streams.keys():
+        # Her stream için aynı sabit config
+        best_configs[(sym, tf)] = {
+            **baseline_config,
+            "_net_pnl": 0,  # Bilinmiyor
+            "_trades": 0,
+            "_score": 0,
+            "_expected_r": 0,
+        }
+
+    # Temporarily save configs to file for run_portfolio_backtest to use
+    temp_configs_file = os.path.join(DATA_DIR, "baseline_configs_temp.json")
+    try:
+        # Convert to JSON format
+        json_configs = {}
+        for (sym, tf), cfg in best_configs.items():
+            if sym not in json_configs:
+                json_configs[sym] = {}
+            json_configs[sym][tf] = cfg
+
+        with open(temp_configs_file, "w", encoding="utf-8") as f:
+            json.dump(json_configs, f, indent=2)
+
+        # Backup original best_configs.json
+        original_configs_backup = None
+        if os.path.exists(BEST_CONFIGS_FILE):
+            with open(BEST_CONFIGS_FILE, "r", encoding="utf-8") as f:
+                original_configs_backup = f.read()
+
+        # Replace with baseline configs
+        with open(BEST_CONFIGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(json_configs, f, indent=2)
+
+        # Step 3: Run backtest with skip_optimization=True
+        log("\n🔬 Baseline backtest çalıştırılıyor...")
+
+        result = run_portfolio_backtest(
+            symbols=symbols,
+            timeframes=timeframes,
+            candles=candles,
+            out_trades_csv=os.path.join(DATA_DIR, "baseline_trades.csv"),
+            out_summary_csv=os.path.join(DATA_DIR, "baseline_summary.csv"),
+            progress_callback=lambda msg: log(f"   {msg}") if verbose else None,
+            draw_trades=False,
+            skip_optimization=True,  # CRITICAL: Optimizer'ı atla
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    finally:
+        # Restore original best_configs.json
+        if original_configs_backup:
+            with open(BEST_CONFIGS_FILE, "w", encoding="utf-8") as f:
+                f.write(original_configs_backup)
+        elif os.path.exists(BEST_CONFIGS_FILE):
+            os.remove(BEST_CONFIGS_FILE)
+
+        # Clean up temp file
+        if os.path.exists(temp_configs_file):
+            os.remove(temp_configs_file)
+
+    # Extract results
+    summary_rows = result.get("summary_rows", [])
+    all_trades = result.get("all_trades", [])
+
+    summary_df = pd.DataFrame(summary_rows) if summary_rows else pd.DataFrame()
+    trades_df = pd.DataFrame(all_trades) if all_trades else pd.DataFrame()
+
+    # Calculate metrics
+    metrics = {}
+    if not trades_df.empty:
+        pnl_col = 'pnl' if 'pnl' in trades_df.columns else None
+        if pnl_col:
+            metrics['total_pnl'] = trades_df[pnl_col].sum()
+            metrics['total_trades'] = len(trades_df)
+            metrics['winning_trades'] = len(trades_df[trades_df[pnl_col] > 0])
+            metrics['losing_trades'] = len(trades_df[trades_df[pnl_col] < 0])
+            metrics['win_rate'] = metrics['winning_trades'] / max(1, metrics['total_trades'])
+            metrics['avg_pnl'] = metrics['total_pnl'] / max(1, metrics['total_trades'])
+
+            if 'r_multiple' in trades_df.columns:
+                metrics['total_r'] = trades_df['r_multiple'].sum()
+                metrics['avg_r'] = trades_df['r_multiple'].mean()
+                metrics['expected_r'] = metrics['avg_r']
+
+    # Print summary
+    log("\n" + "=" * 60)
+    log("📈 BASELINE TEST SONUÇLARI")
+    log("=" * 60)
+    log(f"   Config: RR={baseline_config['rr']}, RSI={baseline_config['rsi']}, "
+        f"AT={'Açık' if baseline_config['at_active'] else 'Kapalı'}")
+    if metrics:
+        log(f"   Toplam PnL: ${metrics.get('total_pnl', 0):.2f}")
+        log(f"   Toplam Trade: {metrics.get('total_trades', 0)}")
+        log(f"   Win Rate: {metrics.get('win_rate', 0)*100:.1f}%")
+        log(f"   E[R]: {metrics.get('expected_r', 0):.3f}")
+    log("=" * 60)
+
+    return {
+        "summary": summary_df,
+        "trades": trades_df,
+        "metrics": metrics,
+        "config_used": baseline_config,
+    }
+
+
+def compare_baseline_vs_optimized(
+    symbols: list = None,
+    timeframes: list = None,
+    start_date: str = None,
+    end_date: str = None,
+    candles: int = 50000,
+    verbose: bool = True,
+) -> dict:
+    """Run both baseline and optimized backtests and compare results.
+
+    Bu fonksiyon aynı veri üzerinde:
+    1. Sabit config ile baseline test
+    2. Optimizer ile optimized test
+    çalıştırır ve sonuçları karşılaştırır.
+
+    Args:
+        symbols: Test edilecek semboller
+        timeframes: Test edilecek zaman dilimleri
+        start_date: Başlangıç tarihi "YYYY-MM-DD"
+        end_date: Bitiş tarihi "YYYY-MM-DD"
+        candles: Mum sayısı
+        verbose: Detaylı çıktı
+
+    Returns:
+        dict with comparison results
+    """
+    def log(msg):
+        if verbose:
+            print(msg)
+
+    log("\n" + "=" * 70)
+    log("🔬 BASELINE vs OPTIMIZED KARŞILAŞTIRMA TESTİ")
+    log("=" * 70)
+
+    # Test 1: Baseline (no optimization)
+    log("\n" + "─" * 70)
+    log("TEST 1: BASELINE (Optimizer KAPALI)")
+    log("─" * 70)
+
+    baseline_result = run_baseline_test(
+        symbols=symbols,
+        timeframes=timeframes,
+        start_date=start_date,
+        end_date=end_date,
+        candles=candles,
+        verbose=verbose,
+    )
+
+    # Test 2: Optimized
+    log("\n" + "─" * 70)
+    log("TEST 2: OPTIMIZED (Optimizer AÇIK)")
+    log("─" * 70)
+
+    optimized_result = run_cli_backtest(
+        symbols=symbols,
+        timeframes=timeframes,
+        start_date=start_date,
+        end_date=end_date,
+        candles=candles,
+        optimize=True,
+        walk_forward=True,
+        verbose=verbose,
+    )
+
+    # Compare results
+    baseline_metrics = baseline_result.get('metrics', {})
+    optimized_metrics = optimized_result.get('metrics', {})
+
+    baseline_pnl = baseline_metrics.get('total_pnl', 0)
+    optimized_pnl = optimized_metrics.get('total_pnl', 0)
+
+    baseline_trades = baseline_metrics.get('total_trades', 0)
+    optimized_trades = optimized_metrics.get('total_trades', 0)
+
+    baseline_wr = baseline_metrics.get('win_rate', 0) * 100
+    optimized_wr = optimized_metrics.get('win_rate', 0) * 100
+
+    baseline_er = baseline_metrics.get('expected_r', 0)
+    optimized_er = optimized_metrics.get('expected_r', 0)
+
+    # Calculate differences
+    pnl_diff = optimized_pnl - baseline_pnl
+    pnl_diff_pct = (pnl_diff / abs(baseline_pnl) * 100) if baseline_pnl != 0 else 0
+
+    # Print comparison
+    log("\n" + "=" * 70)
+    log("📊 KARŞILAŞTIRMA SONUÇLARI")
+    log("=" * 70)
+    log(f"{'Metrik':<20} {'Baseline':>15} {'Optimized':>15} {'Fark':>15}")
+    log("─" * 70)
+    log(f"{'Toplam PnL':<20} ${baseline_pnl:>14.2f} ${optimized_pnl:>14.2f} ${pnl_diff:>+14.2f}")
+    log(f"{'Trade Sayısı':<20} {baseline_trades:>15} {optimized_trades:>15} {optimized_trades - baseline_trades:>+15}")
+    log(f"{'Win Rate':<20} {baseline_wr:>14.1f}% {optimized_wr:>14.1f}% {optimized_wr - baseline_wr:>+14.1f}%")
+    log(f"{'E[R]':<20} {baseline_er:>15.3f} {optimized_er:>15.3f} {optimized_er - baseline_er:>+15.3f}")
+    log("=" * 70)
+
+    # Verdict
+    log("\n🎯 KARAR:")
+    if pnl_diff > 0:
+        log(f"   Optimizer ${pnl_diff:.2f} ({pnl_diff_pct:+.1f}%) daha fazla kazandı")
+        if pnl_diff_pct > 20:
+            log("   ✓ Optimizer DEĞER KATIYOR - devam edilebilir")
+        else:
+            log("   ~ Optimizer marjinal fayda sağlıyor - basitleştirme düşünülebilir")
+    elif pnl_diff < 0:
+        log(f"   Baseline ${-pnl_diff:.2f} ({-pnl_diff_pct:.1f}%) daha fazla kazandı")
+        log("   ❌ Optimizer DEĞER KATMIYOR - sabit config daha iyi!")
+    else:
+        log("   Sonuçlar eşit - optimizer gereksiz karmaşıklık ekliyor olabilir")
+
+    log("=" * 70)
+
+    return {
+        "baseline": baseline_result,
+        "optimized": optimized_result,
+        "comparison": {
+            "baseline_pnl": baseline_pnl,
+            "optimized_pnl": optimized_pnl,
+            "pnl_difference": pnl_diff,
+            "pnl_difference_pct": pnl_diff_pct,
+            "baseline_trades": baseline_trades,
+            "optimized_trades": optimized_trades,
+            "baseline_win_rate": baseline_wr,
+            "optimized_win_rate": optimized_wr,
+            "baseline_er": baseline_er,
+            "optimized_er": optimized_er,
+            "optimizer_adds_value": pnl_diff > 0,
+        }
+    }
+
+
 if __name__ == "__main__":
     import argparse
 
