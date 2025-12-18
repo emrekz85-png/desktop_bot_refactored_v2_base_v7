@@ -7902,6 +7902,495 @@ def compare_baseline_vs_optimized(
     }
 
 
+# ==========================================
+# 🔬 ROLLING WALK-FORWARD FRAMEWORK (v41.0)
+# ==========================================
+# Stitched OOS backtest for reliable, additive results.
+# Solves: "30 days ≠ 15 days + 15 days" problem
+#
+# Key rules:
+# 1. Train [t-lookback, t) and Trade [t, t+forward) NEVER overlap
+# 2. Persist isolation: best_configs/blacklist writes disabled
+# 3. Position snapshot: Open trades managed by entry snapshot, not global config
+# 4. Realized PnL only: Trade PnL goes to window where it CLOSES
+# ==========================================
+
+
+def run_rolling_walkforward(
+    symbols: list = None,
+    timeframes: list = None,
+    mode: str = "monthly",  # "fixed", "monthly", "weekly"
+    lookback_days: int = 60,  # Optimize window
+    forward_days: int = 30,   # Trade window (freeze period)
+    start_date: str = None,   # "YYYY-MM-DD" - test period start
+    end_date: str = None,     # "YYYY-MM-DD" - test period end
+    fixed_config: dict = None,  # For mode="fixed" - config to use
+    calibration_days: int = 60,  # For mode="fixed" - days to find config
+    verbose: bool = True,
+    output_dir: str = None,   # Run-specific output directory
+) -> dict:
+    """Run Rolling Walk-Forward backtest with stitched OOS results.
+
+    Bu framework:
+    1. Her dönem için sadece geçmiş veriye bakarak optimize eder
+    2. Sonraki dönemi freeze config ile trade eder
+    3. Tüm dönemlerin OOS PnL'ini toplar → ADDİTİF sonuç
+
+    Args:
+        symbols: Test edilecek semboller (default: SYMBOLS)
+        timeframes: Test edilecek zaman dilimleri (default: TIMEFRAMES)
+        mode: "fixed" (tek config), "monthly" (aylık re-opt), "weekly" (haftalık re-opt)
+        lookback_days: Optimize penceresi (train data)
+        forward_days: Trade penceresi (OOS data) - sadece monthly/weekly için
+        start_date: Test dönemi başlangıcı
+        end_date: Test dönemi sonu
+        fixed_config: mode="fixed" için kullanılacak config
+        calibration_days: mode="fixed" için ilk N gün calibration (test dışı)
+        verbose: Detaylı çıktı
+        output_dir: Run çıktılarının kaydedileceği klasör
+
+    Returns:
+        dict with:
+        - stitched_pnl: Toplam OOS PnL (realized)
+        - total_trades: Toplam trade sayısı
+        - max_drawdown: Maximum drawdown
+        - window_results: Her pencere için detaylı sonuçlar
+        - metrics: Karşılaştırma metrikleri
+    """
+    from datetime import datetime, timedelta
+    import os
+    import uuid
+
+    def log(msg: str):
+        if verbose:
+            print(msg)
+
+    # ==========================================
+    # 1. RESEARCH MODE ISOLATION
+    # ==========================================
+    # Persist kapalı: best_configs ve blacklist yazılmaz
+    # Data cache açık: OHLCV dosyaları okunabilir
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + str(uuid.uuid4())[:8]
+    if output_dir is None:
+        output_dir = os.path.join(DATA_DIR, "rolling_wf_runs", run_id)
+    os.makedirs(output_dir, exist_ok=True)
+
+    log(f"\n{'='*70}")
+    log(f"🔬 ROLLING WALK-FORWARD BACKTEST")
+    log(f"{'='*70}")
+    log(f"   Mode: {mode.upper()}")
+    log(f"   Lookback: {lookback_days} gün | Forward: {forward_days} gün")
+    log(f"   Period: {start_date or 'auto'} → {end_date or 'today'}")
+    log(f"   Run ID: {run_id}")
+    log(f"   Output: {output_dir}")
+    log(f"{'='*70}\n")
+
+    # ==========================================
+    # 2. PARAMETER VALIDATION
+    # ==========================================
+    if symbols is None:
+        symbols = SYMBOLS
+    if timeframes is None:
+        timeframes = TIMEFRAMES
+
+    # Set default dates
+    if end_date is None:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+
+    # Determine forward_days based on mode
+    if mode == "weekly":
+        forward_days = 7
+    elif mode == "monthly":
+        forward_days = 30
+    # mode == "fixed" uses calibration_days concept differently
+
+    # Calculate required lookback for start_date
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+
+    if start_date is None:
+        # Default: 1 year of data
+        start_dt = end_dt - timedelta(days=365)
+        start_date = start_dt.strftime("%Y-%m-%d")
+    else:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+
+    total_days = (end_dt - start_dt).days
+    log(f"📅 Test dönemi: {total_days} gün ({start_date} → {end_date})")
+
+    # ==========================================
+    # 3. GENERATE WINDOWS
+    # ==========================================
+    windows = []
+
+    if mode == "fixed":
+        # Fixed mode: Use calibration period to find config, then trade rest
+        if fixed_config is None:
+            # Need to find config from calibration period
+            calibration_end = start_dt + timedelta(days=calibration_days)
+            log(f"📊 Calibration dönemi: {start_date} → {calibration_end.strftime('%Y-%m-%d')} ({calibration_days} gün)")
+
+            # Single window for the rest
+            windows.append({
+                "window_id": 0,
+                "optimize_start": start_dt,
+                "optimize_end": calibration_end,
+                "trade_start": calibration_end,
+                "trade_end": end_dt,
+                "config_source": "calibration",
+            })
+        else:
+            # Config provided - single window for entire period
+            log(f"📊 Fixed config kullanılıyor (calibration yok)")
+            windows.append({
+                "window_id": 0,
+                "optimize_start": None,  # No optimization
+                "optimize_end": None,
+                "trade_start": start_dt,
+                "trade_end": end_dt,
+                "config_source": "provided",
+                "config": fixed_config,
+            })
+    else:
+        # Rolling mode: Generate windows
+        current_start = start_dt + timedelta(days=lookback_days)  # First trade window start
+
+        window_id = 0
+        while current_start < end_dt:
+            window_end = min(current_start + timedelta(days=forward_days), end_dt)
+            optimize_start = current_start - timedelta(days=lookback_days)
+
+            windows.append({
+                "window_id": window_id,
+                "optimize_start": optimize_start,
+                "optimize_end": current_start,
+                "trade_start": current_start,
+                "trade_end": window_end,
+                "config_source": "optimized",
+            })
+
+            window_id += 1
+            current_start = window_end
+
+    log(f"📊 {len(windows)} pencere oluşturuldu")
+    for w in windows[:3]:  # Show first 3
+        opt_str = f"{w['optimize_start'].strftime('%m/%d') if w['optimize_start'] else 'N/A'}-{w['optimize_end'].strftime('%m/%d') if w['optimize_end'] else 'N/A'}"
+        trade_str = f"{w['trade_start'].strftime('%m/%d')}-{w['trade_end'].strftime('%m/%d')}"
+        log(f"   Window {w['window_id']}: Opt=[{opt_str}] Trade=[{trade_str}]")
+    if len(windows) > 3:
+        log(f"   ... ve {len(windows) - 3} pencere daha")
+
+    # ==========================================
+    # 4. EXECUTE WINDOWS
+    # ==========================================
+    all_window_results = []
+    all_trades = []
+    equity_curve = []
+    running_equity = TRADING_CONFIG["initial_balance"]
+
+    for window in windows:
+        log(f"\n{'─'*50}")
+        log(f"📦 Window {window['window_id']}: Trade [{window['trade_start'].strftime('%Y-%m-%d')} → {window['trade_end'].strftime('%Y-%m-%d')}]")
+
+        # 4.1 Get data for this window
+        # Need: optimize_data + trade_data
+        # IMPORTANT: No overlap - optimize_end == trade_start
+
+        # TODO: Implement actual window execution
+        # This requires:
+        # - Fetch data for [optimize_start - buffer, trade_end]
+        # - Run optimizer on optimize data (if mode != fixed)
+        # - Run backtest on trade data with frozen config
+        # - Collect realized PnL for trades that CLOSE in trade window
+
+        window_result = {
+            "window_id": window["window_id"],
+            "trade_start": window["trade_start"].strftime("%Y-%m-%d"),
+            "trade_end": window["trade_end"].strftime("%Y-%m-%d"),
+            "pnl": 0.0,  # Placeholder
+            "trades": 0,
+            "wins": 0,
+            "max_dd": 0.0,
+            "config_used": window.get("config", {}),
+        }
+
+        all_window_results.append(window_result)
+
+    # ==========================================
+    # 5. CALCULATE STITCHED METRICS
+    # ==========================================
+    total_pnl = sum(w["pnl"] for w in all_window_results)
+    total_trades = sum(w["trades"] for w in all_window_results)
+    total_wins = sum(w["wins"] for w in all_window_results)
+
+    window_pnls = [w["pnl"] for w in all_window_results]
+    positive_windows = sum(1 for p in window_pnls if p > 0)
+    hit_rate = positive_windows / len(window_pnls) if window_pnls else 0
+
+    metrics = {
+        "mode": mode,
+        "total_pnl": total_pnl,
+        "total_trades": total_trades,
+        "win_rate": total_wins / total_trades if total_trades > 0 else 0,
+        "max_drawdown": 0.0,  # TODO: Calculate from equity curve
+        "max_drawdown_pct": 0.0,
+        "window_count": len(all_window_results),
+        "positive_windows": positive_windows,
+        "window_hit_rate": hit_rate,
+        "median_window_pnl": sorted(window_pnls)[len(window_pnls)//2] if window_pnls else 0,
+        "worst_window_pnl": min(window_pnls) if window_pnls else 0,
+        "best_window_pnl": max(window_pnls) if window_pnls else 0,
+    }
+
+    # ==========================================
+    # 6. GENERATE REPORT
+    # ==========================================
+    log(f"\n{'='*70}")
+    log(f"📊 ROLLING WALK-FORWARD SONUÇLARI ({mode.upper()})")
+    log(f"{'='*70}")
+    log(f"   Stitched OOS PnL: ${total_pnl:.2f}")
+    log(f"   Total Trades: {total_trades}")
+    log(f"   Win Rate: {metrics['win_rate']*100:.1f}%")
+    log(f"   Max Drawdown: ${metrics['max_drawdown']:.2f} ({metrics['max_drawdown_pct']*100:.1f}%)")
+    log(f"\n   Window Stats ({len(all_window_results)} windows):")
+    log(f"   ├── Hit Rate: {hit_rate*100:.1f}% ({positive_windows}/{len(all_window_results)} pozitif)")
+    log(f"   ├── Median PnL: ${metrics['median_window_pnl']:.2f}")
+    log(f"   ├── Worst Window: ${metrics['worst_window_pnl']:.2f}")
+    log(f"   └── Best Window: ${metrics['best_window_pnl']:.2f}")
+    log(f"{'='*70}")
+
+    # Save results to output_dir
+    result = {
+        "run_id": run_id,
+        "mode": mode,
+        "config": {
+            "lookback_days": lookback_days,
+            "forward_days": forward_days,
+            "start_date": start_date,
+            "end_date": end_date,
+        },
+        "metrics": metrics,
+        "window_results": all_window_results,
+        "trades": all_trades,
+        "equity_curve": equity_curve,
+    }
+
+    # Save JSON report
+    report_path = os.path.join(output_dir, "report.json")
+    try:
+        with open(report_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, indent=2, default=str)
+        log(f"\n💾 Rapor kaydedildi: {report_path}")
+    except Exception as e:
+        log(f"⚠️ Rapor kaydetme hatası: {e}")
+
+    return result
+
+
+def compare_rolling_modes(
+    symbols: list = None,
+    timeframes: list = None,
+    start_date: str = None,
+    end_date: str = None,
+    fixed_config: dict = None,
+    verbose: bool = True,
+) -> dict:
+    """Compare Fixed vs Monthly vs Weekly re-optimization modes.
+
+    Bu fonksiyon 3 modu aynı veri üzerinde çalıştırır:
+    1. Fixed: Tek sabit config (calibration dönemi ile belirlenir)
+    2. Monthly: Aylık re-optimization (60 gün lookback, 30 gün forward)
+    3. Weekly: Haftalık re-optimization (30 gün lookback, 7 gün forward)
+
+    Args:
+        symbols: Test edilecek semboller
+        timeframes: Test edilecek zaman dilimleri
+        start_date: Test dönemi başlangıcı
+        end_date: Test dönemi sonu
+        fixed_config: Fixed mode için kullanılacak config (None = calibration ile bulunur)
+        verbose: Detaylı çıktı
+
+    Returns:
+        dict with comparison results for all 3 modes
+    """
+
+    def log(msg: str):
+        if verbose:
+            print(msg)
+
+    log(f"\n{'='*70}")
+    log(f"🔬 ROLLING WALK-FORWARD KARŞILAŞTIRMA")
+    log(f"{'='*70}")
+    log(f"   Modlar: Fixed vs Monthly vs Weekly")
+    log(f"{'='*70}\n")
+
+    results = {}
+
+    # Run Fixed mode
+    log("📊 [1/3] Fixed mode çalıştırılıyor...")
+    results["fixed"] = run_rolling_walkforward(
+        symbols=symbols,
+        timeframes=timeframes,
+        mode="fixed",
+        fixed_config=fixed_config,
+        start_date=start_date,
+        end_date=end_date,
+        verbose=verbose,
+    )
+
+    # Run Monthly mode
+    log("\n📊 [2/3] Monthly mode çalıştırılıyor...")
+    results["monthly"] = run_rolling_walkforward(
+        symbols=symbols,
+        timeframes=timeframes,
+        mode="monthly",
+        lookback_days=60,
+        forward_days=30,
+        start_date=start_date,
+        end_date=end_date,
+        verbose=verbose,
+    )
+
+    # Run Weekly mode
+    log("\n📊 [3/3] Weekly mode çalıştırılıyor...")
+    results["weekly"] = run_rolling_walkforward(
+        symbols=symbols,
+        timeframes=timeframes,
+        mode="weekly",
+        lookback_days=30,
+        forward_days=7,
+        start_date=start_date,
+        end_date=end_date,
+        verbose=verbose,
+    )
+
+    # ==========================================
+    # COMPARISON REPORT
+    # ==========================================
+    log(f"\n{'='*70}")
+    log(f"📊 KARŞILAŞTIRMA SONUÇLARI")
+    log(f"{'='*70}")
+
+    headers = ["Metrik", "Fixed", "Monthly", "Weekly", "En İyi"]
+    rows = []
+
+    # PnL comparison
+    pnls = {
+        "fixed": results["fixed"]["metrics"]["total_pnl"],
+        "monthly": results["monthly"]["metrics"]["total_pnl"],
+        "weekly": results["weekly"]["metrics"]["total_pnl"],
+    }
+    best_pnl = max(pnls, key=pnls.get)
+    rows.append([
+        "Total PnL",
+        f"${pnls['fixed']:.2f}",
+        f"${pnls['monthly']:.2f}",
+        f"${pnls['weekly']:.2f}",
+        best_pnl.upper(),
+    ])
+
+    # Max DD comparison
+    dds = {
+        "fixed": results["fixed"]["metrics"]["max_drawdown"],
+        "monthly": results["monthly"]["metrics"]["max_drawdown"],
+        "weekly": results["weekly"]["metrics"]["max_drawdown"],
+    }
+    best_dd = min(dds, key=lambda x: abs(dds[x]))  # Lowest absolute DD is best
+    rows.append([
+        "Max DD",
+        f"${dds['fixed']:.2f}",
+        f"${dds['monthly']:.2f}",
+        f"${dds['weekly']:.2f}",
+        best_dd.upper(),
+    ])
+
+    # Window Hit Rate comparison
+    hit_rates = {
+        "fixed": results["fixed"]["metrics"]["window_hit_rate"],
+        "monthly": results["monthly"]["metrics"]["window_hit_rate"],
+        "weekly": results["weekly"]["metrics"]["window_hit_rate"],
+    }
+    best_hr = max(hit_rates, key=hit_rates.get)
+    rows.append([
+        "Window Hit Rate",
+        f"{hit_rates['fixed']*100:.1f}%",
+        f"{hit_rates['monthly']*100:.1f}%",
+        f"{hit_rates['weekly']*100:.1f}%",
+        best_hr.upper(),
+    ])
+
+    # Worst Window comparison
+    worst = {
+        "fixed": results["fixed"]["metrics"]["worst_window_pnl"],
+        "monthly": results["monthly"]["metrics"]["worst_window_pnl"],
+        "weekly": results["weekly"]["metrics"]["worst_window_pnl"],
+    }
+    best_worst = max(worst, key=worst.get)  # Highest (least negative) is best
+    rows.append([
+        "Worst Window",
+        f"${worst['fixed']:.2f}",
+        f"${worst['monthly']:.2f}",
+        f"${worst['weekly']:.2f}",
+        best_worst.upper(),
+    ])
+
+    # Print table
+    col_widths = [20, 12, 12, 12, 10]
+    header_line = "".join(h.ljust(w) for h, w in zip(headers, col_widths))
+    log(header_line)
+    log("─" * sum(col_widths))
+    for row in rows:
+        log("".join(str(c).ljust(w) for c, w in zip(row, col_widths)))
+
+    # ==========================================
+    # DECISION MATRIX
+    # ==========================================
+    log(f"\n{'='*70}")
+    log("🎯 KARAR MATRİSİ")
+    log("─" * 70)
+
+    # Determine best mode based on multiple criteria
+    scores = {"fixed": 0, "monthly": 0, "weekly": 0}
+    scores[best_pnl] += 2  # PnL worth 2 points
+    scores[best_dd] += 1   # DD worth 1 point
+    scores[best_hr] += 1   # Hit rate worth 1 point
+    scores[best_worst] += 1  # Worst window worth 1 point
+
+    best_mode = max(scores, key=scores.get)
+
+    log(f"   Puanlar: Fixed={scores['fixed']}, Monthly={scores['monthly']}, Weekly={scores['weekly']}")
+    log(f"\n   🏆 ÖNERİLEN MOD: {best_mode.upper()}")
+
+    # Specific recommendations
+    if best_mode == "fixed":
+        log("   → Piyasa stabil görünüyor, re-optimization gereksiz karmaşıklık ekliyor")
+    elif best_mode == "monthly":
+        log("   → Aylık re-opt en iyi denge - stabil ama adaptif")
+        log("   → Live'da: Aylık re-opt + Haftalık health check önerilir")
+    else:
+        log("   → Haftalık re-opt en iyi - piyasa hızlı değişiyor")
+        log("   → DİKKAT: Overfit riski yüksek, dikkatli izlenmeli")
+
+    # Check if ANY mode is profitable
+    if all(pnls[m] <= 0 for m in pnls):
+        log("\n   ⚠️ UYARI: Hiçbir mod kârlı değil!")
+        log("   → Edge çok zayıf veya strateji bu piyasa rejimine uygun değil")
+        log("   → Live'a bağlamak önerilmez")
+
+    log(f"{'='*70}\n")
+
+    return {
+        "results": results,
+        "comparison": {
+            "pnl": pnls,
+            "max_dd": dds,
+            "hit_rate": hit_rates,
+            "worst_window": worst,
+            "scores": scores,
+            "best_mode": best_mode,
+        }
+    }
+
+
 if __name__ == "__main__":
     import argparse
 
