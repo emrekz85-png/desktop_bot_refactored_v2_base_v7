@@ -6754,6 +6754,8 @@ def run_portfolio_backtest(
     dynamic_bl = update_dynamic_blacklist(summary_rows)
     result = {
         "summary": summary_rows,
+        "summary_rows": summary_rows,  # Backward compatibility alias
+        "all_trades": combined_history,  # Raw trade data for metrics calculation
         "best_configs": best_configs,
         "trades_csv": out_trades_csv,
         "summary_csv": out_summary_csv,
@@ -7390,22 +7392,36 @@ def run_cli_backtest(
     summary_df = pd.DataFrame(summary_rows) if summary_rows else pd.DataFrame()
     trades_df = pd.DataFrame(all_trades) if all_trades else pd.DataFrame()
 
-    # Calculate aggregate metrics
+    # Calculate aggregate metrics - group by unique trade ID to avoid counting partial legs
     metrics = {}
     if not trades_df.empty:
         pnl_col = 'pnl' if 'pnl' in trades_df.columns else None
         if pnl_col:
-            metrics['total_pnl'] = trades_df[pnl_col].sum()
-            metrics['total_trades'] = len(trades_df)
-            metrics['winning_trades'] = len(trades_df[trades_df[pnl_col] > 0])
-            metrics['losing_trades'] = len(trades_df[trades_df[pnl_col] < 0])
+            # Group by trade ID to get net PnL per trade (handles partial exits)
+            if 'id' in trades_df.columns:
+                trade_pnls = trades_df.groupby('id')[pnl_col].sum()
+                metrics['total_pnl'] = trade_pnls.sum()
+                metrics['total_trades'] = len(trade_pnls)
+                metrics['winning_trades'] = len(trade_pnls[trade_pnls > 0])
+                metrics['losing_trades'] = len(trade_pnls[trade_pnls < 0])
+            else:
+                metrics['total_pnl'] = trades_df[pnl_col].sum()
+                metrics['total_trades'] = len(trades_df)
+                metrics['winning_trades'] = len(trades_df[trades_df[pnl_col] > 0])
+                metrics['losing_trades'] = len(trades_df[trades_df[pnl_col] < 0])
+
             metrics['win_rate'] = metrics['winning_trades'] / max(1, metrics['total_trades'])
             metrics['avg_pnl'] = metrics['total_pnl'] / max(1, metrics['total_trades'])
 
             # R-Multiple metrics
             if 'r_multiple' in trades_df.columns:
-                metrics['total_r'] = trades_df['r_multiple'].sum()
-                metrics['avg_r'] = trades_df['r_multiple'].mean()
+                if 'id' in trades_df.columns:
+                    trade_r = trades_df.groupby('id')['r_multiple'].sum()
+                    metrics['total_r'] = trade_r.sum()
+                    metrics['avg_r'] = trade_r.mean()
+                else:
+                    metrics['total_r'] = trades_df['r_multiple'].sum()
+                    metrics['avg_r'] = trades_df['r_multiple'].mean()
                 metrics['expected_r'] = metrics['avg_r']
 
     # Print summary
@@ -7646,21 +7662,36 @@ def run_baseline_test(
     summary_df = pd.DataFrame(summary_rows) if summary_rows else pd.DataFrame()
     trades_df = pd.DataFrame(all_trades) if all_trades else pd.DataFrame()
 
-    # Calculate metrics
+    # Calculate metrics - group by unique trade ID to avoid counting partial legs multiple times
     metrics = {}
     if not trades_df.empty:
         pnl_col = 'pnl' if 'pnl' in trades_df.columns else None
         if pnl_col:
-            metrics['total_pnl'] = trades_df[pnl_col].sum()
-            metrics['total_trades'] = len(trades_df)
-            metrics['winning_trades'] = len(trades_df[trades_df[pnl_col] > 0])
-            metrics['losing_trades'] = len(trades_df[trades_df[pnl_col] < 0])
+            # Group by trade ID to get net PnL per trade (handles partial exits)
+            if 'id' in trades_df.columns:
+                trade_pnls = trades_df.groupby('id')[pnl_col].sum()
+                metrics['total_pnl'] = trade_pnls.sum()
+                metrics['total_trades'] = len(trade_pnls)
+                metrics['winning_trades'] = len(trade_pnls[trade_pnls > 0])
+                metrics['losing_trades'] = len(trade_pnls[trade_pnls < 0])
+            else:
+                metrics['total_pnl'] = trades_df[pnl_col].sum()
+                metrics['total_trades'] = len(trades_df)
+                metrics['winning_trades'] = len(trades_df[trades_df[pnl_col] > 0])
+                metrics['losing_trades'] = len(trades_df[trades_df[pnl_col] < 0])
+
             metrics['win_rate'] = metrics['winning_trades'] / max(1, metrics['total_trades'])
             metrics['avg_pnl'] = metrics['total_pnl'] / max(1, metrics['total_trades'])
 
             if 'r_multiple' in trades_df.columns:
-                metrics['total_r'] = trades_df['r_multiple'].sum()
-                metrics['avg_r'] = trades_df['r_multiple'].mean()
+                # R-multiple should also be summed per trade
+                if 'id' in trades_df.columns:
+                    trade_r = trades_df.groupby('id')['r_multiple'].sum()
+                    metrics['total_r'] = trade_r.sum()
+                    metrics['avg_r'] = trade_r.mean()
+                else:
+                    metrics['total_r'] = trades_df['r_multiple'].sum()
+                    metrics['avg_r'] = trades_df['r_multiple'].mean()
                 metrics['expected_r'] = metrics['avg_r']
 
     # Print summary
@@ -7676,11 +7707,49 @@ def run_baseline_test(
         log(f"   E[R]: {metrics.get('expected_r', 0):.3f}")
     log("=" * 60)
 
+    # Anomaly detection - flag trades with unusually high PnL
+    anomalies = []
+    if not trades_df.empty and 'id' in trades_df.columns and 'pnl' in trades_df.columns:
+        # Expected max PnL per trade: risk_amount * RR * 2 (with some buffer)
+        # With 1.75% risk on $2000 = $35, RR=1.5 → max expected ~$105
+        max_expected_pnl = 150  # $150 threshold for anomaly
+
+        trade_pnls = trades_df.groupby('id').agg({
+            'pnl': 'sum',
+            'symbol': 'first',
+            'timeframe': 'first',
+            'entry': 'first',
+            'close_price': 'last',
+            'size': 'first',
+        }).reset_index()
+
+        for _, row in trade_pnls.iterrows():
+            if abs(row['pnl']) > max_expected_pnl:
+                anomalies.append({
+                    'id': row['id'],
+                    'symbol': row['symbol'],
+                    'timeframe': row['timeframe'],
+                    'pnl': row['pnl'],
+                    'entry': row.get('entry'),
+                    'exit': row.get('close_price'),
+                    'size': row.get('size'),
+                })
+
+        if anomalies:
+            log("\n⚠️ ANOMALI TESPİT EDİLDİ - Beklenenden yüksek PnL'li trade'ler:")
+            for a in anomalies:
+                pnl_per_size = abs(a['pnl']) / a['size'] if a['size'] and a['size'] > 0 else 0
+                log(f"   Trade #{a['id']} {a['symbol']}-{a['timeframe']}: "
+                    f"PnL=${a['pnl']:.2f}, Entry={a['entry']}, Exit={a['exit']}, "
+                    f"Size={a['size']:.6f}, PnL/Size=${pnl_per_size:.2f}")
+            log("   ⚠️ Bu trade'leri manuel olarak doğrulayın!")
+
     return {
         "summary": summary_df,
         "trades": trades_df,
         "metrics": metrics,
         "config_used": baseline_config,
+        "anomalies": anomalies,
     }
 
 
