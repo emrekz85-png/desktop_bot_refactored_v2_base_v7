@@ -7662,6 +7662,17 @@ def run_baseline_test(
     summary_df = pd.DataFrame(summary_rows) if summary_rows else pd.DataFrame()
     trades_df = pd.DataFrame(all_trades) if all_trades else pd.DataFrame()
 
+    # Filter out FORCE_CLOSE trades (backtest artifacts, not real results)
+    force_close_count = 0
+    force_close_pnl = 0.0
+    if not trades_df.empty and 'status' in trades_df.columns:
+        force_close_mask = trades_df['status'].str.contains('FORCE', case=False, na=False)
+        force_close_count = force_close_mask.sum()
+        if force_close_count > 0 and 'pnl' in trades_df.columns:
+            force_close_pnl = trades_df.loc[force_close_mask, 'pnl'].sum()
+            log(f"\n⚠️ {force_close_count} FORCE_CLOSE trade çıkarıldı (yapay PnL=${force_close_pnl:.2f})")
+        trades_df = trades_df[~force_close_mask].copy()
+
     # Calculate metrics - group by unique trade ID to avoid counting partial legs multiple times
     metrics = {}
     if not trades_df.empty:
