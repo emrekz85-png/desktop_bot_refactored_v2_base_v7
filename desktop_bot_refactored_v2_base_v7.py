@@ -8311,17 +8311,20 @@ def run_rolling_walkforward(
                         slope_thresh=0.0, use_alphatrend=at_active
                     )
 
-                if sig and sig.get("signal"):
+                # Signal is a tuple: (signal_type, entry, tp, sl, reason)
+                # signal_type is "LONG", "SHORT", or None
+                if sig and len(sig) >= 5 and sig[0] is not None:
+                    signal_type, entry, tp, sl, reason = sig[:5]
                     # Build trade data with config snapshot
                     trade_data = {
                         "symbol": sym,
                         "timeframe": tf,
-                        "type": sig["signal"],
-                        "entry": sig["entry"],
-                        "tp": sig["tp"],
-                        "sl": sig["sl"],
+                        "type": signal_type,
+                        "entry": entry,
+                        "tp": tp,
+                        "sl": sl,
                         "open_time_utc": candle_time,
-                        "setup": sig.get("setup", "Unknown"),
+                        "setup": reason or "Unknown",
                         "config_snapshot": cfg,  # Snapshot at entry time
                     }
                     tm.open_trade(trade_data)
