@@ -8,10 +8,10 @@ Bu script optimizer'ın değer katıp katmadığını test eder.
 from desktop_bot_refactored_v2_base_v7 import compare_baseline_vs_optimized
 
 if __name__ == "__main__":
-    # 30 günlük test (11.01-12.01)
+    # 30 günlük test (11.01-12.01) - 2025
     result = compare_baseline_vs_optimized(
-        start_date='2024-11-01',
-        end_date='2024-12-01',
+        start_date='2025-11-01',
+        end_date='2025-12-01',
     )
 
     # Sonuç özeti
