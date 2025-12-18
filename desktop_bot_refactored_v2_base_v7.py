@@ -8204,10 +8204,25 @@ def run_rolling_walkforward(
         # Build event heap
         heap = []
         ptr = {}
+
+        # Check if timestamps are timezone-aware by converting first one to pd.Timestamp
+        first_stream_key = list(streams_arrays.keys())[0] if streams_arrays else None
+        is_tz_aware = False
+        if first_stream_key:
+            first_ts = pd.Timestamp(streams_arrays[first_stream_key]["timestamps"][0])
+            is_tz_aware = first_ts.tzinfo is not None
+
+        # Convert trade window boundaries
+        if is_tz_aware:
+            trade_start_ts = pd.Timestamp(trade_start_dt).tz_localize('UTC')
+            trade_end_ts = pd.Timestamp(trade_end_dt).tz_localize('UTC')
+        else:
+            trade_start_ts = pd.Timestamp(trade_start_dt)
+            trade_end_ts = pd.Timestamp(trade_end_dt)
+
         for (sym, tf), df in sorted(streams.items()):
             # Find the index where trade window starts
             timestamps = streams_arrays[(sym, tf)]["timestamps"]
-            trade_start_ts = pd.Timestamp(trade_start_dt).tz_localize('UTC') if timestamps[0].tzinfo else pd.Timestamp(trade_start_dt)
 
             # Find first index >= trade_start
             start_idx = 0
@@ -8230,7 +8245,6 @@ def run_rolling_walkforward(
         window_pnl = 0.0
         window_peak_pnl = 0.0
         window_max_dd = 0.0
-        trade_end_ts = pd.Timestamp(trade_end_dt).tz_localize('UTC') if heap and streams_arrays[list(streams.keys())[0]]["timestamps"][0].tzinfo else pd.Timestamp(trade_end_dt)
 
         # Process events
         while heap:
