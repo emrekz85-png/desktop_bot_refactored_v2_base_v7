@@ -7707,12 +7707,17 @@ def run_baseline_test(
         log(f"   E[R]: {metrics.get('expected_r', 0):.3f}")
     log("=" * 60)
 
-    # Anomaly detection - flag trades with unusually high PnL
+    # Anomaly detection - flag individual trades with unusually high PnL
+    # NOTE: This is WARNING ONLY - anomalies are NOT excluded from results
+    # Purpose: Help identify potential bugs in PnL calculation
     anomalies = []
     if not trades_df.empty and 'id' in trades_df.columns and 'pnl' in trades_df.columns:
-        # Expected max PnL per trade: risk_amount * RR * 2 (with some buffer)
-        # With 1.75% risk on $2000 = $35, RR=1.5 → max expected ~$105
-        max_expected_pnl = 150  # $150 threshold for anomaly
+        # Expected max PnL per SINGLE trade:
+        # Risk per trade: 1.75% of $2000 = $35
+        # Max RR in config grid: 2.4
+        # With some buffer for price movement: $35 * 2.4 * 1.5 = $126
+        # Anything above $200 per single trade is suspicious
+        max_expected_pnl_per_trade = 200
 
         trade_pnls = trades_df.groupby('id').agg({
             'pnl': 'sum',
@@ -7724,7 +7729,8 @@ def run_baseline_test(
         }).reset_index()
 
         for _, row in trade_pnls.iterrows():
-            if abs(row['pnl']) > max_expected_pnl:
+            # Flag only if SINGLE trade PnL is abnormally high
+            if abs(row['pnl']) > max_expected_pnl_per_trade:
                 anomalies.append({
                     'id': row['id'],
                     'symbol': row['symbol'],
@@ -7736,13 +7742,14 @@ def run_baseline_test(
                 })
 
         if anomalies:
-            log("\n⚠️ ANOMALI TESPİT EDİLDİ - Beklenenden yüksek PnL'li trade'ler:")
+            log("\n⚠️ ANOMALI UYARISI (sonuçlar ETKİLENMİYOR, sadece bilgi):")
+            log(f"   {len(anomalies)} trade beklenenden yüksek PnL gösteriyor (>${max_expected_pnl_per_trade}/trade)")
             for a in anomalies:
-                pnl_per_size = abs(a['pnl']) / a['size'] if a['size'] and a['size'] > 0 else 0
+                implied_rr = abs(a['pnl']) / 35 if a['pnl'] else 0  # $35 = expected risk
                 log(f"   Trade #{a['id']} {a['symbol']}-{a['timeframe']}: "
-                    f"PnL=${a['pnl']:.2f}, Entry={a['entry']}, Exit={a['exit']}, "
-                    f"Size={a['size']:.6f}, PnL/Size=${pnl_per_size:.2f}")
-            log("   ⚠️ Bu trade'leri manuel olarak doğrulayın!")
+                    f"PnL=${a['pnl']:.2f} (implied RR={implied_rr:.1f}x), "
+                    f"Entry={a['entry']}, Exit={a['exit']}, Size={a['size']:.6f}")
+            log("   💡 Bu trade'leri doğrulamak için CSV'yi inceleyin")
 
     return {
         "summary": summary_df,
