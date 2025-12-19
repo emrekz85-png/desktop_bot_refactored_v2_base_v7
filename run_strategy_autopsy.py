@@ -36,6 +36,8 @@ from core.config import (
     CIRCUIT_BREAKER_CONFIG,
     ROLLING_ER_CONFIG,
     BEST_CONFIGS_FILE,
+    SYMBOLS as CONFIG_SYMBOLS,
+    TIMEFRAMES as CONFIG_TIMEFRAMES,
 )
 
 
@@ -67,9 +69,9 @@ def run_autopsy(
             print(msg)
 
     if symbols is None:
-        symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "AVAXUSDT", "LINKUSDT"]
+        symbols = CONFIG_SYMBOLS  # Use all bot symbols
     if timeframes is None:
-        timeframes = ["15m", "1h", "4h"]
+        timeframes = CONFIG_TIMEFRAMES  # Use all bot timeframes
 
     # Fair mode: disable circuit breakers temporarily
     original_cb_enabled = CIRCUIT_BREAKER_CONFIG.get("enabled", True)
@@ -524,13 +526,14 @@ def main():
     args = parser.parse_args()
 
     if args.quick:
-        symbols = ["BTCUSDT", "ETHUSDT"]
-        timeframes = ["1h", "4h"]
+        symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+        timeframes = ["15m", "1h", "4h"]
         start_date = "2025-10-01"
         end_date = "2025-11-01"
     else:
-        symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "AVAXUSDT", "LINKUSDT"]
-        timeframes = ["15m", "1h", "4h"]
+        # Use all bot symbols and timeframes by default
+        symbols = CONFIG_SYMBOLS  # 11 symbols
+        timeframes = CONFIG_TIMEFRAMES  # 7 timeframes (5m, 15m, 30m, 1h, 4h, 12h, 1d)
         start_date = args.start
         end_date = args.end
 
