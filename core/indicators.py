@@ -29,21 +29,41 @@ def _get_ta():
 def calculate_alphatrend(
     df: pd.DataFrame,
     coeff: float = 1.0,
-    ap: int = 14
+    ap: int = 14,
+    flat_lookback: int = 5,
+    flat_threshold: float = 0.001
 ) -> pd.DataFrame:
     """
-    Calculate AlphaTrend indicator.
+    Calculate AlphaTrend indicator with DUAL lines (buyers vs sellers).
 
     AlphaTrend is a trend-following indicator that combines ATR and MFI/RSI.
-    It provides dynamic support/resistance levels.
+    It provides dynamic support/resistance levels and buyer/seller dominance signals.
+
+    The indicator calculates two lines:
+    - at_buyers (blue line): Tracks buyer strength / support levels
+    - at_sellers (red line): Tracks seller strength / resistance levels
+
+    Trade signals:
+    - LONG: at_buyers > at_sellers (buyers dominant)
+    - SHORT: at_sellers > at_buyers (sellers dominant)
+    - NO TRADE: at_is_flat = True (no flow, sideways market)
 
     Args:
         df: DataFrame with OHLCV data
         coeff: ATR multiplier (default: 1.0)
         ap: ATR/MFI period (default: 14)
+        flat_lookback: Number of candles to check for flat detection (default: 5)
+        flat_threshold: Minimum change ratio to consider non-flat (default: 0.001 = 0.1%)
 
     Returns:
-        DataFrame with 'alphatrend' and 'alphatrend_2' columns added
+        DataFrame with the following columns added:
+        - at_buyers: Buyer strength line (blue)
+        - at_sellers: Seller strength line (red)
+        - at_buyers_dominant: True if buyers > sellers
+        - at_sellers_dominant: True if sellers > buyers
+        - at_is_flat: True if both lines are flat (no flow)
+        - alphatrend: Backward compatible single line (dominant line)
+        - alphatrend_2: alphatrend shifted by 2 (backward compat)
     """
     try:
         import warnings
@@ -53,45 +73,92 @@ def calculate_alphatrend(
             df['volume'] = df['volume'].astype(float)
 
         ta = _get_ta()
+        n = len(df)
 
         # Calculate True Range and ATR
-        df['tr'] = ta.true_range(df['high'], df['low'], df['close'])
-        df['atr_at'] = ta.sma(df['tr'], length=ap)
+        df['_at_tr'] = ta.true_range(df['high'], df['low'], df['close'])
+        df['_at_atr'] = ta.sma(df['_at_tr'], length=ap)
 
         # Use MFI if volume available, otherwise use RSI
         if 'volume' in df.columns and df['volume'].sum() > 0:
-            df['mfi'] = ta.mfi(df['high'], df['low'], df['close'], df['volume'], length=ap)
-            condition = df['mfi'] >= 50
+            df['_at_momentum'] = ta.mfi(df['high'], df['low'], df['close'], df['volume'], length=ap)
         else:
-            df['rsi_at'] = ta.rsi(df['close'], length=ap)
-            condition = df['rsi_at'] >= 50
+            df['_at_momentum'] = ta.rsi(df['close'], length=ap)
 
-        # Calculate upper and lower trends
-        df['upT'] = df['low'] - df['atr_at'] * coeff
-        df['downT'] = df['high'] + df['atr_at'] * coeff
+        # Calculate upper and lower trend levels
+        df['_at_upT'] = df['low'] - df['_at_atr'] * coeff
+        df['_at_downT'] = df['high'] + df['_at_atr'] * coeff
 
-        # AlphaTrend calculation (vectorized where possible, loop for state)
-        alpha_trend = np.zeros(len(df))
-        upT_vals = df['upT'].values
-        downT_vals = df['downT'].values
-        cond_vals = condition.fillna(False).values.astype(bool)
+        # Pre-extract arrays for performance
+        momentum = df['_at_momentum'].fillna(50).values
+        upT = df['_at_upT'].values
+        downT = df['_at_downT'].values
         close_vals = df['close'].values
 
-        alpha_trend[0] = close_vals[0]
+        # Initialize dual lines
+        at_buyers = np.zeros(n)
+        at_sellers = np.zeros(n)
 
-        for i in range(1, len(df)):
-            prev_at = alpha_trend[i - 1]
-            if cond_vals[i]:
-                alpha_trend[i] = prev_at if upT_vals[i] < prev_at else upT_vals[i]
+        # Initial values
+        at_buyers[0] = close_vals[0]
+        at_sellers[0] = close_vals[0]
+
+        for i in range(1, n):
+            # Buyer line (support tracking)
+            # When momentum >= 50, buyers are strong - track higher support
+            if momentum[i] >= 50:
+                at_buyers[i] = max(at_buyers[i - 1], upT[i])
             else:
-                alpha_trend[i] = prev_at if downT_vals[i] > prev_at else downT_vals[i]
+                at_buyers[i] = upT[i]
 
-        df['alphatrend'] = alpha_trend
+            # Seller line (resistance tracking)
+            # When momentum < 50, sellers are strong - track lower resistance
+            if momentum[i] < 50:
+                at_sellers[i] = min(at_sellers[i - 1], downT[i])
+            else:
+                at_sellers[i] = downT[i]
+
+        df['at_buyers'] = at_buyers
+        df['at_sellers'] = at_sellers
+
+        # Dominance signals
+        df['at_buyers_dominant'] = df['at_buyers'] > df['at_sellers']
+        df['at_sellers_dominant'] = df['at_sellers'] > df['at_buyers']
+
+        # Flat/no-flow detection
+        # If both lines have minimal change over lookback period, market is flat
+        df['_at_buyers_change'] = df['at_buyers'].pct_change(flat_lookback).abs()
+        df['_at_sellers_change'] = df['at_sellers'].pct_change(flat_lookback).abs()
+
+        df['at_is_flat'] = (
+            (df['_at_buyers_change'] < flat_threshold) &
+            (df['_at_sellers_change'] < flat_threshold)
+        )
+        # Fill NaN values (first few rows) as False
+        df['at_is_flat'] = df['at_is_flat'].fillna(False)
+
+        # Backward compatibility: single alphatrend line = dominant line
+        df['alphatrend'] = np.where(
+            df['at_buyers_dominant'],
+            df['at_buyers'],
+            df['at_sellers']
+        )
         df['alphatrend_2'] = df['alphatrend'].shift(2)
+
+        # Cleanup temporary columns
+        cleanup_cols = ['_at_tr', '_at_atr', '_at_momentum', '_at_upT', '_at_downT',
+                        '_at_buyers_change', '_at_sellers_change']
+        df.drop(columns=[c for c in cleanup_cols if c in df.columns], inplace=True, errors='ignore')
 
         return df
 
     except Exception:
+        # Fallback: set basic columns to prevent errors
+        df['at_buyers'] = df['close']
+        df['at_sellers'] = df['close']
+        df['at_buyers_dominant'] = False
+        df['at_sellers_dominant'] = False
+        df['at_is_flat'] = True
         df['alphatrend'] = df['close']
         df['alphatrend_2'] = df['close'].shift(2)
         return df

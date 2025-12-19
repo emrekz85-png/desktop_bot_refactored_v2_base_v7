@@ -298,12 +298,55 @@ def check_keltner_bounce_signal(
         is_short = False
 
     # --- AlphaTrend (optional) ---
-    if use_alphatrend and "alphatrend" in df.columns:
-        at_val = float(curr["alphatrend"])
-        if is_long and close < at_val:
-            is_long = False
-        if is_short and close > at_val:
-            is_short = False
+    # Uses dual-line system: at_buyers (blue) vs at_sellers (red)
+    # LONG requires: buyers dominant (blue > red)
+    # SHORT requires: sellers dominant (red > blue)
+    # NO TRADE if: at_is_flat = True (sideways market, no flow)
+    if use_alphatrend:
+        # Check if new dual-line columns are available
+        has_at_dual = all(col in df.columns for col in ['at_buyers', 'at_sellers', 'at_is_flat'])
+
+        if has_at_dual:
+            at_buyers = float(curr.get("at_buyers", 0))
+            at_sellers = float(curr.get("at_sellers", 0))
+            at_is_flat = bool(curr.get("at_is_flat", False))
+
+            # Add debug info for AlphaTrend
+            debug_info["at_buyers"] = at_buyers
+            debug_info["at_sellers"] = at_sellers
+            debug_info["at_is_flat"] = at_is_flat
+            debug_info["at_buyers_dominant"] = at_buyers > at_sellers
+            debug_info["at_sellers_dominant"] = at_sellers > at_buyers
+
+            # FLOW CHECK: If AlphaTrend lines are flat, no trade (sideways market)
+            if at_is_flat:
+                if is_long:
+                    is_long = False
+                    debug_info["long_rejected_flat_at"] = True
+                if is_short:
+                    is_short = False
+                    debug_info["short_rejected_flat_at"] = True
+
+            # LONG filter: Buyers must be dominant (blue > red)
+            if is_long and not (at_buyers > at_sellers):
+                is_long = False
+                debug_info["long_rejected_at_filter"] = True
+
+            # SHORT filter: Sellers must be dominant (red > blue)
+            if is_short and not (at_sellers > at_buyers):
+                is_short = False
+                debug_info["short_rejected_at_filter"] = True
+
+        elif "alphatrend" in df.columns:
+            # Fallback to old single-line system (backward compatibility)
+            at_val = float(curr["alphatrend"])
+            debug_info["alphatrend_legacy"] = at_val
+            if is_long and close < at_val:
+                is_long = False
+                debug_info["long_rejected_at_legacy"] = True
+            if is_short and close > at_val:
+                is_short = False
+                debug_info["short_rejected_at_legacy"] = True
 
     # ---------- LONG ----------
     debug_info["long_candidate"] = is_long

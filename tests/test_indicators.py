@@ -173,6 +173,49 @@ class TestAlphaTrend:
         pct_diff = np.abs(at_vals - close_vals) / close_vals
         assert np.mean(pct_diff) < 0.10
 
+    def test_alphatrend_dual_lines_exist(self, sample_ohlcv_df, trading_module):
+        """AlphaTrend should have at_buyers and at_sellers columns (dual lines)."""
+        df = sample_ohlcv_df.copy()
+        result = trading_module.TradingEngine.calculate_alphatrend(df)
+        assert "at_buyers" in result.columns, "at_buyers column missing"
+        assert "at_sellers" in result.columns, "at_sellers column missing"
+
+    def test_alphatrend_dominance_columns_exist(self, sample_ohlcv_df, trading_module):
+        """AlphaTrend should have at_buyers_dominant and at_sellers_dominant columns."""
+        df = sample_ohlcv_df.copy()
+        result = trading_module.TradingEngine.calculate_alphatrend(df)
+        assert "at_buyers_dominant" in result.columns, "at_buyers_dominant column missing"
+        assert "at_sellers_dominant" in result.columns, "at_sellers_dominant column missing"
+
+    def test_alphatrend_flat_detection_exists(self, sample_ohlcv_df, trading_module):
+        """AlphaTrend should have at_is_flat column for flow detection."""
+        df = sample_ohlcv_df.copy()
+        result = trading_module.TradingEngine.calculate_alphatrend(df)
+        assert "at_is_flat" in result.columns, "at_is_flat column missing"
+
+    def test_alphatrend_dominance_mutually_exclusive(self, sample_ohlcv_df, trading_module):
+        """at_buyers_dominant and at_sellers_dominant should be mutually exclusive."""
+        df = sample_ohlcv_df.copy()
+        result = trading_module.TradingEngine.calculate_alphatrend(df)
+        # Both cannot be True at the same time (one or the other, or equal)
+        both_true = (result["at_buyers_dominant"] & result["at_sellers_dominant"]).sum()
+        assert both_true == 0, "Both dominance flags should not be True simultaneously"
+
+    def test_alphatrend_dual_lines_follow_price(self, sample_ohlcv_df, trading_module):
+        """at_buyers and at_sellers should be within reasonable range of price."""
+        df = sample_ohlcv_df.copy()
+        result = trading_module.TradingEngine.calculate_alphatrend(df)
+        valid_idx = result["at_buyers"].notna() & result["at_sellers"].notna()
+        buyers_vals = result.loc[valid_idx, "at_buyers"].values
+        sellers_vals = result.loc[valid_idx, "at_sellers"].values
+        close_vals = result.loc[valid_idx, "close"].values
+
+        # Both lines should be within 15% of close on average
+        buyers_diff = np.abs(buyers_vals - close_vals) / close_vals
+        sellers_diff = np.abs(sellers_vals - close_vals) / close_vals
+        assert np.mean(buyers_diff) < 0.15, "at_buyers too far from price"
+        assert np.mean(sellers_diff) < 0.15, "at_sellers too far from price"
+
 
 class TestIndicatorEdgeCases:
     """Tests for edge cases in indicator calculations."""
