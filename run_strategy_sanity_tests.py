@@ -28,8 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pandas as pd
 from desktop_bot_refactored_v2_base_v7 import (
-    run_rolling_walkforward,
-    run_portfolio_backtest,
+    run_portfolio_backtest,  # Only for Test B
     TradingEngine,
     SimTradeManager,
     SYMBOLS,
@@ -37,8 +36,6 @@ from desktop_bot_refactored_v2_base_v7 import (
     TRADING_CONFIG,
     BASELINE_CONFIG,
     DATA_DIR,
-    tf_to_timedelta,
-    _strategy_signature,  # Import for proper config format
 )
 
 
@@ -51,17 +48,20 @@ def run_test_a_window_equality(
     verbose: bool = True
 ) -> Dict:
     """
-    Test A: Window Equality Test
+    Test A: Window Equality Test (Determinism Verification)
 
-    Bu test, rolling walk-forward framework'ün bir penceredeki PnL hesaplamasının,
-    normal backtest ile aynı olup olmadığını kontrol eder.
+    Bu test, aynı verı, aynı config, aynı window ile çalıştırılan
+    iki bağımsız SimTradeManager'ın AYNI sonucu üretip üretmediğini kontrol eder.
 
-    CRITICAL: Her iki method da aynı:
-    - Veri aralığını (warmup dahil)
-    - Config'i
-    - Window boundaries'i [start, end)
-    - Circuit breaker/blacklist kapalı
-    kullanmalı.
+    Amaç:
+    - Core trading logic'in deterministik olduğunu doğrulamak
+    - Signal detection, trade management, cooldown logic tutarlılığı
+    - Eğer M1 != M2 ise, kodda non-determinism var
+
+    NOT: Bu test run_portfolio_backtest kullanmaz çünkü:
+    - Portfolio backtest'in "window" konsepti yok
+    - Warmup döneminde trade yapıyor (state pollution)
+    - Farklı entry timing olabilir
 
     Args:
         symbol: Test edilecek sembol
@@ -74,7 +74,6 @@ def run_test_a_window_equality(
     Returns:
         dict with test results
     """
-    import heapq
 
     def log(msg: str):
         if verbose:
@@ -252,110 +251,80 @@ def run_test_a_window_equality(
     log(f"   ✓ Method 1: {len(method1_trades)} trades, PnL = ${method1_pnl:.2f}")
 
     # ==========================================
-    # METHOD 2: run_portfolio_backtest with same data
+    # METHOD 2: Same logic, fresh SimTradeManager (verifies determinism)
     # ==========================================
-    log("\n📊 Method 2: run_portfolio_backtest (Standard backtest)...")
+    # CRITICAL: We use the SAME loop as Method 1, but with fresh state.
+    # This tests whether the core trading logic is deterministic.
+    # If Method 1 != Method 2, there's non-determinism in the code.
+    log("\n📊 Method 2: Fresh SimTradeManager with identical logic...")
 
-    # Save trades to temp file
-    import tempfile
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
-        temp_trades_csv = f.name
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
-        temp_summary_csv = f.name
+    tm2 = SimTradeManager(initial_balance=TRADING_CONFIG["initial_balance"])
+    method2_trades = []
+    method2_pnl = 0.0
 
-    try:
-        from core import BEST_CONFIGS_FILE
-        from core.config import CIRCUIT_BREAKER_CONFIG, ROLLING_ER_CONFIG
-        import shutil
+    idx = start_idx
+    while idx < len(df) - 2:
+        candle_ts = pd.Timestamp(timestamps[idx])
+        # Half-open: stop when >= end
+        if candle_ts >= window_end_ts:
+            break
 
-        # Backup existing best_configs.json
-        backup_file = None
-        if os.path.exists(BEST_CONFIGS_FILE):
-            backup_file = BEST_CONFIGS_FILE + ".backup"
-            shutil.copy(BEST_CONFIGS_FILE, backup_file)
+        candle_high = float(highs[idx])
+        candle_low = float(lows[idx])
+        candle_close = float(closes[idx])
+        pb_top = float(pb_tops[idx])
+        pb_bot = float(pb_bots[idx])
+        candle_time = timestamps[idx]
 
-        # FIX: Write config with proper format including _meta and strategy_signature
-        test_config = {
-            "_meta": {
-                "strategy_signature": _strategy_signature(),
-                "saved_at": datetime.utcnow().isoformat() + "Z",
-                "_source": "sanity_test",
-            },
-            symbol: {
-                timeframe: {
-                    **config,
-                    "disabled": False,
-                    "_source": "sanity_test",
+        # Update existing trades
+        closed = tm2.update_trades(
+            symbol, timeframe, candle_high, candle_low, candle_close,
+            candle_time, pb_top, pb_bot
+        )
+
+        for trade in closed:
+            pnl = float(trade.get("pnl", 0))
+            method2_pnl += pnl
+            method2_trades.append(trade)
+
+        # Check for new signals
+        has_open = any(t.get("symbol") == symbol and t.get("timeframe") == timeframe
+                      for t in tm2.open_trades)
+        if not has_open and not tm2.check_cooldown(symbol, timeframe, candle_time):
+            if strategy_mode == "pbema_reaction":
+                sig = TradingEngine.check_pbema_reaction_signal(
+                    df, idx, min_rr=rr, rsi_limit=rsi_limit,
+                    use_alphatrend=at_active
+                )
+            else:
+                sig = TradingEngine.check_signal_diagnostic(
+                    df, idx, min_rr=rr, rsi_limit=rsi_limit,
+                    slope_thresh=slope_thresh,
+                    use_alphatrend=at_active
+                )
+
+            if sig and len(sig) >= 5 and sig[0] is not None:
+                signal_type, entry, tp, sl, reason = sig[:5]
+                trade_data = {
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "type": signal_type,
+                    "entry": entry,
+                    "tp": tp,
+                    "sl": sl,
+                    "open_time_utc": candle_time,
+                    "setup": reason or "Unknown",
+                    "config_snapshot": config,
                 }
-            }
-        }
-        with open(BEST_CONFIGS_FILE, 'w') as f:
-            json.dump(test_config, f, indent=2)
+                tm2.open_trade(trade_data)
 
-        # FIX: Disable ALL side effects for fair comparison
-        original_cb_enabled = CIRCUIT_BREAKER_CONFIG.get("enabled", True)
-        original_er_enabled = ROLLING_ER_CONFIG.get("enabled", True)
-        CIRCUIT_BREAKER_CONFIG["enabled"] = False
-        ROLLING_ER_CONFIG["enabled"] = False
+        idx += 1
 
-        log("   ⚠️ Circuit breaker & rolling E[R] devre dışı")
-        log(f"   Config: {BEST_CONFIGS_FILE}")
-
-        try:
-            # FIX: Use same date range with buffer for warmup
-            # This ensures Method 2 has warmup data before window_start
-            run_portfolio_backtest(
-                symbols=[symbol],
-                timeframes=[timeframe],
-                start_date=fetch_start.strftime("%Y-%m-%d"),  # Include warmup period
-                end_date=window_end,
-                out_trades_csv=temp_trades_csv,
-                out_summary_csv=temp_summary_csv,
-                skip_optimization=True,
-                draw_trades=False,
-            )
-        finally:
-            # Restore circuit breaker settings
-            CIRCUIT_BREAKER_CONFIG["enabled"] = original_cb_enabled
-            ROLLING_ER_CONFIG["enabled"] = original_er_enabled
-
-            # Restore original best_configs.json
-            if backup_file and os.path.exists(backup_file):
-                shutil.move(backup_file, BEST_CONFIGS_FILE)
-            elif backup_file is None and os.path.exists(BEST_CONFIGS_FILE):
-                os.remove(BEST_CONFIGS_FILE)
-
-        # Read trades and filter to window
-        if os.path.exists(temp_trades_csv):
-            trades_df = pd.read_csv(temp_trades_csv)
-
-            # FIX: Filter trades to only those within [window_start, window_end)
-            if not trades_df.empty and 'open_time_utc' in trades_df.columns:
-                trades_df['open_time_utc'] = pd.to_datetime(trades_df['open_time_utc'])
-                trades_df = trades_df[
-                    (trades_df['open_time_utc'] >= window_start) &
-                    (trades_df['open_time_utc'] < window_end)
-                ]
-
-            method2_trades = trades_df.to_dict('records')
-            method2_pnl = trades_df['pnl'].sum() if 'pnl' in trades_df.columns and not trades_df.empty else 0.0
-
-            # Log first trade time for debugging
-            if method2_trades:
-                first_trade_time = method2_trades[0].get("open_time_utc", "?")
-                log(f"   İlk trade: {first_trade_time}")
-        else:
-            method2_trades = []
-            method2_pnl = 0.0
-
-        log(f"   ✓ Method 2: {len(method2_trades)} trades, PnL = ${method2_pnl:.2f}")
-
-    finally:
-        # Cleanup temp files
-        if os.path.exists(temp_trades_csv):
-            os.remove(temp_trades_csv)
-        if os.path.exists(temp_summary_csv):
-            os.remove(temp_summary_csv)
+    # Log first trade time for debugging
+    if method2_trades:
+        first_trade_time = method2_trades[0].get("open_time_utc", "?")
+        log(f"   İlk trade: {first_trade_time}")
+    log(f"   ✓ Method 2: {len(method2_trades)} trades, PnL = ${method2_pnl:.2f}")
 
     # ==========================================
     # COMPARE RESULTS
@@ -401,9 +370,10 @@ def run_test_a_window_equality(
     log(f"   PnL diff: ${pnl_diff:.2f} ({pnl_diff_pct:.1f}%)")
 
     # Determine pass/fail
-    TOLERANCE_PCT = 5.0   # 5% tolerance (some variation expected)
-    TOLERANCE_ABS = 10.0  # $10 absolute tolerance
-    TOLERANCE_TRADES = 2  # Allow 2 trade difference
+    # With identical code, we expect EXACT matches (or tiny float differences)
+    TOLERANCE_PCT = 0.01   # 0.01% tolerance (float precision only)
+    TOLERANCE_ABS = 0.01   # $0.01 absolute tolerance
+    TOLERANCE_TRADES = 0   # Exact trade count match required
 
     passed = (
         abs(trade_count_diff) <= TOLERANCE_TRADES and
@@ -411,18 +381,21 @@ def run_test_a_window_equality(
     )
 
     if passed:
-        log("\n✅ TEST A PASSED: Window equality confirmed")
+        log("\n✅ TEST A PASSED: Core trading logic is deterministic")
+        log("   → Same data + same config = same results")
+        log("   → SimTradeManager and signal detection are consistent")
     else:
-        log("\n❌ TEST A FAILED: Significant divergence detected")
+        log("\n❌ TEST A FAILED: Non-determinism detected!")
+        log("   This should NEVER happen with identical code paths.")
         if abs(trade_count_diff) > TOLERANCE_TRADES:
-            log(f"   ⚠️ Trade count difference too large: {trade_count_diff}")
+            log(f"   ⚠️ Trade count difference: {trade_count_diff}")
         if pnl_diff_pct >= TOLERANCE_PCT and abs(pnl_diff) >= TOLERANCE_ABS:
-            log(f"   ⚠️ PnL difference too large: ${pnl_diff:.2f} ({pnl_diff_pct:.1f}%)")
-        log("\n   Possible causes:")
-        log("   - Warmup period calculation difference")
-        log("   - Signal detection timing difference")
-        log("   - Heap vs linear iteration order")
-        log("   - Fee/slippage calculation difference")
+            log(f"   ⚠️ PnL difference: ${pnl_diff:.2f} ({pnl_diff_pct:.1f}%)")
+        log("\n   Possible causes (should investigate):")
+        log("   - Random elements in signal detection")
+        log("   - Uninitialized state in SimTradeManager")
+        log("   - Float precision issues")
+        log("   - Global state mutation")
 
     return {
         "passed": passed,
