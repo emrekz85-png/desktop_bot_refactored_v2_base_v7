@@ -226,16 +226,47 @@ def run_test_a_window_equality(
 
     try:
         # Run portfolio backtest for same period
-        run_portfolio_backtest(
-            symbols=[symbol],
-            timeframes=[timeframe],
-            start_date=window_start,
-            end_date=window_end,
-            out_trades_csv=temp_trades_csv,
-            out_summary_csv=temp_summary_csv,
-            skip_optimization=True,  # Use default config
-            draw_trades=False,
-        )
+        # IMPORTANT: Force use the same config by temporarily overwriting best_configs.json
+        # This ensures we compare apples to apples
+        from core import BEST_CONFIGS_FILE
+        import shutil
+
+        # Backup existing best_configs.json
+        backup_file = None
+        if os.path.exists(BEST_CONFIGS_FILE):
+            backup_file = BEST_CONFIGS_FILE + ".backup"
+            shutil.copy(BEST_CONFIGS_FILE, backup_file)
+
+        # Write our test config
+        test_config = {
+            symbol: {
+                timeframe: {
+                    **config,
+                    "disabled": False,  # Force enable
+                    "_source": "sanity_test",
+                }
+            }
+        }
+        with open(BEST_CONFIGS_FILE, 'w') as f:
+            json.dump(test_config, f)
+
+        try:
+            run_portfolio_backtest(
+                symbols=[symbol],
+                timeframes=[timeframe],
+                start_date=window_start,
+                end_date=window_end,
+                out_trades_csv=temp_trades_csv,
+                out_summary_csv=temp_summary_csv,
+                skip_optimization=True,  # Use our forced config
+                draw_trades=False,
+            )
+        finally:
+            # Restore original best_configs.json
+            if backup_file and os.path.exists(backup_file):
+                shutil.move(backup_file, BEST_CONFIGS_FILE)
+            elif backup_file is None and os.path.exists(BEST_CONFIGS_FILE):
+                os.remove(BEST_CONFIGS_FILE)
 
         # Read trades
         if os.path.exists(temp_trades_csv):
