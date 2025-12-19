@@ -7,11 +7,13 @@ Bu script strateji edge'inin nerede öldüğünü analiz eder:
 2. Setup bazlı kayıp analizi
 3. R dağılımı (avg win R, avg loss R, winrate)
 4. Baseline vs Optimizer karşılaştırması
+5. Optimizer decision analysis (why streams were disabled)
 
 Kullanım:
     python run_strategy_autopsy.py                # Full autopsy
     python run_strategy_autopsy.py --quick        # Quick smoke test
     python run_strategy_autopsy.py --baseline-only  # Sadece baseline
+    python run_strategy_autopsy.py --fair         # Disable circuit breaker for fair comparison
 """
 
 import sys
@@ -30,6 +32,11 @@ from desktop_bot_refactored_v2_base_v7 import (
     BASELINE_CONFIG,
     DATA_DIR,
 )
+from core.config import (
+    CIRCUIT_BREAKER_CONFIG,
+    ROLLING_ER_CONFIG,
+    BEST_CONFIGS_FILE,
+)
 
 
 def run_autopsy(
@@ -38,6 +45,7 @@ def run_autopsy(
     start_date: str = "2025-06-01",
     end_date: str = "2025-12-01",
     run_optimizer: bool = True,
+    fair_mode: bool = False,
     verbose: bool = True
 ) -> dict:
     """
@@ -49,6 +57,7 @@ def run_autopsy(
         start_date: Backtest start date
         end_date: Backtest end date
         run_optimizer: Whether to run optimizer comparison
+        fair_mode: Disable circuit breaker for fair comparison
         verbose: Print detailed output
     """
     import tempfile
@@ -62,18 +71,29 @@ def run_autopsy(
     if timeframes is None:
         timeframes = ["15m", "1h", "4h"]
 
+    # Fair mode: disable circuit breakers temporarily
+    original_cb_enabled = CIRCUIT_BREAKER_CONFIG.get("enabled", True)
+    original_er_enabled = ROLLING_ER_CONFIG.get("enabled", True)
+
+    if fair_mode:
+        CIRCUIT_BREAKER_CONFIG["enabled"] = False
+        ROLLING_ER_CONFIG["enabled"] = False
+        log("⚠️ FAIR MODE: Circuit breaker and Rolling E[R] disabled for comparison")
+
     log("\n" + "="*70)
     log("🔬 STRATEGY AUTOPSY - Edge Analysis")
     log("="*70)
     log(f"   Symbols: {symbols}")
     log(f"   Timeframes: {timeframes}")
     log(f"   Period: {start_date} → {end_date}")
+    log(f"   Fair Mode: {'ON' if fair_mode else 'OFF'}")
     log("="*70 + "\n")
 
     results = {
         "baseline": None,
         "optimizer": None,
         "comparison": None,
+        "optimizer_decisions": None,
     }
 
     # ==========================================
@@ -162,7 +182,113 @@ def run_autopsy(
             log
         )
 
+        # ==========================================
+        # PHASE 4: OPTIMIZER DECISIONS ANALYSIS
+        # ==========================================
+        log("\n" + "="*70)
+        log("📊 PHASE 4: OPTIMIZER DECISIONS ANALYSIS")
+        log("="*70)
+
+        results["optimizer_decisions"] = analyze_optimizer_decisions(
+            results["baseline"],
+            results["optimizer"],
+            log
+        )
+
+    # Restore circuit breaker settings
+    if fair_mode:
+        CIRCUIT_BREAKER_CONFIG["enabled"] = original_cb_enabled
+        ROLLING_ER_CONFIG["enabled"] = original_er_enabled
+
     return results
+
+
+def analyze_optimizer_decisions(baseline: dict, optimizer: dict, log) -> dict:
+    """
+    Analyze what the optimizer decided for each stream.
+
+    Identifies:
+    1. Hidden gems: Streams baseline found profitable but optimizer disabled
+    2. Smart cuts: Streams baseline found unprofitable and optimizer disabled
+    3. Bad cuts: Streams optimizer disabled that would have been profitable
+    """
+
+    if not baseline or not optimizer:
+        log("   ⚠️ Yetersiz veri")
+        return {}
+
+    decisions = {
+        "hidden_gems": [],
+        "smart_cuts": [],
+        "bad_cuts": [],
+        "disabled_streams": [],
+    }
+
+    # Load best_configs.json to see optimizer decisions
+    if os.path.exists(BEST_CONFIGS_FILE):
+        try:
+            with open(BEST_CONFIGS_FILE, 'r') as f:
+                best_configs = json.load(f)
+        except:
+            best_configs = {}
+    else:
+        best_configs = {}
+        log("   ⚠️ best_configs.json bulunamadı - optimizer decisions not available")
+        return decisions
+
+    # Get baseline by stream
+    baseline_by_stream = baseline.get("by_stream", {})
+
+    # Check each stream
+    for sym, sym_cfg in best_configs.items():
+        if sym.startswith("_"):  # Skip _meta
+            continue
+
+        if not isinstance(sym_cfg, dict):
+            continue
+
+        for tf, tf_cfg in sym_cfg.items():
+            if not isinstance(tf_cfg, dict):
+                continue
+
+            stream_key = f"{sym}-{tf}"
+            is_disabled = tf_cfg.get("disabled", False)
+            reason = tf_cfg.get("_reason", "unknown")
+
+            if is_disabled:
+                decisions["disabled_streams"].append({
+                    "stream": stream_key,
+                    "reason": reason,
+                })
+
+                # Check baseline performance for this stream
+                baseline_pnl = baseline_by_stream.get(stream_key, {}).get("pnl", 0)
+
+                if baseline_pnl > 20:  # Significant profit threshold
+                    decisions["hidden_gems"].append({
+                        "stream": stream_key,
+                        "baseline_pnl": baseline_pnl,
+                        "reason": reason,
+                    })
+                    log(f"   💎 HIDDEN GEM: {stream_key} (Baseline=${baseline_pnl:.2f}) disabled due to: {reason}")
+                elif baseline_pnl < -10:  # Significant loss threshold
+                    decisions["smart_cuts"].append({
+                        "stream": stream_key,
+                        "baseline_pnl": baseline_pnl,
+                        "reason": reason,
+                    })
+                    log(f"   ✅ SMART CUT: {stream_key} (Baseline=${baseline_pnl:.2f}) correctly disabled")
+
+    # Summary
+    log(f"\n   Disabled Streams: {len(decisions['disabled_streams'])}")
+    log(f"   Hidden Gems (missed profit): {len(decisions['hidden_gems'])}")
+    log(f"   Smart Cuts (avoided loss): {len(decisions['smart_cuts'])}")
+
+    if decisions["hidden_gems"]:
+        total_missed = sum(g["baseline_pnl"] for g in decisions["hidden_gems"])
+        log(f"\n   ⚠️ Total missed profit from hidden gems: ${total_missed:.2f}")
+
+    return decisions
 
 
 def analyze_trades(trades_df: pd.DataFrame, label: str, log) -> dict:
@@ -288,7 +414,24 @@ def analyze_trades(trades_df: pd.DataFrame, label: str, log) -> dict:
             log(f"   ✅ Positive expectancy.")
 
     # ==========================================
-    # 4. WORST PERFORMERS
+    # 4. STREAM-LEVEL BREAKDOWN (for optimizer analysis)
+    # ==========================================
+    result["by_stream"] = {}
+    if 'symbol' in trades_df.columns and 'timeframe' in trades_df.columns:
+        stream_stats = trades_df.groupby(['symbol', 'timeframe']).agg({
+            'pnl': 'sum',
+            'symbol': 'count'  # trade count
+        }).rename(columns={'symbol': 'trades'})
+
+        for (sym, tf), row in stream_stats.iterrows():
+            stream_key = f"{sym}-{tf}"
+            result["by_stream"][stream_key] = {
+                "pnl": row['pnl'],
+                "trades": int(row['trades']),
+            }
+
+    # ==========================================
+    # 5. WORST PERFORMERS
     # ==========================================
     log(f"\n   📊 En Kötü Performans Gösteren Stream'ler:")
     if 'symbol' in trades_df.columns and 'timeframe' in trades_df.columns:
@@ -300,6 +443,12 @@ def analyze_trades(trades_df: pd.DataFrame, label: str, log) -> dict:
         worst = stream_stats.nsmallest(5, 'pnl')
         for (sym, tf), row in worst.iterrows():
             log(f"   ❌ {sym}-{tf}: ${row['pnl']:.2f} ({int(row['trades'])} trades)")
+
+        # Also show best performers
+        log(f"\n   📊 En İyi Performans Gösteren Stream'ler:")
+        best = stream_stats.nlargest(5, 'pnl')
+        for (sym, tf), row in best.iterrows():
+            log(f"   ✅ {sym}-{tf}: ${row['pnl']:.2f} ({int(row['trades'])} trades)")
 
     return result
 
@@ -368,6 +517,7 @@ def main():
     parser = argparse.ArgumentParser(description="Strategy Autopsy")
     parser.add_argument('--quick', action='store_true', help='Quick smoke test')
     parser.add_argument('--baseline-only', action='store_true', help='Only run baseline')
+    parser.add_argument('--fair', action='store_true', help='Disable circuit breaker for fair comparison')
     parser.add_argument('--start', type=str, default='2025-06-01', help='Start date')
     parser.add_argument('--end', type=str, default='2025-12-01', help='End date')
 
@@ -390,6 +540,7 @@ def main():
         start_date=start_date,
         end_date=end_date,
         run_optimizer=not args.baseline_only,
+        fair_mode=args.fair,
     )
 
     # Save results
