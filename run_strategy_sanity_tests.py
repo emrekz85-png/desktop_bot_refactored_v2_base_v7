@@ -250,6 +250,15 @@ def run_test_a_window_equality(
         with open(BEST_CONFIGS_FILE, 'w') as f:
             json.dump(test_config, f)
 
+        # CRITICAL: Temporarily disable circuit breaker for fair comparison
+        # Otherwise Method 2 may stop early while Method 1 runs all trades
+        from core.config import CIRCUIT_BREAKER_CONFIG, ROLLING_ER_CONFIG
+        original_cb_enabled = CIRCUIT_BREAKER_CONFIG.get("enabled", True)
+        original_er_enabled = ROLLING_ER_CONFIG.get("enabled", True)
+        CIRCUIT_BREAKER_CONFIG["enabled"] = False
+        ROLLING_ER_CONFIG["enabled"] = False
+        log("   ⚠️ Circuit breaker temporarily disabled for fair comparison")
+
         try:
             run_portfolio_backtest(
                 symbols=[symbol],
@@ -262,6 +271,10 @@ def run_test_a_window_equality(
                 draw_trades=False,
             )
         finally:
+            # Restore circuit breaker settings
+            CIRCUIT_BREAKER_CONFIG["enabled"] = original_cb_enabled
+            ROLLING_ER_CONFIG["enabled"] = original_er_enabled
+
             # Restore original best_configs.json
             if backup_file and os.path.exists(backup_file):
                 shutil.move(backup_file, BEST_CONFIGS_FILE)
@@ -296,6 +309,32 @@ def run_test_a_window_equality(
     trade_count_diff = len(method1_trades) - len(method2_trades)
     pnl_diff = method1_pnl - method2_pnl
     pnl_diff_pct = abs(pnl_diff / max(abs(method1_pnl), abs(method2_pnl), 1)) * 100
+
+    # Trade-by-trade comparison for debugging
+    if verbose and len(method1_trades) > 0 and len(method2_trades) > 0:
+        log("\n   📋 Trade-by-Trade Comparison (first 5):")
+        min_trades = min(5, len(method1_trades), len(method2_trades))
+        for i in range(min_trades):
+            t1 = method1_trades[i]
+            t2 = method2_trades[i] if i < len(method2_trades) else None
+
+            t1_time = str(t1.get("open_time_utc", "?"))[:16]
+            t1_type = t1.get("type", "?")
+            t1_pnl = float(t1.get("pnl", 0))
+
+            if t2:
+                t2_time = str(t2.get("open_time_utc", "?"))[:16]
+                t2_type = t2.get("type", "?")
+                t2_pnl = float(t2.get("pnl", 0))
+                match = "✓" if abs(t1_pnl - t2_pnl) < 1.0 else "✗"
+                log(f"   {i+1}. M1: {t1_time} {t1_type} ${t1_pnl:+.2f} | M2: {t2_time} {t2_type} ${t2_pnl:+.2f} {match}")
+            else:
+                log(f"   {i+1}. M1: {t1_time} {t1_type} ${t1_pnl:+.2f} | M2: (no trade)")
+
+        if len(method1_trades) > len(method2_trades):
+            log(f"\n   ⚠️ Method 1 has {len(method1_trades) - len(method2_trades)} extra trades")
+        elif len(method2_trades) > len(method1_trades):
+            log(f"\n   ⚠️ Method 2 has {len(method2_trades) - len(method1_trades)} extra trades")
 
     log(f"   Method 1 (Window BT): {len(method1_trades)} trades, ${method1_pnl:.2f}")
     log(f"   Method 2 (Portfolio): {len(method2_trades)} trades, ${method2_pnl:.2f}")
