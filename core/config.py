@@ -443,132 +443,142 @@ BEST_CONFIG_WARNING_FLAGS = {
 # ==========================================
 # Single source of truth for strategy parameters
 # Used by both main file and config_loader for signature generation
+#
+# Available strategies:
+# - "ssl_flow": Trend following with SSL HYBRID baseline (AlphaTrend confirmation, TP at PBEMA)
+# - "keltner_bounce": Mean reversion from Keltner bands (TP at PBEMA)
 DEFAULT_STRATEGY_CONFIG = {
     "rr": 2.0,
-    "rsi": 65,
+    "rsi": 70,
     "slope": 0.4,
-    "at_active": False,
+    "at_active": True,  # AlphaTrend is essential for SSL Flow
     "use_trailing": False,
     "use_dynamic_pbema_tp": True,
+    # Strategy mode: "ssl_flow" (default) or "keltner_bounce"
+    "strategy_mode": "ssl_flow",
+
+    # === SSL Flow Strategy Parameters ===
+    "ssl_touch_tolerance": 0.002,    # 0.2% tolerance for SSL baseline touch detection
+    "ssl_body_tolerance": 0.003,     # 0.3% tolerance for candle body position
+    "min_pbema_distance": 0.004,     # 0.4% minimum distance to PBEMA for valid TP
+    "lookback_candles": 5,           # Candles to check for baseline interaction
+
+    # === Keltner Bounce Strategy Parameters ===
     "hold_n": 4,
-    # LOOSENED PARAMETERS for more trade opportunities:
-    "min_hold_frac": 0.50,           # Was 0.65 - now 50% holding is enough
-    "pb_touch_tolerance": 0.0025,    # Was 0.0018 - more tolerance for Keltner touch
-    "body_tolerance": 0.0025,        # Was 0.0020 - more tolerance for candle body
-    "cloud_keltner_gap_min": 0.0015, # Was 0.0025 - smaller gap required
-    "tp_min_dist_ratio": 0.0008,     # Was 0.0010 - allow closer TPs
-    "tp_max_dist_ratio": 0.040,      # Was 0.035 - allow further TPs
-    "adx_min": 8.0,                  # Was 10.0 - less strict ADX requirement
-    # Strategy mode: "keltner_bounce" (default) or "pbema_reaction"
-    "strategy_mode": "keltner_bounce",
-    # PBEMA reaction strategy parameters (used when strategy_mode="pbema_reaction")
-    "pbema_approach_tolerance": 0.003,  # 0.3% tolerance for PBEMA approach/touch
-    "pbema_frontrun_margin": 0.002,     # 0.2% margin for frontrunning
+    "min_hold_frac": 0.50,           # 50% holding requirement
+    "pb_touch_tolerance": 0.0025,    # Keltner band touch tolerance
+    "body_tolerance": 0.0025,        # Candle body tolerance
+    "cloud_keltner_gap_min": 0.0015, # Min gap between Keltner and PBEMA
+
+    # === Shared Parameters ===
+    "tp_min_dist_ratio": 0.0008,     # Min TP distance ratio
+    "tp_max_dist_ratio": 0.050,      # Max TP distance ratio (increased for SSL Flow)
+    "adx_min": 15.0,                 # ADX minimum (trend strength)
 }
 
 # ==========================================
 # SYMBOL-SPECIFIC PARAMETERS
 # ==========================================
 # Default params per symbol/timeframe - can be overridden by optimizer results
+# All symbols now use ssl_flow strategy by default with at_active=True
 SYMBOL_PARAMS = {
     "BTCUSDT": {
-        "5m": {"rr": 2.4, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "15m": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False},
-        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "1h": {"rr": 2.1, "rsi": 45, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "4h": {"rr": 2.1, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
-        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
+        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "15m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "30m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "1h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "4h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "12h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "1d": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"}
     },
     "ETHUSDT": {
-        "5m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
-        "15m": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False},
-        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "1h": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "4h": {"rr": 2.0, "rsi": 30, "slope": 0.3, "at_active": True, "use_trailing": False},
-        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False},
-        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False}
+        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "15m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "30m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "1h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "4h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "12h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "1d": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"}
     },
     "SOLUSDT": {
-        "5m": {"rr": 1.5, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": True},
-        "15m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
-        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "4h": {"rr": 2.0, "rsi": 30, "slope": 0.3, "at_active": True, "use_trailing": False},
-        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.4, "at_active": True, "use_trailing": False},
-        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.4, "at_active": True, "use_trailing": False}
+        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "15m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "30m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "1h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "4h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "12h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "1d": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"}
     },
     "HYPEUSDT": {
-        "5m": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True},
-        "15m": {"rr": 1.5, "rsi": 55, "slope": 0.2, "at_active": True, "use_trailing": False},
-        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "4h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False},
-        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": True, "use_trailing": False}
+        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "15m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "30m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "1h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "4h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "12h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "1d": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"}
     },
     "LINKUSDT": {
-        "5m": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True},
-        "15m": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False},
-        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
-        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
-        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
+        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "15m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "30m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "1h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "4h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "12h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "1d": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"}
     },
     "BNBUSDT": {
-        "5m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True},
-        "15m": {"rr": 2.4, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "1h": {"rr": 1.2, "rsi": 55, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "4h": {"rr": 1.8, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
-        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
+        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "15m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "30m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "1h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "4h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "12h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "1d": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"}
     },
     "XRPUSDT": {
-        "5m": {"rr": 2.4, "rsi": 35, "slope": 0.4, "at_active": False, "use_trailing": False},
-        "15m": {"rr": 2.4, "rsi": 45, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
-        "4h": {"rr": 1.2, "rsi": 45, "slope": 0.2, "at_active": True, "use_trailing": False},
-        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
-        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
+        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "15m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "30m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "1h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "4h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "12h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "1d": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"}
     },
     "LTCUSDT": {
-        "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True},
-        "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False},
-        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "1h": {"rr": 1.8, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
-        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
-        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
+        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "15m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "30m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "1h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "4h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "12h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "1d": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"}
     },
     "DOGEUSDT": {
-        "5m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": True},
-        "15m": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": True, "use_trailing": False},
-        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
-        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
-        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
+        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "15m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "30m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "1h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "4h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "12h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "1d": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"}
     },
     "SUIUSDT": {
-        "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True},
-        "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False},
-        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "1h": {"rr": 1.2, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
-        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
-        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
+        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "15m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "30m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "1h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "4h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "12h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "1d": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"}
     },
     "FARTCOINUSDT": {
-        # New memecoin - let optimizer find best params
-        "5m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": True},
-        "15m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": True, "use_trailing": False},
-        "30m": {"rr": 1.5, "rsi": 40, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "1h": {"rr": 1.5, "rsi": 35, "slope": 0.2, "at_active": False, "use_trailing": False},
-        "4h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
-        "12h": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False},
-        "1d": {"rr": 2.0, "rsi": 35, "slope": 0.3, "at_active": False, "use_trailing": False}
+        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "15m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "30m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "1h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "4h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "12h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
+        "1d": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"}
     }
 }

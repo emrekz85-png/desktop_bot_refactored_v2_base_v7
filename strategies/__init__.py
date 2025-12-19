@@ -5,18 +5,18 @@
 # Each strategy is in its own module for modularity and maintainability.
 #
 # Available strategies:
-# - keltner_bounce: Mean reversion using Keltner bands with PBEMA cloud target
-# - pbema_reaction: Trade when price approaches/touches PBEMA cloud
+# - ssl_flow: Trend following with SSL HYBRID baseline (TP at PBEMA)
+# - keltner_bounce: Mean reversion using Keltner bands (TP at PBEMA)
 
 from .base import SignalResult, STRATEGY_MODES
 from .keltner_bounce import check_keltner_bounce_signal
-from .pbema_reaction import check_pbema_reaction_signal
+from .ssl_flow import check_ssl_flow_signal
 from .router import check_signal
 
 # Strategy registry for dynamic lookup
 STRATEGY_REGISTRY = {
+    "ssl_flow": check_ssl_flow_signal,
     "keltner_bounce": check_keltner_bounce_signal,
-    "pbema_reaction": check_pbema_reaction_signal,
 }
 
 __all__ = [
@@ -24,8 +24,8 @@ __all__ = [
     "SignalResult",
     "STRATEGY_MODES",
     # Strategy functions
+    "check_ssl_flow_signal",
     "check_keltner_bounce_signal",
-    "check_pbema_reaction_signal",
     # Router
     "check_signal",
     # Registry

@@ -338,12 +338,9 @@ update_dynamic_blacklist = core_update_dynamic_blacklist
 is_stream_blacklisted = core_is_stream_blacklisted
 
 
-# PBEMA_Reaction strategy blacklist: Streams where PBEMA_Reaction performs poorly
-# Optimizer will skip pbema_reaction configs for these streams
-# Based on backtest results: HYPEUSDT-15m loses heavily with PBEMA_Reaction (-369.91)
-PBEMA_REACTION_BLACKLIST = {
-    ("HYPEUSDT", "15m"): True,
-}
+# Strategy blacklist placeholder (not currently used)
+# Previously used for PBEMA_Reaction, now deprecated
+STRATEGY_BLACKLIST = {}
 
 # Note: SYMBOL_PARAMS and DEFAULT_STRATEGY_CONFIG are now imported from core.config
 # for single source of truth (signature consistency across save/load)
@@ -578,7 +575,7 @@ def _generate_candidate_configs():
     - Slope taramak sadece zaman kaybı
 
     Sadece Keltner Bounce stratejisi kullanılıyor.
-    PBEMA_Reaction stratejisi devre dışı bırakıldı (backtest sonuçları negatif).
+    SSL_Flow stratejisi varsayilan olarak aktif. Keltner Bounce alternatif strateji.
     """
 
     rr_vals = np.arange(1.2, 2.6, 0.3)
@@ -586,12 +583,12 @@ def _generate_candidate_configs():
     at_vals = [False, True]
     # Include both dynamic TP options to ensure optimizer matches what live will use
     dyn_tp_vals = [True, False]
-    # PBEMA_Reaction devre dışı bırakıldı - sadece Keltner Bounce kullanılıyor
-    strategy_modes = ["keltner_bounce"]
+    # SSL_Flow varsayilan strateji, Keltner Bounce alternatif
+    strategy_modes = ["ssl_flow", "keltner_bounce"]
 
     candidates = []
 
-    # Keltner bounce strategy configs
+    # SSL Flow strategy configs (varsayilan strateji)
     for rr, rsi, at_active, dyn_tp in itertools.product(
         rr_vals, rsi_vals, at_vals, dyn_tp_vals
     ):
@@ -599,44 +596,15 @@ def _generate_candidate_configs():
             {
                 "rr": round(float(rr), 2),
                 "rsi": int(rsi),
-                "slope": 0.5,  # Sabit değer - artık kullanılmıyor
+                "slope": 0.5,  # Sabit deger - artik kullanilmiyor
                 "at_active": bool(at_active),
                 "use_trailing": False,
                 "use_dynamic_pbema_tp": bool(dyn_tp),
-                "strategy_mode": "keltner_bounce",
+                "strategy_mode": "ssl_flow",
             }
         )
 
-    # PBEMA_Reaction stratejisi devre dışı bırakıldı (backtest sonuçları negatif)
-    # Eski PBEMA config üretimi kaldırıldı
-
-    # Birkaç agresif trailing seçeneği ekle (sadece keltner bounce için)
-    trailing_extras = []
-    keltner_configs = [c for c in candidates if c.get("strategy_mode") == "keltner_bounce"]
-    for base in keltner_configs[:: max(1, len(keltner_configs) // 20)]:  # toplamı şişirmeden örnekle
-        cfg = dict(base)
-        cfg["use_trailing"] = True
-        trailing_extras.append(cfg)
-
-    return candidates + trailing_extras
-
-
-def _generate_quick_candidate_configs():
-    """Create a minimal config grid for quick testing (~12 configs instead of ~120).
-
-    Used when quick_mode=True for faster backtest iterations.
-    Covers key combinations without exhaustive search.
-    Only Keltner Bounce strategy is tested (PBEMA_Reaction devre dışı).
-    """
-    # Sadece en önemli RR ve RSI değerlerini kullan
-    rr_vals = [1.2, 1.8, 2.4]  # 3 değer (vs 5)
-    rsi_vals = [35, 55]        # 2 değer (vs 5)
-    at_vals = [False, True]    # 2 değer
-    dyn_tp_vals = [True]       # Sadece 1 değer (dinamik TP genelde daha iyi)
-
-    candidates = []
-
-    # Keltner bounce strategy configs
+    # Keltner Bounce strategy configs (alternatif strateji)
     for rr, rsi, at_active, dyn_tp in itertools.product(
         rr_vals, rsi_vals, at_vals, dyn_tp_vals
     ):
@@ -652,14 +620,70 @@ def _generate_quick_candidate_configs():
             }
         )
 
-    # PBEMA_Reaction stratejisi devre dışı bırakıldı (backtest sonuçları negatif)
+    # Birkac agresif trailing secenegi ekle
+    trailing_extras = []
+    ssl_configs = [c for c in candidates if c.get("strategy_mode") == "ssl_flow"]
+    for base in ssl_configs[:: max(1, len(ssl_configs) // 20)]:
+        cfg = dict(base)
+        cfg["use_trailing"] = True
+        trailing_extras.append(cfg)
 
-    # 1 trailing config ekle (sadece keltner bounce için)
+    return candidates + trailing_extras
+
+
+def _generate_quick_candidate_configs():
+    """Create a minimal config grid for quick testing (~24 configs instead of ~120).
+
+    Used when quick_mode=True for faster backtest iterations.
+    Covers key combinations without exhaustive search.
+    Both SSL_Flow and Keltner_Bounce strategies are tested.
+    """
+    # Sadece en önemli RR ve RSI değerlerini kullan
+    rr_vals = [1.2, 1.8, 2.4]  # 3 değer (vs 5)
+    rsi_vals = [35, 55]        # 2 değer (vs 5)
+    at_vals = [False, True]    # 2 değer
+    dyn_tp_vals = [True]       # Sadece 1 değer (dinamik TP genelde daha iyi)
+
+    candidates = []
+
+    # SSL Flow strategy configs (varsayilan strateji)
+    for rr, rsi, at_active, dyn_tp in itertools.product(
+        rr_vals, rsi_vals, at_vals, dyn_tp_vals
+    ):
+        candidates.append(
+            {
+                "rr": round(float(rr), 2),
+                "rsi": int(rsi),
+                "slope": 0.5,
+                "at_active": bool(at_active),
+                "use_trailing": False,
+                "use_dynamic_pbema_tp": bool(dyn_tp),
+                "strategy_mode": "ssl_flow",
+            }
+        )
+
+    # Keltner bounce strategy configs (alternatif)
+    for rr, rsi, at_active, dyn_tp in itertools.product(
+        rr_vals, rsi_vals, at_vals, dyn_tp_vals
+    ):
+        candidates.append(
+            {
+                "rr": round(float(rr), 2),
+                "rsi": int(rsi),
+                "slope": 0.5,
+                "at_active": bool(at_active),
+                "use_trailing": False,
+                "use_dynamic_pbema_tp": bool(dyn_tp),
+                "strategy_mode": "keltner_bounce",
+            }
+        )
+
+    # 1 trailing config ekle
     trailing_cfg = dict(candidates[0])
     trailing_cfg["use_trailing"] = True
     candidates.append(trailing_cfg)
 
-    return candidates  # ~19 config (vs ~120)
+    return candidates  # ~25 config (vs ~120)
 
 
 def _get_min_trades_for_timeframe(tf: str, num_candles: int = 20000) -> int:
@@ -973,9 +997,9 @@ def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) 
     closes = df["close"].values
     opens = df["open"].values
 
-    # PBEMA_Reaction için EMA150, Base için EMA200 kullan
-    strategy_mode = config.get("strategy_mode", "keltner_bounce")
-    if strategy_mode == "pbema_reaction":
+    # SSL Flow ve Keltner Bounce icin EMA200 kullan
+    strategy_mode = config.get("strategy_mode", "ssl_flow")
+    if strategy_mode == "ssl_flow_DISABLED":  # EMA150 artik kullanilmiyor
         pb_top_col = "pb_ema_top_150"
         pb_bot_col = "pb_ema_bot_150"
     else:
@@ -998,7 +1022,7 @@ def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) 
             pb_bot=float(pb_bots[i]),
         )
 
-        # Use wrapper function to support both keltner_bounce and pbema_reaction strategies
+        # Use wrapper function to support both ssl_flow and keltner_bounce strategies
         s_type, s_entry, s_tp, s_sl, s_reason = TradingEngine.check_signal(
             df,
             config=config,
@@ -1150,10 +1174,10 @@ def _optimize_backtest_configs(
         best_trades = 0
         best_expected_r = 0.0  # E[R] değeri
 
-        # PBEMA_Reaction blacklist: Bu stream için PBEMA_Reaction config'lerini filtrele
-        if PBEMA_REACTION_BLACKLIST.get((sym, tf), False):
-            stream_candidates = [c for c in candidates if c.get("strategy_mode") != "pbema_reaction"]
-            log(f"[OPT][{sym}-{tf}] PBEMA_Reaction blacklist'te - sadece keltner_bounce test edilecek")
+        # Strategy blacklist check (currently disabled)
+        if STRATEGY_BLACKLIST.get((sym, tf), False):
+            stream_candidates = candidates
+            log(f"[OPT][{sym}-{tf}] Blacklist'te - devam ediliyor")
         else:
             stream_candidates = candidates
 
@@ -1556,8 +1580,8 @@ class TradeManager:
         # Her strateji kendi wallet balance'ına sahip, böylece birbirlerini etkilemezler
         initial_bal = TRADING_CONFIG["initial_balance"]
         self.strategy_wallets = {
+            "ssl_flow": {"wallet_balance": initial_bal, "locked_margin": 0.0, "total_pnl": 0.0},
             "keltner_bounce": {"wallet_balance": initial_bal, "locked_margin": 0.0, "total_pnl": 0.0},
-            "pbema_reaction": {"wallet_balance": initial_bal, "locked_margin": 0.0, "total_pnl": 0.0},
         }
         # -----------------------------
 
@@ -2037,7 +2061,7 @@ class TradeManager:
             self.open_trades.append(new_trade)
             new_portfolio_risk_pct = self._calculate_strategy_portfolio_risk(strategy_mode)
 
-            strategy_short = "PR" if strategy_mode == "pbema_reaction" else "KB"
+            strategy_short = "SF" if strategy_mode == "ssl_flow" else "KB"
             print(
                 f"📈 [{strategy_short}] İşlem Açıldı | Entry: {real_entry:.4f}, SL: {sl_price:.4f}, "
                 f"Size: {position_size:.6f}, Notional: ${position_notional:.2f}, "
@@ -2540,7 +2564,7 @@ class TradeManager:
             initial_bal = TRADING_CONFIG["initial_balance"]
             self.strategy_wallets = {
                 "keltner_bounce": {"wallet_balance": initial_bal, "locked_margin": 0.0, "total_pnl": 0.0},
-                "pbema_reaction": {"wallet_balance": initial_bal, "locked_margin": 0.0, "total_pnl": 0.0},
+                "ssl_flow": {"wallet_balance": initial_bal, "locked_margin": 0.0, "total_pnl": 0.0},
             }
 
             if os.path.exists(CSV_FILE):
@@ -2599,12 +2623,12 @@ class TradeManager:
                                 f"Toplam Varlık (Equity): ${total_equity:.2f} | "
                                 f"Kullanılabilir Bakiye: ${self.wallet_balance:.2f} | "
                                 f"Kilitli Marj: ${self.locked_margin:.2f}")
+                            sf_wallet = self.strategy_wallets["ssl_flow"]
                             kb_wallet = self.strategy_wallets["keltner_bounce"]
-                            pr_wallet = self.strategy_wallets["pbema_reaction"]
+                            print(
+                                f"   [SF] Bakiye: ${sf_wallet['wallet_balance']:.2f} | PnL: ${sf_wallet['total_pnl']:+.2f}")
                             print(
                                 f"   [KB] Bakiye: ${kb_wallet['wallet_balance']:.2f} | PnL: ${kb_wallet['total_pnl']:+.2f}")
-                            print(
-                                f"   [PR] Bakiye: ${pr_wallet['wallet_balance']:.2f} | PnL: ${pr_wallet['total_pnl']:+.2f}")
 
                 except Exception as e:
                     print(f"YÜKLEME HATASI: {e}")
@@ -3352,8 +3376,8 @@ class LiveBotWorker(QThread):
                                 strategy_mode = config.get("strategy_mode", "keltner_bounce")
 
                                 # --- Trade Manager Güncellemesi ---
-                                # PBEMA_Reaction için EMA150, Base için EMA200 kullan
-                                if strategy_mode == "pbema_reaction":
+                                # SSL Flow ve Keltner Bounce icin EMA200 kullan
+                                if strategy_mode == "ssl_flow_DISABLED":  # EMA150 artik kullanilmiyor
                                     pb_top_col = 'pb_ema_top_150'
                                     pb_bot_col = 'pb_ema_bot_150'
                                 else:
@@ -5974,10 +5998,10 @@ def run_portfolio_backtest(
     # PERFORMANCE: Pre-extract NumPy arrays for all streams to avoid df.iloc[i] overhead
     streams_arrays = {}
     for (sym, tf), df in streams.items():
-        # PBEMA_Reaction için EMA150, Base için EMA200 kullan
+        # SSL Flow ve Keltner Bounce icin EMA200 kullan
         stream_config = best_configs.get((sym, tf)) or load_optimized_config(sym, tf)
-        strategy_mode = stream_config.get("strategy_mode", "keltner_bounce")
-        if strategy_mode == "pbema_reaction":
+        strategy_mode = stream_config.get("strategy_mode", "ssl_flow")
+        if strategy_mode == "ssl_flow_DISABLED":  # EMA150 artik kullanilmiyor
             pb_top_col = "pb_ema_top_150"
             pb_bot_col = "pb_ema_bot_150"
         else:
@@ -6013,14 +6037,14 @@ def run_portfolio_backtest(
         )
 
     # ==========================================
-    # İKİ AYRI PORTFÖY: Base ve PBEMA_Reaction stratejileri birbirini etkilemez
+    # IKI AYRI PORTFOY: SSL_Flow ve Keltner_Bounce stratejileri birbirini etkilemez
     # ==========================================
     # Her strateji kendi wallet balance'ına sahip, böylece:
     # - Bir stratejinin kaybı diğerinin pozisyon büyüklüğünü etkilemez
     # - Her strateji bağımsız değerlendirilebilir
     initial_balance = TRADING_CONFIG["initial_balance"]
-    tm_base = SimTradeManager(initial_balance=initial_balance)    # Keltner Bounce için
-    tm_pbema = SimTradeManager(initial_balance=initial_balance)   # PBEMA_Reaction için
+    tm_ssl = SimTradeManager(initial_balance=initial_balance)     # SSL Flow icin
+    tm_kb = SimTradeManager(initial_balance=initial_balance)      # Keltner Bounce icin
 
     # Stream -> strategy mapping (hangi stream hangi TM'yi kullanacak)
     stream_strategy_map = {}
@@ -6032,7 +6056,7 @@ def run_portfolio_backtest(
     def get_tm_for_stream(sym, tf):
         """Stream'in stratejisine göre doğru TradeManager'ı döndür"""
         strategy = stream_strategy_map.get((sym, tf), "keltner_bounce")
-        return tm_pbema if strategy == "pbema_reaction" else tm_base
+        return tm_ssl if strategy == "ssl_flow" else tm_kb
 
     # ==========================================
     # CIRCUIT BREAKER & ROLLING E[R] TRACKING
@@ -6292,7 +6316,7 @@ def run_portfolio_backtest(
         rr, rsi, slope = config["rr"], config["rsi"], config["slope"]
         use_at = config.get("at_active", False)
 
-        # Sinyal kontrolü (wrapper ile - keltner_bounce veya pbema_reaction destekler)
+        # Sinyal kontrolu (wrapper ile - ssl_flow veya keltner_bounce destekler)
         s_type, s_entry, s_tp, s_sl, s_reason = TradingEngine.check_signal(
             df,
             config=config,
@@ -6440,11 +6464,11 @@ def run_portfolio_backtest(
         tm.open_trades.clear()
         log(f"[BACKTEST] {tm_name} açık pozisyonlar kapatıldı. Bakiye: ${tm.wallet_balance:.2f}", category="summary")
 
-    force_close_open_trades(tm_base, "Base")
-    force_close_open_trades(tm_pbema, "PBEMA_Reaction")
+    force_close_open_trades(tm_ssl, "SSL_Flow")
+    force_close_open_trades(tm_kb, "Keltner_Bounce")
 
-    # Her iki TM'nin history'sini birleştir
-    combined_history = tm_base.history + tm_pbema.history
+    # Her iki TM'nin history'sini birlestir
+    combined_history = tm_ssl.history + tm_kb.history
 
     total_closed_legs = len(combined_history)
     unique_trades = len({t.get("id") for t in combined_history}) if combined_history else 0
@@ -6627,7 +6651,7 @@ def run_portfolio_backtest(
                 net_pnl = cfg.get('_net_pnl', 0)
                 trades = cfg.get('_trades', 0)
                 strategy_mode = cfg.get('strategy_mode', 'keltner_bounce')
-                strategy_tag = "KB" if strategy_mode == "keltner_bounce" else "PR"  # KB=Keltner Bounce, PR=PBEMA Reaction
+                strategy_tag = "SF" if strategy_mode == "ssl_flow" else "KB"  # SF=SSL Flow, KB=Keltner Bounce
                 log(
                     f"  - {sym}-{tf} [{strategy_tag}]: RR={cfg.get('rr', '-')}, RSI={cfg.get('rsi', '-')}, "
                     f"AT={'Açık' if cfg.get('at_active') else 'Kapalı'}, Trailing={cfg.get('use_trailing', False)} | "
@@ -6721,18 +6745,18 @@ def run_portfolio_backtest(
         )
 
     # Her strateji için ayrı portföy sonuçları
-    combined_wallet = tm_base.wallet_balance + tm_pbema.wallet_balance
-    combined_pnl = tm_base.total_pnl + tm_pbema.total_pnl
+    combined_wallet = tm_ssl.wallet_balance + tm_kb.wallet_balance
+    combined_pnl = tm_ssl.total_pnl + tm_kb.total_pnl
     log(
         f"\n📊 PORTFÖY SONUÇLARI (Ayrı Cüzdanlar):",
         category="summary",
     )
     log(
-        f"  [Base] Wallet: ${tm_base.wallet_balance:.2f} | PnL: ${tm_base.total_pnl:+.2f}",
+        f"  [SSL_Flow] Wallet: ${tm_ssl.wallet_balance:.2f} | PnL: ${tm_ssl.total_pnl:+.2f}",
         category="summary",
     )
     log(
-        f"  [PBEMA_Reaction] Wallet: ${tm_pbema.wallet_balance:.2f} | PnL: ${tm_pbema.total_pnl:+.2f}",
+        f"  [Keltner_Bounce] Wallet: ${tm_kb.wallet_balance:.2f} | PnL: ${tm_kb.total_pnl:+.2f}",
         category="summary",
     )
     log(
@@ -8183,13 +8207,10 @@ def run_rolling_walkforward(
         streams_arrays = {}
         for (sym, tf), df in streams.items():
             cfg = config_map.get((sym, tf), {})
-            strategy_mode = cfg.get("strategy_mode", "keltner_bounce")
-            if strategy_mode == "pbema_reaction":
-                pb_top_col = "pb_ema_top_150"
-                pb_bot_col = "pb_ema_bot_150"
-            else:
-                pb_top_col = "pb_ema_top"
-                pb_bot_col = "pb_ema_bot"
+            strategy_mode = cfg.get("strategy_mode", "ssl_flow")
+            # Her iki strateji icin de EMA200 kullan
+            pb_top_col = "pb_ema_top"
+            pb_bot_col = "pb_ema_bot"
 
             streams_arrays[(sym, tf)] = {
                 "timestamps": pd.to_datetime(df["timestamp"]).values,
@@ -8300,8 +8321,8 @@ def run_rolling_walkforward(
                 rsi_limit = cfg.get("rsi", 60)
                 at_active = cfg.get("at_active", False)
 
-                if strategy_mode == "pbema_reaction":
-                    sig = TradingEngine.check_pbema_reaction_signal(
+                if strategy_mode == "ssl_flow":
+                    sig = TradingEngine.check_ssl_flow_signal(
                         df, idx, min_rr=rr, rsi_limit=rsi_limit,
                         use_alphatrend=at_active
                     )

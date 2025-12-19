@@ -3,7 +3,7 @@
 #
 # This module provides:
 # - TradingEngine class with API data fetching (with retry logic)
-# - Signal detection for multiple strategies (keltner_bounce, pbema_reaction)
+# - Signal detection for multiple strategies (ssl_flow, keltner_bounce)
 # - Indicator calculation wrappers
 #
 # Signal detection is delegated to the strategies/ module for modularity.
@@ -34,7 +34,7 @@ from .telegram import send_telegram as _core_send_telegram
 # Import strategy signal detection from strategies module
 from strategies import (
     check_keltner_bounce_signal,
-    check_pbema_reaction_signal,
+    check_ssl_flow_signal,
     check_signal as strategies_check_signal,
 )
 
@@ -46,7 +46,7 @@ class TradingEngine:
     - Binance API data fetching with retry logic
     - Parallel data fetching for multiple symbols/timeframes
     - Technical indicator calculations
-    - Signal detection for keltner_bounce and pbema_reaction strategies
+    - Signal detection for ssl_flow and keltner_bounce strategies
 
     Note: Plotting/GUI-dependent methods (create_chart_data_json, debug_plot_backtest_trade)
     are implemented as standalone functions in the main application file.
@@ -348,7 +348,7 @@ class TradingEngine:
             return_debug: bool = False,
     ) -> Tuple:
         """
-        Base Setup signal detection for LONG / SHORT.
+        Keltner Bounce signal detection for LONG / SHORT.
 
         Delegates to strategies.keltner_bounce.check_keltner_bounce_signal.
 
@@ -382,47 +382,49 @@ class TradingEngine:
         )
 
     @staticmethod
-    def check_pbema_reaction_signal(
+    def check_ssl_flow_signal(
             df: pd.DataFrame,
             index: int = -2,
             min_rr: float = 2.0,
-            rsi_limit: float = 60.0,
-            slope_thresh: float = 0.5,
-            use_alphatrend: bool = False,
-            pbema_approach_tolerance: float = 0.003,
-            pbema_frontrun_margin: float = 0.002,
+            rsi_limit: float = 70.0,
+            use_alphatrend: bool = True,
+            ssl_touch_tolerance: float = 0.002,
+            ssl_body_tolerance: float = 0.003,
+            min_pbema_distance: float = 0.004,
             tp_min_dist_ratio: float = 0.0015,
-            tp_max_dist_ratio: float = 0.04,
-            adx_min: float = 12.0,
+            tp_max_dist_ratio: float = 0.05,
+            adx_min: float = 15.0,
+            lookback_candles: int = 5,
             return_debug: bool = False,
     ) -> Tuple:
         """
-        PBEMA Reaction Strategy - Trade when price approaches/touches PBEMA cloud.
+        SSL Flow Strategy - Trend following with SSL HYBRID baseline.
 
-        Delegates to strategies.pbema_reaction.check_pbema_reaction_signal.
+        Delegates to strategies.ssl_flow.check_ssl_flow_signal.
 
         Concept:
-        - PBEMA cloud acts as strong support/resistance
-        - Expect reaction when price approaches PBEMA
-        - SHORT: Price approaches PBEMA from below -> sell pressure expected
-        - LONG: Price approaches PBEMA from above -> buy pressure expected
+        - SSL HYBRID (HMA60) determines flow direction (price above = bullish, below = bearish)
+        - AlphaTrend confirms buyer/seller dominance (filters fake SSL signals)
+        - Entry when price retests SSL baseline as support/resistance
+        - TP target at PBEMA cloud (EMA200)
 
-        Parameters:
-        - pbema_approach_tolerance: How close to PBEMA to generate signal (e.g., 0.003 = 0.3%)
-        - pbema_frontrun_margin: Frontrun margin (SL = PBEMA + this margin)
+        Entry Logic:
+        - LONG: Price above SSL baseline + AlphaTrend buyers dominant + retest
+        - SHORT: Price below SSL baseline + AlphaTrend sellers dominant + retest
         """
-        return check_pbema_reaction_signal(
+        return check_ssl_flow_signal(
             df=df,
             index=index,
             min_rr=min_rr,
             rsi_limit=rsi_limit,
-            slope_thresh=slope_thresh,
             use_alphatrend=use_alphatrend,
-            pbema_approach_tolerance=pbema_approach_tolerance,
-            pbema_frontrun_margin=pbema_frontrun_margin,
+            ssl_touch_tolerance=ssl_touch_tolerance,
+            ssl_body_tolerance=ssl_body_tolerance,
+            min_pbema_distance=min_pbema_distance,
             tp_min_dist_ratio=tp_min_dist_ratio,
             tp_max_dist_ratio=tp_max_dist_ratio,
             adx_min=adx_min,
+            lookback_candles=lookback_candles,
             return_debug=return_debug,
         )
 
@@ -439,8 +441,8 @@ class TradingEngine:
         Delegates to strategies.router.check_signal.
 
         strategy_mode values:
-        - "keltner_bounce" (default): Keltner band bounce strategy
-        - "pbema_reaction": PBEMA reaction strategy
+        - "ssl_flow" (default): SSL HYBRID trend following strategy
+        - "keltner_bounce": Keltner band bounce / mean reversion strategy
 
         Args:
             df: OHLCV + indicator dataframe

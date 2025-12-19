@@ -31,12 +31,12 @@ SignalResultWithDebug = Tuple[
 
 # Available strategy modes
 STRATEGY_MODES = {
-    "keltner_bounce": "Keltner Bounce - Mean reversion with Keltner bands",
-    "pbema_reaction": "PBEMA Reaction - Trade on PBEMA cloud approach",
+    "ssl_flow": "SSL Flow - Trend following with SSL HYBRID baseline (TP at PBEMA)",
+    "keltner_bounce": "Keltner Bounce - Mean reversion with Keltner bands (TP at PBEMA)",
 }
 
 # Default strategy mode
-DEFAULT_STRATEGY_MODE = "keltner_bounce"
+DEFAULT_STRATEGY_MODE = "ssl_flow"
 
 
 def make_signal_result(

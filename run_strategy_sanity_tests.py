@@ -124,13 +124,10 @@ def run_test_a_window_equality(
     log(f"   ✓ {len(df)} mum yüklendi (warmup dahil)")
 
     # Determine PBEMA columns based on strategy mode
-    strategy_mode = config.get("strategy_mode", "keltner_bounce")
-    if strategy_mode == "pbema_reaction":
-        pb_top_col = "pb_ema_top_150"
-        pb_bot_col = "pb_ema_bot_150"
-    else:
-        pb_top_col = "pb_ema_top"
-        pb_bot_col = "pb_ema_bot"
+    strategy_mode = config.get("strategy_mode", "ssl_flow")
+    # Her iki strateji icin de EMA200 kullan
+    pb_top_col = "pb_ema_top"
+    pb_bot_col = "pb_ema_bot"
 
     # Pre-extract arrays
     timestamps = pd.to_datetime(df["timestamp"]).values
@@ -215,8 +212,8 @@ def run_test_a_window_equality(
         has_open = any(t.get("symbol") == symbol and t.get("timeframe") == timeframe
                       for t in tm1.open_trades)
         if not has_open and not tm1.check_cooldown(symbol, timeframe, candle_time):
-            if strategy_mode == "pbema_reaction":
-                sig = TradingEngine.check_pbema_reaction_signal(
+            if strategy_mode == "ssl_flow":
+                sig = TradingEngine.check_ssl_flow_signal(
                     df, idx, min_rr=rr, rsi_limit=rsi_limit,
                     use_alphatrend=at_active
                 )
@@ -291,8 +288,8 @@ def run_test_a_window_equality(
         has_open = any(t.get("symbol") == symbol and t.get("timeframe") == timeframe
                       for t in tm2.open_trades)
         if not has_open and not tm2.check_cooldown(symbol, timeframe, candle_time):
-            if strategy_mode == "pbema_reaction":
-                sig = TradingEngine.check_pbema_reaction_signal(
+            if strategy_mode == "ssl_flow":
+                sig = TradingEngine.check_ssl_flow_signal(
                     df, idx, min_rr=rr, rsi_limit=rsi_limit,
                     use_alphatrend=at_active
                 )

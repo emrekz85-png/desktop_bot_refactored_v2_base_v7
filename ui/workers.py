@@ -218,14 +218,11 @@ class LiveBotWorker(QThread):
                                     self.price_signal.emit(sym, curr_price)
 
                                 config = main.load_optimized_config(sym, tf)
-                                strategy_mode = config.get("strategy_mode", "keltner_bounce")
+                                strategy_mode = config.get("strategy_mode", "ssl_flow")
 
-                                if strategy_mode == "pbema_reaction":
-                                    pb_top_col = 'pb_ema_top_150'
-                                    pb_bot_col = 'pb_ema_bot_150'
-                                else:
-                                    pb_top_col = 'pb_ema_top'
-                                    pb_bot_col = 'pb_ema_bot'
+                                # Her iki strateji icin de EMA200 kullan
+                                pb_top_col = 'pb_ema_top'
+                                pb_bot_col = 'pb_ema_bot'
 
                                 closed_trades = main.trade_manager.update_trades(
                                     sym, tf,
