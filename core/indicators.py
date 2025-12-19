@@ -91,8 +91,8 @@ def calculate_alphatrend(
 
         # Pre-extract arrays for performance
         momentum = df['_at_momentum'].fillna(50).values
-        upT = df['_at_upT'].values
-        downT = df['_at_downT'].values
+        upT = df['_at_upT'].ffill().bfill().values
+        downT = df['_at_downT'].ffill().bfill().values
         close_vals = df['close'].values
 
         # Initialize dual lines
@@ -152,13 +152,14 @@ def calculate_alphatrend(
 
         return df
 
-    except Exception:
+    except Exception as e:
         # Fallback: set basic columns to prevent errors
+        print(f"AlphaTrend hesaplama hatası: {e}")
         df['at_buyers'] = df['close']
         df['at_sellers'] = df['close']
-        df['at_buyers_dominant'] = False
+        df['at_buyers_dominant'] = True
         df['at_sellers_dominant'] = False
-        df['at_is_flat'] = True
+        df['at_is_flat'] = False
         df['alphatrend'] = df['close']
         df['alphatrend_2'] = df['close'].shift(2)
         return df
