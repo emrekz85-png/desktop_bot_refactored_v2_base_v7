@@ -571,11 +571,10 @@ def _generate_candidate_configs():
 
     NOT: Slope parametresi artık taranmıyor çünkü:
     - PBEMA (200 EMA) çok yavaş hareket eder
-    - Mean reversion stratejisinde slope filter mantıksız
-    - Slope taramak sadece zaman kaybı
+    - Trend following stratejisinde slope filter kullanilmiyor
 
-    Sadece Keltner Bounce stratejisi kullanılıyor.
-    SSL_Flow stratejisi varsayilan olarak aktif. Keltner Bounce alternatif strateji.
+    Sadece SSL_Flow stratejisi test ediliyor.
+    SSL Flow: SSL HYBRID baseline + AlphaTrend flow confirmation + PBEMA TP
     """
 
     rr_vals = np.arange(1.2, 2.6, 0.3)
@@ -583,12 +582,10 @@ def _generate_candidate_configs():
     at_vals = [False, True]
     # Include both dynamic TP options to ensure optimizer matches what live will use
     dyn_tp_vals = [True, False]
-    # SSL_Flow varsayilan strateji, Keltner Bounce alternatif
-    strategy_modes = ["ssl_flow", "keltner_bounce"]
 
     candidates = []
 
-    # SSL Flow strategy configs (varsayilan strateji)
+    # SSL Flow strategy configs (trend following with SSL HYBRID baseline)
     for rr, rsi, at_active, dyn_tp in itertools.product(
         rr_vals, rsi_vals, at_vals, dyn_tp_vals
     ):
@@ -604,26 +601,9 @@ def _generate_candidate_configs():
             }
         )
 
-    # Keltner Bounce strategy configs (alternatif strateji)
-    for rr, rsi, at_active, dyn_tp in itertools.product(
-        rr_vals, rsi_vals, at_vals, dyn_tp_vals
-    ):
-        candidates.append(
-            {
-                "rr": round(float(rr), 2),
-                "rsi": int(rsi),
-                "slope": 0.5,
-                "at_active": bool(at_active),
-                "use_trailing": False,
-                "use_dynamic_pbema_tp": bool(dyn_tp),
-                "strategy_mode": "keltner_bounce",
-            }
-        )
-
     # Birkac agresif trailing secenegi ekle
     trailing_extras = []
-    ssl_configs = [c for c in candidates if c.get("strategy_mode") == "ssl_flow"]
-    for base in ssl_configs[:: max(1, len(ssl_configs) // 20)]:
+    for base in candidates[:: max(1, len(candidates) // 20)]:
         cfg = dict(base)
         cfg["use_trailing"] = True
         trailing_extras.append(cfg)
@@ -632,11 +612,11 @@ def _generate_candidate_configs():
 
 
 def _generate_quick_candidate_configs():
-    """Create a minimal config grid for quick testing (~24 configs instead of ~120).
+    """Create a minimal config grid for quick testing (~12 configs instead of ~120).
 
     Used when quick_mode=True for faster backtest iterations.
     Covers key combinations without exhaustive search.
-    Both SSL_Flow and Keltner_Bounce strategies are tested.
+    Only SSL_Flow strategy is tested.
     """
     # Sadece en önemli RR ve RSI değerlerini kullan
     rr_vals = [1.2, 1.8, 2.4]  # 3 değer (vs 5)
@@ -646,7 +626,7 @@ def _generate_quick_candidate_configs():
 
     candidates = []
 
-    # SSL Flow strategy configs (varsayilan strateji)
+    # SSL Flow strategy configs (trend following with SSL HYBRID baseline)
     for rr, rsi, at_active, dyn_tp in itertools.product(
         rr_vals, rsi_vals, at_vals, dyn_tp_vals
     ):
@@ -662,28 +642,12 @@ def _generate_quick_candidate_configs():
             }
         )
 
-    # Keltner bounce strategy configs (alternatif)
-    for rr, rsi, at_active, dyn_tp in itertools.product(
-        rr_vals, rsi_vals, at_vals, dyn_tp_vals
-    ):
-        candidates.append(
-            {
-                "rr": round(float(rr), 2),
-                "rsi": int(rsi),
-                "slope": 0.5,
-                "at_active": bool(at_active),
-                "use_trailing": False,
-                "use_dynamic_pbema_tp": bool(dyn_tp),
-                "strategy_mode": "keltner_bounce",
-            }
-        )
-
     # 1 trailing config ekle
     trailing_cfg = dict(candidates[0])
     trailing_cfg["use_trailing"] = True
     candidates.append(trailing_cfg)
 
-    return candidates  # ~25 config (vs ~120)
+    return candidates  # ~13 config (vs ~120)
 
 
 def _get_min_trades_for_timeframe(tf: str, num_candles: int = 20000) -> int:
