@@ -24,7 +24,7 @@ from .config import (
     # Candle limits
     BACKTEST_CANDLE_LIMITS, DAILY_REPORT_CANDLE_LIMITS,
     # Trading config
-    TRADING_CONFIG, CANDLES_PER_DAY, MINUTES_PER_CANDLE,
+    TRADING_CONFIG, CANDLES_PER_DAY, MINUTES_PER_CANDLE, ALPHATREND_CONFIG,
     # Functions
     days_to_candles, days_to_candles_map,
     # Blacklist
@@ -92,7 +92,7 @@ __all__ = [
     # Candle limits
     'BACKTEST_CANDLE_LIMITS', 'DAILY_REPORT_CANDLE_LIMITS',
     # Trading config
-    'TRADING_CONFIG', 'CANDLES_PER_DAY', 'MINUTES_PER_CANDLE',
+    'TRADING_CONFIG', 'CANDLES_PER_DAY', 'MINUTES_PER_CANDLE', 'ALPHATREND_CONFIG',
     'days_to_candles', 'days_to_candles_map',
     # Blacklist
     'is_stream_blacklisted', 'load_dynamic_blacklist', 'update_dynamic_blacklist',

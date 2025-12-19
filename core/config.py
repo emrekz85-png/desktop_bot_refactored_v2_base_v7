@@ -410,6 +410,19 @@ ROLLING_ER_CONFIG = {
 }
 
 # ==========================================
+# ALPHATREND DUAL-LINE CONFIG
+# ==========================================
+# AlphaTrend indicator now uses dual lines (buyers vs sellers)
+# instead of single line for more accurate trend detection.
+# See: core/indicators.py::calculate_alphatrend()
+ALPHATREND_CONFIG = {
+    "coeff": 1.0,              # ATR multiplier
+    "ap": 14,                  # ATR/MFI period
+    "flat_lookback": 5,        # Yatay hareket kontrolü için bakılacak mum sayısı
+    "flat_threshold": 0.001,   # Yatay kabul edilecek değişim oranı (%0.1)
+}
+
+# ==========================================
 # OTHER SETTINGS
 # ==========================================
 REFRESH_RATE = 3
