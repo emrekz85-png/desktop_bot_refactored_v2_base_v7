@@ -94,15 +94,15 @@ def run_diagnostic(
     log(f"\n" + "-" * 40)
     log(f"Fetching {total_candles} candles for {symbol}-{timeframe}...")
 
-    engine = TradingEngine(TRADING_CONFIG)
-    df_full = engine.get_klines(symbol, timeframe, limit=total_candles)
+    # TradingEngine uses static methods - no instantiation needed
+    df_full = TradingEngine.get_data(symbol, timeframe, limit=total_candles)
 
-    if df_full is None or len(df_full) < 500:
+    if df_full is None or df_full.empty or len(df_full) < 500:
         log(f"ERROR: Insufficient data ({len(df_full) if df_full is not None else 0} candles)")
         return {"error": "insufficient_data"}
 
     log(f"Fetched {len(df_full)} candles")
-    log(f"Date range: {df_full.iloc[0]['open_time']} to {df_full.iloc[-1]['open_time']}")
+    log(f"Date range: {df_full.iloc[0]['timestamp']} to {df_full.iloc[-1]['timestamp']}")
 
     # Split into train/test
     split_idx = int(len(df_full) * train_ratio)
@@ -110,8 +110,8 @@ def run_diagnostic(
     df_test = df_full.iloc[split_idx:].copy()
 
     log(f"\nWalk-Forward Split:")
-    log(f"  Train: {len(df_train)} candles ({df_train.iloc[0]['open_time']} to {df_train.iloc[-1]['open_time']})")
-    log(f"  Test:  {len(df_test)} candles ({df_test.iloc[0]['open_time']} to {df_test.iloc[-1]['open_time']})")
+    log(f"  Train: {len(df_train)} candles ({df_train.iloc[0]['timestamp']} to {df_train.iloc[-1]['timestamp']})")
+    log(f"  Test:  {len(df_test)} candles ({df_test.iloc[0]['timestamp']} to {df_test.iloc[-1]['timestamp']})")
 
     # Generate candidate configs
     log(f"\n" + "-" * 40)
