@@ -3,13 +3,17 @@
 #
 # This module provides the main check_signal function that routes to
 # the correct strategy implementation based on strategy_mode config.
+#
+# Available strategies:
+# - keltner_bounce: Mean reversion from Keltner bands (TP at PBEMA)
+# - ssl_flow: Trend following with SSL HYBRID baseline (TP at PBEMA)
 
 from typing import Tuple, Union
 import pandas as pd
 
 from .base import SignalResult, SignalResultWithDebug, DEFAULT_STRATEGY_MODE
 from .keltner_bounce import check_keltner_bounce_signal
-from .pbema_reaction import check_pbema_reaction_signal
+from .ssl_flow import check_ssl_flow_signal
 
 # Import config for default values
 try:
@@ -20,7 +24,7 @@ except ImportError:
         "rr": 2.0,
         "rsi": 65,
         "slope": 0.4,
-        "at_active": False,
+        "at_active": True,
         "hold_n": 4,
         "min_hold_frac": 0.50,
         "pb_touch_tolerance": 0.0025,
@@ -29,9 +33,12 @@ except ImportError:
         "tp_min_dist_ratio": 0.0008,
         "tp_max_dist_ratio": 0.040,
         "adx_min": 8.0,
-        "strategy_mode": "keltner_bounce",
-        "pbema_approach_tolerance": 0.003,
-        "pbema_frontrun_margin": 0.002,
+        "strategy_mode": "ssl_flow",
+        # SSL Flow specific parameters
+        "ssl_touch_tolerance": 0.002,
+        "ssl_body_tolerance": 0.003,
+        "min_pbema_distance": 0.004,
+        "lookback_candles": 5,
     }
 
 
@@ -45,8 +52,8 @@ def check_signal(
     Wrapper function - routes to appropriate strategy based on strategy_mode.
 
     strategy_mode values:
-    - "keltner_bounce" (default): Keltner band bounce strategy
-    - "pbema_reaction": PBEMA reaction strategy
+    - "ssl_flow" (default): SSL HYBRID trend following strategy
+    - "keltner_bounce": Keltner band bounce / mean reversion strategy
 
     Args:
         df: OHLCV + indicator dataframe
@@ -59,23 +66,8 @@ def check_signal(
     """
     strategy_mode = config.get("strategy_mode", DEFAULT_STRATEGY_CONFIG.get("strategy_mode", DEFAULT_STRATEGY_MODE))
 
-    if strategy_mode == "pbema_reaction":
-        return check_pbema_reaction_signal(
-            df,
-            index=index,
-            min_rr=config.get("rr", DEFAULT_STRATEGY_CONFIG["rr"]),
-            rsi_limit=config.get("rsi", DEFAULT_STRATEGY_CONFIG["rsi"]),
-            slope_thresh=config.get("slope", DEFAULT_STRATEGY_CONFIG["slope"]),
-            use_alphatrend=config.get("at_active", DEFAULT_STRATEGY_CONFIG["at_active"]),
-            pbema_approach_tolerance=config.get("pbema_approach_tolerance", DEFAULT_STRATEGY_CONFIG["pbema_approach_tolerance"]),
-            pbema_frontrun_margin=config.get("pbema_frontrun_margin", DEFAULT_STRATEGY_CONFIG["pbema_frontrun_margin"]),
-            tp_min_dist_ratio=config.get("tp_min_dist_ratio", DEFAULT_STRATEGY_CONFIG["tp_min_dist_ratio"]),
-            tp_max_dist_ratio=config.get("tp_max_dist_ratio", DEFAULT_STRATEGY_CONFIG["tp_max_dist_ratio"]),
-            adx_min=config.get("adx_min", DEFAULT_STRATEGY_CONFIG["adx_min"]),
-            return_debug=return_debug,
-        )
-    else:
-        # Default: keltner_bounce strategy
+    if strategy_mode == "keltner_bounce":
+        # Keltner Bounce: Mean reversion from Keltner bands
         return check_keltner_bounce_signal(
             df,
             index=index,
@@ -91,5 +83,22 @@ def check_signal(
             tp_min_dist_ratio=config.get("tp_min_dist_ratio", DEFAULT_STRATEGY_CONFIG["tp_min_dist_ratio"]),
             tp_max_dist_ratio=config.get("tp_max_dist_ratio", DEFAULT_STRATEGY_CONFIG["tp_max_dist_ratio"]),
             adx_min=config.get("adx_min", DEFAULT_STRATEGY_CONFIG["adx_min"]),
+            return_debug=return_debug,
+        )
+    else:
+        # Default: ssl_flow strategy - Trend following with SSL HYBRID
+        return check_ssl_flow_signal(
+            df,
+            index=index,
+            min_rr=config.get("rr", DEFAULT_STRATEGY_CONFIG["rr"]),
+            rsi_limit=config.get("rsi", DEFAULT_STRATEGY_CONFIG["rsi"]),
+            use_alphatrend=config.get("at_active", DEFAULT_STRATEGY_CONFIG.get("at_active", True)),
+            ssl_touch_tolerance=config.get("ssl_touch_tolerance", DEFAULT_STRATEGY_CONFIG.get("ssl_touch_tolerance", 0.002)),
+            ssl_body_tolerance=config.get("ssl_body_tolerance", DEFAULT_STRATEGY_CONFIG.get("ssl_body_tolerance", 0.003)),
+            min_pbema_distance=config.get("min_pbema_distance", DEFAULT_STRATEGY_CONFIG.get("min_pbema_distance", 0.004)),
+            tp_min_dist_ratio=config.get("tp_min_dist_ratio", DEFAULT_STRATEGY_CONFIG["tp_min_dist_ratio"]),
+            tp_max_dist_ratio=config.get("tp_max_dist_ratio", DEFAULT_STRATEGY_CONFIG["tp_max_dist_ratio"]),
+            adx_min=config.get("adx_min", DEFAULT_STRATEGY_CONFIG["adx_min"]),
+            lookback_candles=config.get("lookback_candles", DEFAULT_STRATEGY_CONFIG.get("lookback_candles", 5)),
             return_debug=return_debug,
         )

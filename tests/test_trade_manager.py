@@ -24,9 +24,9 @@ class TestTradeManagerInit:
 
     def test_initializes_strategy_wallets(self, trade_manager, trading_config):
         """TradeManager should initialize strategy-specific wallets."""
+        assert "ssl_flow" in trade_manager.strategy_wallets
         assert "keltner_bounce" in trade_manager.strategy_wallets
-        assert "pbema_reaction" in trade_manager.strategy_wallets
-        assert trade_manager.strategy_wallets["keltner_bounce"]["wallet_balance"] == trading_config["initial_balance"]
+        assert trade_manager.strategy_wallets["ssl_flow"]["wallet_balance"] == trading_config["initial_balance"]
 
     def test_initializes_risk_parameters(self, trade_manager, trading_config):
         """TradeManager should initialize risk parameters from config."""
@@ -224,16 +224,16 @@ class TestStrategyWallets:
 
     def test_get_strategy_wallet_returns_correct_wallet(self, trade_manager):
         """Should return correct wallet for strategy."""
+        sf_wallet = trade_manager._get_strategy_wallet("ssl_flow")
         kb_wallet = trade_manager._get_strategy_wallet("keltner_bounce")
-        pr_wallet = trade_manager._get_strategy_wallet("pbema_reaction")
 
+        assert sf_wallet is trade_manager.strategy_wallets["ssl_flow"]
         assert kb_wallet is trade_manager.strategy_wallets["keltner_bounce"]
-        assert pr_wallet is trade_manager.strategy_wallets["pbema_reaction"]
 
-    def test_get_strategy_wallet_defaults_to_keltner(self, trade_manager):
-        """Unknown strategy should default to keltner_bounce wallet."""
+    def test_get_strategy_wallet_defaults_to_ssl_flow(self, trade_manager):
+        """Unknown strategy should default to ssl_flow wallet."""
         wallet = trade_manager._get_strategy_wallet("unknown_strategy")
-        assert wallet is trade_manager.strategy_wallets["keltner_bounce"]
+        assert wallet is trade_manager.strategy_wallets["ssl_flow"]
 
     def test_strategy_portfolio_risk_calculated_per_strategy(self, trade_manager, sample_long_trade, mock_best_config_cache):
         """Portfolio risk should be calculated per strategy."""
@@ -241,11 +241,11 @@ class TestStrategyWallets:
         trade_manager.open_trade(sample_long_trade)
 
         kb_risk = trade_manager._calculate_strategy_portfolio_risk("keltner_bounce")
-        pr_risk = trade_manager._calculate_strategy_portfolio_risk("pbema_reaction")
+        sf_risk = trade_manager._calculate_strategy_portfolio_risk("ssl_flow")
 
-        # keltner_bounce should have risk, pbema_reaction should not
+        # keltner_bounce should have risk, ssl_flow should not
         assert kb_risk > 0
-        assert pr_risk == 0
+        assert sf_risk == 0
 
 
 class TestTradeFields:

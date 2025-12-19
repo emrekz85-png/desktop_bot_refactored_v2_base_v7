@@ -69,7 +69,7 @@ class TestDefaultStrategyConfig:
 
     def test_strategy_mode_is_valid(self, trading_module):
         """Strategy mode should be a valid option."""
-        valid_modes = ["keltner_bounce", "pbema_reaction"]
+        valid_modes = ["ssl_flow", "keltner_bounce"]
         assert trading_module.DEFAULT_STRATEGY_CONFIG["strategy_mode"] in valid_modes
 
 
