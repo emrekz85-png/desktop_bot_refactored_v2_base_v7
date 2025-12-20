@@ -451,6 +451,7 @@ DEFAULT_STRATEGY_CONFIG = {
     "rsi": 70,
     "at_active": True,  # AlphaTrend is essential for SSL Flow
     "use_trailing": False,
+    "use_partial": True,  # Partial TP aktif
     "use_dynamic_pbema_tp": True,
     "strategy_mode": "ssl_flow",
 
