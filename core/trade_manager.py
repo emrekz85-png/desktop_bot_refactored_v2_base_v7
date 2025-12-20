@@ -301,8 +301,8 @@ class BaseTradeManager(ABC):
 
         # Get config from trade (snapshotted at open)
         use_trailing = trade.get("use_trailing", False)
+        use_partial = trade.get("use_partial", True)  # Config'den oku, default True
         use_dynamic_tp = trade.get("use_dynamic_pbema_tp", True)
-        use_partial = not use_trailing
 
         # Calculate prices and progress
         if t_type == "LONG":
@@ -847,6 +847,7 @@ class SimTradeManager(BaseTradeManager):
         # Fallback: trade_data'da yoksa diskten yükle (eski trade'ler için)
         config_snapshot = trade_data.get("config_snapshot") or load_optimized_config(sym, tf)
         use_trailing = config_snapshot.get("use_trailing", False)
+        use_partial = config_snapshot.get("use_partial", True)  # Partial TP aktif (default True)
         use_dynamic_pbema_tp = config_snapshot.get("use_dynamic_pbema_tp", True)
         opt_rr = config_snapshot.get("rr", 3.0)
         opt_rsi = config_snapshot.get("rsi", 60)
@@ -910,6 +911,7 @@ class SimTradeManager(BaseTradeManager):
             "close_price": "",
             "events": [],
             "use_trailing": use_trailing,
+            "use_partial": use_partial,  # Partial TP config'den
             "use_dynamic_pbema_tp": use_dynamic_pbema_tp,
             "opt_rr": opt_rr,
             "opt_rsi": opt_rsi,

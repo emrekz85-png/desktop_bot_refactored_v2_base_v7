@@ -2075,19 +2075,21 @@ class TradeManager:
                 # Eski trade'ler için fallback olarak load_optimized_config kullan ve trade'e yaz
                 if "use_trailing" in trade:
                     use_trailing = trade.get("use_trailing", False)
+                    use_partial = trade.get("use_partial", True)  # Trade'den oku
                     use_dynamic_tp = trade.get("use_dynamic_pbema_tp", True)
                 else:
                     # Backward compatibility: eski trade'ler için config'den oku ve trade'e yaz
                     # Bu sayede sadece bir kere config'ten okunur, sonraki mumlarda trade'den okunur
                     config = load_optimized_config(symbol, tf)
                     use_trailing = config.get("use_trailing", False)
+                    use_partial = config.get("use_partial", True)  # Config'den oku
                     use_dynamic_tp = config.get("use_dynamic_pbema_tp", True)
                     # Trade'e yaz - sonraki mumlarda trade'den okunacak
                     self.open_trades[i]["use_trailing"] = use_trailing
+                    self.open_trades[i]["use_partial"] = use_partial  # Partial config'i de kaydet
                     self.open_trades[i]["use_dynamic_pbema_tp"] = use_dynamic_tp
                     self.open_trades[i]["opt_rr"] = config.get("rr", 3.0)
                     self.open_trades[i]["opt_rsi"] = config.get("rsi", 60)
-                use_partial = not use_trailing
 
                 # --- Fiyatlar ---
                 # Partial TP için conservative fill hesaplaması
