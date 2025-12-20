@@ -8446,12 +8446,14 @@ def run_rolling_walkforward(
 
         # 4.2 Use cached data (PERFORMANCE: no API call per window)
         # Filter master_streams to this window's date range
+        # Note: Indicators are ALREADY calculated on master_streams, so we only need
+        # enough candles for the backtest logic (50+), not for indicator warmup (250)
         streams = {}
         for (sym, tf), master_df in master_streams.items():
             # Add buffer before fetch_start for indicators
             buffer_start = fetch_start - timedelta(days=15)
             filtered = filter_data_by_date(master_df.copy(), buffer_start, fetch_end)
-            if len(filtered) >= 250:
+            if len(filtered) >= 50:  # Reduced from 250 - indicators already calculated
                 streams[(sym, tf)] = filtered
 
         log(f"   📊 Önbellekten {len(streams)} stream filtrelendi")
@@ -8488,7 +8490,7 @@ def run_rolling_walkforward(
             calib_streams = {}
             for (sym, tf), df in streams.items():
                 filtered = filter_data_by_date(df, window["optimize_start"], window["optimize_end"])
-                if len(filtered) >= 250:
+                if len(filtered) >= 100:  # Reduced from 250 - need sample for optimization
                     calib_streams[(sym, tf)] = filtered
 
             if calib_streams:
@@ -8508,7 +8510,7 @@ def run_rolling_walkforward(
             opt_streams = {}
             for (sym, tf), df in streams.items():
                 filtered = filter_data_by_date(df, window["optimize_start"], window["optimize_end"])
-                if len(filtered) >= 250:
+                if len(filtered) >= 100:  # Reduced from 250 - need sample for optimization
                     opt_streams[(sym, tf)] = filtered
 
             if opt_streams:
@@ -8524,11 +8526,12 @@ def run_rolling_walkforward(
         log(f"   📊 Backtest çalıştırılıyor: {window['trade_start'].strftime('%m/%d')} → {window['trade_end'].strftime('%m/%d')}")
 
         # Filter streams to include trade period (need some data before for indicators)
+        # Note: Indicators are already calculated, just need enough data for signal detection
         trade_streams = {}
-        buffer_start = window["trade_start"] - timedelta(days=15)  # Buffer for indicators
+        buffer_start = window["trade_start"] - timedelta(days=15)  # Buffer for signals
         for (sym, tf), df in streams.items():
             filtered = filter_data_by_date(df, buffer_start, window["trade_end"])
-            if len(filtered) >= 250:
+            if len(filtered) >= 10:  # Reduced from 250 - just need candles for trading
                 trade_streams[(sym, tf)] = filtered
 
         if trade_streams and config_map:
