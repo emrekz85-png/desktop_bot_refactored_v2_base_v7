@@ -137,9 +137,25 @@ def calculate_alphatrend(
         # DOMINANCE based on LINE POSITION (TradingView standard)
         # - at_buyers > at_sellers = Mavi üstte = Çizgi YÜKSELİYOR = BUYERS dominant
         # - at_sellers > at_buyers = Kırmızı üstte = Çizgi DÜŞÜYOR = SELLERS dominant
+        #
+        # Pine Script equality handling:
+        #   color1 = AlphaTrend > AlphaTrend[2] ? #00E60F :
+        #            AlphaTrend < AlphaTrend[2] ? #80000B :
+        #            AlphaTrend[1] > AlphaTrend[3] ? #00E60F : #80000B
+        # When AlphaTrend == AlphaTrend[2], check AlphaTrend[1] vs AlphaTrend[3]
         # ================================================================
         df['at_buyers_dominant'] = df['at_buyers'] > df['at_sellers']
         df['at_sellers_dominant'] = df['at_sellers'] > df['at_buyers']
+
+        # Handle equality case (Pine Script: AlphaTrend[1] > AlphaTrend[3])
+        # When current and 2-bar-ago are equal, check 1-bar-ago vs 3-bar-ago
+        equal_mask = df['at_buyers'] == df['at_sellers']
+
+        if equal_mask.any():
+            # Use shift(1) vs shift(3) for equal cases (matches TradingView)
+            prev_comparison = df['alphatrend'].shift(1) > df['alphatrend'].shift(3)
+            df.loc[equal_mask, 'at_buyers_dominant'] = prev_comparison[equal_mask].fillna(False)
+            df.loc[equal_mask, 'at_sellers_dominant'] = (~prev_comparison[equal_mask]).fillna(False)
 
         # Flat/no-flow detection
         # If alphatrend line hasn't moved significantly, market is flat
@@ -166,6 +182,12 @@ def calculate_alphatrend(
         df['at_sellers'] = df['alphatrend_2']
         df['at_buyers_dominant'] = df['at_buyers'] > df['at_sellers']
         df['at_sellers_dominant'] = df['at_sellers'] > df['at_buyers']
+        # Handle equality case in fallback too
+        equal_mask = df['at_buyers'] == df['at_sellers']
+        if equal_mask.any():
+            prev_comparison = df['alphatrend'].shift(1) > df['alphatrend'].shift(3)
+            df.loc[equal_mask, 'at_buyers_dominant'] = prev_comparison[equal_mask].fillna(False)
+            df.loc[equal_mask, 'at_sellers_dominant'] = (~prev_comparison[equal_mask]).fillna(False)
         df['at_is_flat'] = False
         return df
 
