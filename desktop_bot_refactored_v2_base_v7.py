@@ -8348,15 +8348,19 @@ def run_rolling_walkforward(
                 if next_time < trade_end_ts:
                     heapq.heappush(heap, (next_time, sym, tf))
 
-        # Return results
-        wins = sum(1 for t in window_trades if float(t.get("pnl", 0)) > 0)
+        # Return results - use tm.history to include partial TP records
+        # tm.history contains BOTH partial records AND final close records
+        all_window_trades = tm.history.copy()
+        wins = sum(1 for t in all_window_trades if float(t.get("pnl", 0)) > 0)
+        # Recalculate window_pnl from history to include partial PnL
+        window_pnl = sum(float(t.get("pnl", 0)) for t in all_window_trades)
 
         return {
             "pnl": window_pnl,
-            "trades": len(window_trades),
+            "trades": len(all_window_trades),
             "wins": wins,
             "max_dd": window_max_dd,
-            "closed_trades": window_trades,
+            "closed_trades": all_window_trades,  # Now includes partials!
             "open_positions": tm.open_trades.copy(),  # Carry forward
             "final_equity": tm.wallet_balance + tm.locked_margin,
         }
