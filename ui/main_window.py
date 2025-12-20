@@ -1517,9 +1517,9 @@ class MainWindow(QMainWindow):
                             "sym": sym, "tf": tf,
                             "rr": tf_cfg.get("rr", "-"),
                             "rsi": tf_cfg.get("rsi", "-"),
-                            "at": "Açık" if tf_cfg.get("at_active", False) else "Kapalı",
+                            "at": "Açık" if tf_cfg.get("at_active", True) else "Kapalı",
                             "trailing": "Açık" if tf_cfg.get("use_trailing", False) else "Kapalı",
-                            "strategy": tf_cfg.get("strategy_mode", "keltner_bounce")[:10]
+                            "strategy": tf_cfg.get("strategy_mode", "ssl_flow")[:10]
                         })
 
             total_streams = len(main.SYMBOLS) * len(main.TIMEFRAMES)

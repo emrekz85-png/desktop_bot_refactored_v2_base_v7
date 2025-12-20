@@ -579,7 +579,7 @@ def _generate_candidate_configs():
 
     rr_vals = np.arange(1.2, 2.6, 0.3)
     rsi_vals = np.arange(35, 76, 10)
-    at_vals = [False, True]
+    at_vals = [True]  # AlphaTrend ZORUNLU - her zaman aktif
     # Include both dynamic TP options to ensure optimizer matches what live will use
     dyn_tp_vals = [True, False]
 
@@ -621,7 +621,7 @@ def _generate_quick_candidate_configs():
     # Sadece en önemli RR ve RSI değerlerini kullan
     rr_vals = [1.2, 1.8, 2.4]  # 3 değer (vs 5)
     rsi_vals = [35, 55]        # 2 değer (vs 5)
-    at_vals = [False, True]    # 2 değer
+    at_vals = [True]           # AlphaTrend ZORUNLU - her zaman aktif
     dyn_tp_vals = [True]       # Sadece 1 değer (dinamik TP genelde daha iyi)
 
     candidates = []
@@ -1420,7 +1420,7 @@ def load_optimized_config(symbol, timeframe):
         "rr": 3.0,
         "rsi": 60,
         "slope": 0.5,
-        "at_active": False,
+        "at_active": True,  # AlphaTrend ZORUNLU
         "use_trailing": False,
         "use_dynamic_pbema_tp": True,
     }
@@ -3213,7 +3213,7 @@ class LiveBotWorker(QThread):
     def update_settings(self, symbol, tf, rr, rsi, slope):
         if symbol in SYMBOL_PARAMS:
             current = SYMBOL_PARAMS[symbol].get(tf, {})
-            at = current.get("at_active", False)
+            at = current.get("at_active", True)
             updated = current.copy()
             updated.update({
                 "rr": rr,
@@ -3624,7 +3624,7 @@ class OptimizerWorker(QThread):
             rr_vals = np.arange(self.rr_range[0], self.rr_range[1] + 0.01, self.rr_range[2])
             rsi_vals = np.arange(self.rsi_range[0], self.rsi_range[1] + 1, self.rsi_range[2])
             slope_vals = np.arange(self.slope_range[0], self.slope_range[1] + 0.01, self.slope_range[2])
-            at_vals = [True, False]
+            at_vals = [True]  # AlphaTrend ZORUNLU - her zaman aktif
 
             combinations = list(itertools.product(rr_vals, rsi_vals, slope_vals, at_vals))
             total_combs = len(combinations)
@@ -5403,7 +5403,7 @@ class MainWindow(QMainWindow):
                             "sym": sym, "tf": tf,
                             "rr": tf_cfg.get("rr", "-"),
                             "rsi": tf_cfg.get("rsi", "-"),
-                            "at": "Açık" if tf_cfg.get("at_active", False) else "Kapalı",
+                            "at": "Açık" if tf_cfg.get("at_active", True) else "Kapalı",
                             "trailing": "Açık" if tf_cfg.get("use_trailing", False) else "Kapalı",
                             "strategy": tf_cfg.get("strategy_mode", "ssl_flow")[:10]
                         })
@@ -6278,7 +6278,7 @@ def run_portfolio_backtest(
         if (sym, tf) not in logged_cfg_pairs:
             logged_cfg_pairs.add((sym, tf))
         rr, rsi, slope = config["rr"], config["rsi"], config["slope"]
-        use_at = config.get("at_active", False)
+        use_at = config.get("at_active", True)
 
         # Sinyal kontrolu (wrapper ile - ssl_flow veya keltner_bounce destekler)
         s_type, s_entry, s_tp, s_sl, s_reason = TradingEngine.check_signal(
@@ -7465,10 +7465,10 @@ def colab_quick_test(
 
 # Baseline config - "makul" sabit değerler
 BASELINE_CONFIG = {
-    "rr": 1.5,
-    "rsi": 45,
+    "rr": 2.0,
+    "rsi": 70,
     "slope": 0.5,
-    "at_active": False,
+    "at_active": True,  # AlphaTrend ZORUNLU - SSL Flow için gerekli
     "use_trailing": False,
     "use_dynamic_pbema_tp": True,
     "strategy_mode": "ssl_flow",
@@ -7477,19 +7477,20 @@ BASELINE_CONFIG = {
 }
 
 # Alternatif baseline configs (karşılaştırma için)
+# NOT: AlphaTrend tüm config'lerde ZORUNLU açık
 BASELINE_CONFIGS_ALT = {
     "conservative": {
-        "rr": 1.2, "rsi": 45, "at_active": False,
+        "rr": 1.2, "rsi": 45, "at_active": True,
         "use_trailing": False, "use_dynamic_pbema_tp": True,
         "strategy_mode": "ssl_flow", "disabled": False, "confidence": "high",
     },
     "aggressive": {
-        "rr": 2.1, "rsi": 35, "at_active": False,
+        "rr": 2.1, "rsi": 35, "at_active": True,
         "use_trailing": False, "use_dynamic_pbema_tp": True,
         "strategy_mode": "ssl_flow", "disabled": False, "confidence": "high",
     },
-    "with_at": {
-        "rr": 1.5, "rsi": 45, "at_active": True,
+    "standard": {
+        "rr": 2.0, "rsi": 70, "at_active": True,
         "use_trailing": False, "use_dynamic_pbema_tp": True,
         "strategy_mode": "ssl_flow", "disabled": False, "confidence": "high",
     },
@@ -8283,7 +8284,7 @@ def run_rolling_walkforward(
                 strategy_mode = cfg.get("strategy_mode", "ssl_flow")
                 rr = cfg.get("rr", 2.0)
                 rsi_limit = cfg.get("rsi", 60)
-                at_active = cfg.get("at_active", False)
+                at_active = cfg.get("at_active", True)
 
                 if strategy_mode == "ssl_flow":
                     sig = TradingEngine.check_ssl_flow_signal(

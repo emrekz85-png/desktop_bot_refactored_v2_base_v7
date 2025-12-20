@@ -243,19 +243,19 @@ def mock_best_config_cache(trading_module):
         "5m": {
             "rr": 2.0,
             "rsi": 35,
-            "at_active": False,
+            "at_active": True,  # AlphaTrend ZORUNLU
             "use_trailing": False,
             "use_dynamic_pbema_tp": True,
-            "strategy_mode": "keltner_bounce",
+            "strategy_mode": "ssl_flow",
             "confidence": "high",
         },
         "15m": {
             "rr": 1.5,
             "rsi": 40,
-            "at_active": True,
+            "at_active": True,  # AlphaTrend ZORUNLU
             "use_trailing": False,
             "use_dynamic_pbema_tp": True,
-            "strategy_mode": "keltner_bounce",
+            "strategy_mode": "ssl_flow",
             "confidence": "high",
         },
     }

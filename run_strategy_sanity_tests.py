@@ -180,7 +180,7 @@ def run_test_a_window_equality(
     # Extract config values ONCE
     rr = config.get("rr", 2.0)
     rsi_limit = config.get("rsi", 60)
-    at_active = config.get("at_active", False)
+    at_active = config.get("at_active", True)  # AlphaTrend ZORUNLU
     slope_thresh = config.get("slope", 0.0)  # FIX: Use config value
 
     idx = start_idx
