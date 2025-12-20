@@ -3,7 +3,7 @@
 #
 # This module provides:
 # - TradingEngine class with API data fetching (with retry logic)
-# - Signal detection for multiple strategies (ssl_flow, keltner_bounce)
+# - Signal detection for SSL Flow strategy
 # - Indicator calculation wrappers
 #
 # Signal detection is delegated to the strategies/ module for modularity.
@@ -11,9 +11,8 @@
 
 import os
 import time
-import json
 import itertools
-from typing import Tuple, Optional
+from typing import Tuple
 from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
@@ -23,7 +22,6 @@ import requests
 from .config import (
     DATA_DIR,
     DEFAULT_STRATEGY_CONFIG,
-    TRADING_CONFIG,
 )
 from .indicators import (
     calculate_indicators as core_calculate_indicators,
@@ -33,8 +31,8 @@ from .telegram import send_telegram as _core_send_telegram
 
 # Import strategy signal detection from strategies module
 from strategies import (
-    check_keltner_bounce_signal,
     check_ssl_flow_signal,
+    check_keltner_bounce_signal,  # DISABLED - kept for backward compatibility
     check_signal as strategies_check_signal,
 )
 
@@ -348,20 +346,12 @@ class TradingEngine:
             return_debug: bool = False,
     ) -> Tuple:
         """
-        Keltner Bounce signal detection for LONG / SHORT.
+        [DISABLED] Keltner Bounce signal detection for LONG / SHORT.
+
+        NOTE: This strategy is DISABLED. All symbols now use SSL Flow.
+        Kept for backward compatibility and potential future use.
 
         Delegates to strategies.keltner_bounce.check_keltner_bounce_signal.
-
-        Filters:
-        - ADX minimum threshold
-        - Keltner holding + retest
-        - PBEMA cloud alignment
-        - Minimum distance between Keltner band and PBEMA TP target
-        - TP not too close / too far
-        - RR >= min_rr (RR = reward / risk)
-
-        Note: This is a mean reversion approach using PBEMA cloud as magnet;
-        Keltner touches trigger both SHORT from top and LONG from bottom.
         """
         return check_keltner_bounce_signal(
             df=df,
@@ -441,12 +431,12 @@ class TradingEngine:
         Delegates to strategies.router.check_signal.
 
         strategy_mode values:
-        - "ssl_flow" (default): SSL HYBRID trend following strategy
-        - "keltner_bounce": Keltner band bounce / mean reversion strategy
+        - "ssl_flow" (default): SSL HYBRID trend following strategy [ACTIVE]
+        - "keltner_bounce": Keltner band bounce / mean reversion strategy [DISABLED]
 
         Args:
             df: OHLCV + indicator dataframe
-            config: Strategy configuration (rr, rsi, slope, strategy_mode, etc.)
+            config: Strategy configuration (rr, rsi, at_active, strategy_mode, etc.)
             index: Candle index for signal check
             return_debug: Return debug info
 
@@ -463,8 +453,10 @@ class TradingEngine:
     @staticmethod
     def debug_base_short(df, index):
         """
-        Debug function to inspect Base SHORT conditions for a specific candle.
-        index: df.iloc[index] style (e.g., -1 for last candle)
+        [DEPRECATED] Debug function for Keltner Bounce SHORT conditions.
+
+        NOTE: This function is for the DISABLED Keltner Bounce strategy.
+        Kept for backward compatibility.
         """
         curr = df.iloc[index]
         abs_index = index if index >= 0 else (len(df) + index)
