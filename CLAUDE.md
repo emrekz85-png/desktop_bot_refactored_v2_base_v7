@@ -198,13 +198,14 @@ TRADING_CONFIG = {
 ```python
 SYMBOL_PARAMS = {
     "BTCUSDT": {
-        "5m": {"rr": 2.4, "rsi": 35, "slope": 0.2, "at_active": False, ...},
+        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
         "15m": {...},
         ...
     },
     ...
 }
 ```
+**Note:** `at_active: True` is MANDATORY for all configs. AlphaTrend is essential for SSL Flow strategy.
 
 ### Strategy Configuration
 `DEFAULT_STRATEGY_CONFIG` defines strategy parameters:

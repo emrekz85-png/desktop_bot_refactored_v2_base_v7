@@ -105,7 +105,7 @@ class LiveBotWorker(QThread):
     def update_settings(self, symbol, tf, rr, rsi, slope):
         if symbol in SYMBOL_PARAMS:
             current = SYMBOL_PARAMS[symbol].get(tf, {})
-            at = current.get("at_active", False)
+            at = current.get("at_active", True)  # AlphaTrend ZORUNLU
             updated = current.copy()
             updated.update({
                 "rr": rr,
