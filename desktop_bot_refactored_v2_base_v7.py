@@ -579,7 +579,8 @@ def _generate_candidate_configs():
 
     rr_vals = np.arange(1.2, 2.6, 0.3)
     rsi_vals = np.arange(35, 76, 10)
-    at_vals = [True]  # AlphaTrend ZORUNLU - her zaman aktif
+    # AlphaTrend is now MANDATORY for SSL_Flow - only True option
+    at_vals = [True]
     # Include both dynamic TP options to ensure optimizer matches what live will use
     dyn_tp_vals = [True, False]
 
@@ -621,7 +622,8 @@ def _generate_quick_candidate_configs():
     # Sadece en önemli RR ve RSI değerlerini kullan
     rr_vals = [1.2, 1.8, 2.4]  # 3 değer (vs 5)
     rsi_vals = [35, 55]        # 2 değer (vs 5)
-    at_vals = [True]           # AlphaTrend ZORUNLU - her zaman aktif
+    # AlphaTrend is now MANDATORY for SSL_Flow - only True option
+    at_vals = [True]           # Sadece 1 değer (AlphaTrend zorunlu)
     dyn_tp_vals = [True]       # Sadece 1 değer (dinamik TP genelde daha iyi)
 
     candidates = []
@@ -3624,7 +3626,8 @@ class OptimizerWorker(QThread):
             rr_vals = np.arange(self.rr_range[0], self.rr_range[1] + 0.01, self.rr_range[2])
             rsi_vals = np.arange(self.rsi_range[0], self.rsi_range[1] + 1, self.rsi_range[2])
             slope_vals = np.arange(self.slope_range[0], self.slope_range[1] + 0.01, self.slope_range[2])
-            at_vals = [True]  # AlphaTrend ZORUNLU - her zaman aktif
+            # AlphaTrend is now MANDATORY for SSL_Flow - only True option
+            at_vals = [True]
 
             combinations = list(itertools.product(rr_vals, rsi_vals, slope_vals, at_vals))
             total_combs = len(combinations)
@@ -8287,9 +8290,9 @@ def run_rolling_walkforward(
                 at_active = cfg.get("at_active", True)
 
                 if strategy_mode == "ssl_flow":
+                    # NOTE: AlphaTrend is now MANDATORY for SSL_Flow (no use_alphatrend param)
                     sig = TradingEngine.check_ssl_flow_signal(
-                        df, idx, min_rr=rr, rsi_limit=rsi_limit,
-                        use_alphatrend=at_active
+                        df, idx, min_rr=rr, rsi_limit=rsi_limit
                     )
                 else:
                     sig = TradingEngine.check_signal_diagnostic(
@@ -8301,7 +8304,25 @@ def run_rolling_walkforward(
                 # signal_type is "LONG", "SHORT", or None
                 if sig and len(sig) >= 5 and sig[0] is not None:
                     signal_type, entry, tp, sl, reason = sig[:5]
-                    # Build trade data with config snapshot
+
+                    # Capture indicator snapshot at entry time (for trade logging)
+                    row = df.iloc[idx]
+                    indicators_at_entry = {
+                        "at_buyers": float(row.get("at_buyers", 0)) if pd.notna(row.get("at_buyers")) else None,
+                        "at_sellers": float(row.get("at_sellers", 0)) if pd.notna(row.get("at_sellers")) else None,
+                        "at_is_flat": bool(row.get("at_is_flat", False)) if pd.notna(row.get("at_is_flat")) else False,
+                        "at_dominant": "BUYERS" if row.get("at_buyers", 0) > row.get("at_sellers", 0) else "SELLERS",
+                        "baseline": float(row.get("baseline", 0)) if pd.notna(row.get("baseline")) else None,
+                        "pb_ema_top": float(row.get("pb_ema_top", 0)) if pd.notna(row.get("pb_ema_top")) else None,
+                        "pb_ema_bot": float(row.get("pb_ema_bot", 0)) if pd.notna(row.get("pb_ema_bot")) else None,
+                        "rsi": float(row.get("rsi", 0)) if pd.notna(row.get("rsi")) else None,
+                        "adx": float(row.get("adx", 0)) if pd.notna(row.get("adx")) else None,
+                        "keltner_upper": float(row.get("keltner_upper", 0)) if pd.notna(row.get("keltner_upper")) else None,
+                        "keltner_lower": float(row.get("keltner_lower", 0)) if pd.notna(row.get("keltner_lower")) else None,
+                        "close": float(row.get("close", 0)) if pd.notna(row.get("close")) else None,
+                    }
+
+                    # Build trade data with config snapshot and indicators
                     trade_data = {
                         "symbol": sym,
                         "timeframe": tf,
@@ -8312,6 +8333,7 @@ def run_rolling_walkforward(
                         "open_time_utc": candle_time,
                         "setup": reason or "Unknown",
                         "config_snapshot": cfg,  # Snapshot at entry time
+                        "indicators_at_entry": indicators_at_entry,  # Indicator snapshot
                     }
                     tm.open_trade(trade_data)
 
@@ -8557,6 +8579,7 @@ def run_rolling_walkforward(
     result = {
         "run_id": run_id,
         "mode": mode,
+        "output_dir": output_dir,  # Include output_dir for trade log writer
         "config": {
             "lookback_days": lookback_days,
             "forward_days": forward_days,

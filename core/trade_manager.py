@@ -343,8 +343,9 @@ class BaseTradeManager(ABC):
         progress = current_dist / total_dist
 
         # Partial TP + Breakeven
+        # FIX: Lowered partial TP threshold from 50% to 40% for earlier profit taking
         if in_profit and use_partial:
-            if (not trade.get("partial_taken")) and progress >= 0.50:
+            if (not trade.get("partial_taken")) and progress >= 0.40:
                 partial_size = size / 2.0
 
                 # Partial fill with slippage
@@ -400,7 +401,8 @@ class BaseTradeManager(ABC):
                 self.open_trades[trade_idx]["risk_amount"] = partial_risk
 
                 # Move to breakeven
-                be_buffer = 0.0003
+                # FIX: Increased BE buffer from 0.03% to 0.2% to prevent premature stops
+                be_buffer = 0.002
                 if t_type == "LONG":
                     be_sl = entry * (1 + be_buffer)
                 else:
@@ -412,7 +414,8 @@ class BaseTradeManager(ABC):
 
             elif (not trade.get("breakeven")) and progress >= 0.40:
                 # Breakeven without partial
-                be_buffer = 0.0003
+                # FIX: Increased BE buffer from 0.03% to 0.2% to prevent premature stops
+                be_buffer = 0.002
                 if t_type == "LONG":
                     be_sl = entry * (1 + be_buffer)
                 else:
@@ -429,7 +432,8 @@ class BaseTradeManager(ABC):
         # Trailing SL
         if in_profit and use_trailing:
             if (not trade.get("breakeven")) and progress >= 0.40:
-                be_buffer = 0.0003
+                # FIX: Increased BE buffer from 0.03% to 0.2% to prevent premature stops
+                be_buffer = 0.002
                 if t_type == "LONG":
                     be_sl = entry * (1 + be_buffer)
                 else:
@@ -910,6 +914,7 @@ class SimTradeManager(BaseTradeManager):
             "opt_rr": opt_rr,
             "opt_rsi": opt_rsi,
             "risk_amount": risk_amount,
+            "indicators_at_entry": trade_data.get("indicators_at_entry", {}),  # Indicator snapshot at entry
         }
 
         self.wallet_balance -= required_margin
