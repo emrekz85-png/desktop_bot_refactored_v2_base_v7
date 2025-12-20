@@ -506,7 +506,8 @@ class OptimizerWorker(QThread):
             rr_vals = np.arange(self.rr_range[0], self.rr_range[1] + 0.01, self.rr_range[2])
             rsi_vals = np.arange(self.rsi_range[0], self.rsi_range[1] + 1, self.rsi_range[2])
             slope_vals = np.arange(self.slope_range[0], self.slope_range[1] + 0.01, self.slope_range[2])
-            at_vals = [True, False]
+            # AlphaTrend is now MANDATORY for SSL_Flow - only True option
+            at_vals = [True]
 
             combinations = list(itertools.product(rr_vals, rsi_vals, slope_vals, at_vals))
             total_combs = len(combinations)

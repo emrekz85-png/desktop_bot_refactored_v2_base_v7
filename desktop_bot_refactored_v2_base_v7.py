@@ -579,7 +579,8 @@ def _generate_candidate_configs():
 
     rr_vals = np.arange(1.2, 2.6, 0.3)
     rsi_vals = np.arange(35, 76, 10)
-    at_vals = [False, True]
+    # AlphaTrend is now MANDATORY for SSL_Flow - only True option
+    at_vals = [True]
     # Include both dynamic TP options to ensure optimizer matches what live will use
     dyn_tp_vals = [True, False]
 
@@ -621,7 +622,8 @@ def _generate_quick_candidate_configs():
     # Sadece en önemli RR ve RSI değerlerini kullan
     rr_vals = [1.2, 1.8, 2.4]  # 3 değer (vs 5)
     rsi_vals = [35, 55]        # 2 değer (vs 5)
-    at_vals = [False, True]    # 2 değer
+    # AlphaTrend is now MANDATORY for SSL_Flow - only True option
+    at_vals = [True]           # Sadece 1 değer (AlphaTrend zorunlu)
     dyn_tp_vals = [True]       # Sadece 1 değer (dinamik TP genelde daha iyi)
 
     candidates = []
@@ -3624,7 +3626,8 @@ class OptimizerWorker(QThread):
             rr_vals = np.arange(self.rr_range[0], self.rr_range[1] + 0.01, self.rr_range[2])
             rsi_vals = np.arange(self.rsi_range[0], self.rsi_range[1] + 1, self.rsi_range[2])
             slope_vals = np.arange(self.slope_range[0], self.slope_range[1] + 0.01, self.slope_range[2])
-            at_vals = [True, False]
+            # AlphaTrend is now MANDATORY for SSL_Flow - only True option
+            at_vals = [True]
 
             combinations = list(itertools.product(rr_vals, rsi_vals, slope_vals, at_vals))
             total_combs = len(combinations)
