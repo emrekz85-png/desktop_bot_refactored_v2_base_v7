@@ -152,28 +152,23 @@ def check_ssl_flow_signal(
     # ================= BASELINE TOUCH/RETEST DETECTION =================
     # Check if price has touched or come close to baseline in recent candles
     # This ensures we're entering on a retest, not chasing
+    #
+    # PERFORMANCE: Pre-extract arrays to avoid df.iloc overhead in loops
 
     lookback_start = max(0, abs_index - lookback_candles)
 
+    # Pre-extract arrays for lookback window (PERFORMANCE: ~2-3x faster than df.iloc)
+    lows_arr = df["low"].values[lookback_start:abs_index + 1]
+    highs_arr = df["high"].values[lookback_start:abs_index + 1]
+    baseline_arr = df["baseline"].values[lookback_start:abs_index + 1]
+
     # For LONG: Check if low touched baseline (retest from above)
-    baseline_touch_long = False
-    for i in range(lookback_start, abs_index + 1):
-        row_low = float(df["low"].iloc[i])
-        row_baseline = float(df["baseline"].iloc[i])
-        # Touch: low came within tolerance of baseline
-        if row_low <= row_baseline * (1 + ssl_touch_tolerance):
-            baseline_touch_long = True
-            break
+    # Vectorized: any(low <= baseline * (1 + tolerance))
+    baseline_touch_long = bool(np.any(lows_arr <= baseline_arr * (1 + ssl_touch_tolerance)))
 
     # For SHORT: Check if high touched baseline (retest from below)
-    baseline_touch_short = False
-    for i in range(lookback_start, abs_index + 1):
-        row_high = float(df["high"].iloc[i])
-        row_baseline = float(df["baseline"].iloc[i])
-        # Touch: high came within tolerance of baseline
-        if row_high >= row_baseline * (1 - ssl_touch_tolerance):
-            baseline_touch_short = True
-            break
+    # Vectorized: any(high >= baseline * (1 - tolerance))
+    baseline_touch_short = bool(np.any(highs_arr >= baseline_arr * (1 - ssl_touch_tolerance)))
 
     debug_info["baseline_touch_long"] = baseline_touch_long
     debug_info["baseline_touch_short"] = baseline_touch_short
