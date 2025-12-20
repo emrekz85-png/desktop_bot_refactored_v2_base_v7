@@ -49,8 +49,8 @@ desktop_bot_refactored_v2_base_v7/
 │   ├── __init__.py                        # Strategy registry
 │   ├── base.py                            # SignalResult, STRATEGY_MODES
 │   ├── router.py                          # Signal routing logic
-│   ├── keltner_bounce.py                  # Keltner Bounce strategy
-│   └── pbema_reaction.py                  # PBEMA Reaction strategy
+│   ├── ssl_flow.py                        # SSL Flow strategy [ACTIVE]
+│   └── keltner_bounce.py                  # Keltner Bounce strategy [DISABLED]
 │
 ├── ui/                                    # PyQt5 GUI components
 │   ├── __init__.py                        # Package exports
@@ -116,8 +116,8 @@ The codebase uses a modular architecture with the `core` package as the single s
 |--------|---------|
 | `base.py` | SignalResult dataclass, STRATEGY_MODES enum |
 | `router.py` | Routes signal checks to appropriate strategy |
-| `keltner_bounce.py` | Mean reversion strategy using Keltner bands |
-| `pbema_reaction.py` | Strategy based on PBEMA cloud reaction |
+| `ssl_flow.py` | SSL Flow trend following strategy [ACTIVE] |
+| `keltner_bounce.py` | Mean reversion strategy using Keltner bands [DISABLED] |
 
 ### UI Package (`ui/`)
 
@@ -142,7 +142,18 @@ The codebase uses a modular architecture with the `core` package as the single s
 
 ## Trading Strategies
 
-### 1. Keltner Bounce (Default)
+### 1. SSL Flow [ACTIVE - Default]
+**Mode:** `strategy_mode: "ssl_flow"`
+
+Trend following strategy using SSL HYBRID baseline with AlphaTrend confirmation:
+- Entry: Price retests SSL baseline (HMA60) as support/resistance
+- AlphaTrend confirms buyer/seller dominance (filters fake signals)
+- Target: PBEMA cloud (EMA200)
+- Stop Loss: Beyond swing high/low
+
+**Signal Function:** `strategies.ssl_flow.check_ssl_flow_signal()`
+
+### 2. Keltner Bounce [DISABLED]
 **Mode:** `strategy_mode: "keltner_bounce"`
 
 Mean reversion strategy using Keltner bands with PBEMA cloud as target:
@@ -152,23 +163,15 @@ Mean reversion strategy using Keltner bands with PBEMA cloud as target:
 
 **Signal Function:** `strategies.keltner_bounce.check_keltner_bounce_signal()`
 
-### 2. PBEMA Reaction
-**Mode:** `strategy_mode: "pbema_reaction"`
-
-Strategy based on price reaction to PBEMA cloud (EMA150):
-- Entry: Price approaches or touches PBEMA cloud
-- Uses frontrunning margin for entry
-- Different indicator periods (150 vs 200 EMA)
-
-**Signal Function:** `strategies.pbema_reaction.check_pbema_reaction_signal()`
+**Note:** This strategy is currently disabled. All symbols use SSL Flow by default.
 
 ### Technical Indicators Used
 - **RSI(14)** - Relative Strength Index
 - **ADX(14)** - Average Directional Index
-- **PBEMA Cloud** - EMA200(high) and EMA200(close) for Base, EMA150 for Reaction
-- **SSL Baseline** - HMA60(close)
+- **PBEMA Cloud** - EMA200(high) and EMA200(close) as TP target
+- **SSL Baseline** - HMA60(close) - main trend indicator
 - **Keltner Bands** - baseline ± EMA60(TrueRange) * 0.2
-- **AlphaTrend** - Dual-line trend filter with flow detection
+- **AlphaTrend** - Dual-line trend filter with flow detection (buyers vs sellers)
 
 ---
 
@@ -207,10 +210,9 @@ SYMBOL_PARAMS = {
 `DEFAULT_STRATEGY_CONFIG` defines strategy parameters:
 - `rr` - Risk/Reward ratio
 - `rsi` - RSI threshold
-- `slope` - Slope threshold
-- `at_active` - AlphaTrend filter active
+- `at_active` - AlphaTrend filter active (essential for SSL Flow)
 - `use_trailing` - Trailing stop enabled
-- `strategy_mode` - "keltner_bounce" or "pbema_reaction"
+- `strategy_mode` - "ssl_flow" (default) or "keltner_bounce" (disabled)
 
 ### Environment Variables (Recommended for Telegram)
 ```bash
@@ -231,7 +233,7 @@ Position sizing based on R-multiple (risk units):
 ### Portfolio Risk Limits
 - Per-trade risk: 1.75% (configurable)
 - Max portfolio risk: 5% (configurable)
-- Strategy-isolated wallets (keltner_bounce and pbema_reaction have separate balances)
+- Strategy-isolated wallets (each strategy has separate balance for isolation)
 
 ### Gating System
 Multi-layer gating prevents weak-edge configs:
@@ -327,10 +329,10 @@ results = colab_quick_test(symbol='BTCUSDT', timeframe='15m', candles=10000)
 3. Run optimization to find best parameters
 
 ### Adding New Strategies
-1. Create new module in `strategies/` (see `pbema_reaction.py` as template)
+1. Create new module in `strategies/` (see `ssl_flow.py` as template)
 2. Export from `strategies/__init__.py`
 3. Add to `STRATEGY_REGISTRY` in `strategies/__init__.py`
-4. Update `check_signal()` router if needed
+4. Update `check_signal()` router in `strategies/router.py`
 5. Add strategy wallet in `TradeManager.__init__()`
 
 ### Modifying Indicators

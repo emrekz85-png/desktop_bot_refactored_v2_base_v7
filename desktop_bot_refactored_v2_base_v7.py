@@ -1578,7 +1578,7 @@ class TradeManager:
     def _get_strategy_wallet(self, strategy_mode: str) -> dict:
         """Strateji için cüzdan bilgilerini döndür"""
         if strategy_mode not in self.strategy_wallets:
-            strategy_mode = "keltner_bounce"  # Default
+            strategy_mode = "ssl_flow"  # Default (keltner_bounce is DISABLED)
         return self.strategy_wallets[strategy_mode]
 
     def _calculate_strategy_portfolio_risk(self, strategy_mode: str) -> float:
@@ -1591,7 +1591,7 @@ class TradeManager:
         total_open_risk = 0.0
         for trade in self.open_trades:
             # Sadece bu stratejiye ait trade'leri say
-            trade_strategy = trade.get("strategy_mode", "keltner_bounce")
+            trade_strategy = trade.get("strategy_mode", "ssl_flow")
             if trade_strategy != strategy_mode:
                 continue
 
@@ -1909,7 +1909,7 @@ class TradeManager:
             opt_rsi = config_snapshot.get("rsi", 60)
 
             # Strateji modunu al - pozisyon büyüklüğü strateji cüzdanından hesaplanacak
-            strategy_mode = config_snapshot.get("strategy_mode", "keltner_bounce")
+            strategy_mode = config_snapshot.get("strategy_mode", "ssl_flow")
             strategy_wallet = self._get_strategy_wallet(strategy_mode)
 
             # Confidence-based risk multiplier: reduce position size for medium confidence
@@ -2152,7 +2152,7 @@ class TradeManager:
                         margin_release = initial_margin / 2.0
 
                         # Strateji cüzdanını güncelle
-                        trade_strategy = trade.get("strategy_mode", "keltner_bounce")
+                        trade_strategy = trade.get("strategy_mode", "ssl_flow")
                         strat_wallet = self._get_strategy_wallet(trade_strategy)
                         strat_wallet["wallet_balance"] += margin_release + net_partial_pnl
                         strat_wallet["locked_margin"] -= margin_release
@@ -2292,7 +2292,7 @@ class TradeManager:
                 final_net_pnl = gross_pnl - commission - funding_cost
 
                 # Strateji cüzdanını güncelle
-                trade_strategy = trade.get("strategy_mode", "keltner_bounce")
+                trade_strategy = trade.get("strategy_mode", "ssl_flow")
                 strat_wallet = self._get_strategy_wallet(trade_strategy)
                 strat_wallet["wallet_balance"] += margin_release + final_net_pnl
                 strat_wallet["locked_margin"] -= margin_release
@@ -2432,7 +2432,7 @@ class TradeManager:
                 final_net_pnl = gross_pnl - commission - funding_cost
 
                 # Strateji cüzdanını güncelle
-                trade_strategy = trade.get("strategy_mode", "keltner_bounce")
+                trade_strategy = trade.get("strategy_mode", "ssl_flow")
                 strat_wallet = self._get_strategy_wallet(trade_strategy)
                 strat_wallet["wallet_balance"] += margin_release + final_net_pnl
                 strat_wallet["locked_margin"] -= margin_release
@@ -2544,7 +2544,7 @@ class TradeManager:
                             trade_pnl = float(trade['pnl'])
                             self.total_pnl += trade_pnl
                             # Strateji bazlı PnL hesapla
-                            trade_strategy = trade.get("strategy_mode", "keltner_bounce")
+                            trade_strategy = trade.get("strategy_mode", "ssl_flow")
                             strat_wallet = self._get_strategy_wallet(trade_strategy)
                             strat_wallet["total_pnl"] += trade_pnl
 
@@ -2565,7 +2565,7 @@ class TradeManager:
                             self.locked_margin += m
                             open_pnl += float(trade.get('pnl', 0.0))
                             # Strateji bazlı locked margin
-                            trade_strategy = trade.get("strategy_mode", "keltner_bounce")
+                            trade_strategy = trade.get("strategy_mode", "ssl_flow")
                             strat_wallet = self._get_strategy_wallet(trade_strategy)
                             strat_wallet["locked_margin"] += m
 
@@ -2679,7 +2679,7 @@ class TradeManager:
 
                     # Release margin - strateji cüzdanını güncelle
                     margin = float(trade.get("margin", size / TRADING_CONFIG["leverage"]))
-                    trade_strategy = trade.get("strategy_mode", "keltner_bounce")
+                    trade_strategy = trade.get("strategy_mode", "ssl_flow")
                     strat_wallet = self._get_strategy_wallet(trade_strategy)
                     strat_wallet["wallet_balance"] += margin + net_pnl
                     strat_wallet["locked_margin"] -= margin
@@ -3337,7 +3337,7 @@ class LiveBotWorker(QThread):
 
                                 # Config'i erken yükle - strategy_mode için gerekli
                                 config = load_optimized_config(sym, tf)
-                                strategy_mode = config.get("strategy_mode", "keltner_bounce")
+                                strategy_mode = config.get("strategy_mode", "ssl_flow")
 
                                 # --- Trade Manager Güncellemesi ---
                                 # SSL Flow ve Keltner Bounce icin EMA200 kullan
@@ -5405,7 +5405,7 @@ class MainWindow(QMainWindow):
                             "rsi": tf_cfg.get("rsi", "-"),
                             "at": "Açık" if tf_cfg.get("at_active", False) else "Kapalı",
                             "trailing": "Açık" if tf_cfg.get("use_trailing", False) else "Kapalı",
-                            "strategy": tf_cfg.get("strategy_mode", "keltner_bounce")[:10]
+                            "strategy": tf_cfg.get("strategy_mode", "ssl_flow")[:10]
                         })
 
             total_streams = len(SYMBOLS) * len(TIMEFRAMES)
@@ -6014,7 +6014,7 @@ def run_portfolio_backtest(
     stream_strategy_map = {}
     for (sym, tf) in requested_pairs:
         cfg = best_configs.get((sym, tf)) or load_optimized_config(sym, tf)
-        strategy_mode = cfg.get("strategy_mode", "keltner_bounce")
+        strategy_mode = cfg.get("strategy_mode", "ssl_flow")
         stream_strategy_map[(sym, tf)] = strategy_mode
 
     def get_tm_for_stream(sym, tf):
@@ -7471,7 +7471,7 @@ BASELINE_CONFIG = {
     "at_active": False,
     "use_trailing": False,
     "use_dynamic_pbema_tp": True,
-    "strategy_mode": "keltner_bounce",
+    "strategy_mode": "ssl_flow",
     "disabled": False,
     "confidence": "high",
 }
@@ -7479,19 +7479,19 @@ BASELINE_CONFIG = {
 # Alternatif baseline configs (karşılaştırma için)
 BASELINE_CONFIGS_ALT = {
     "conservative": {
-        "rr": 1.2, "rsi": 45, "slope": 0.5, "at_active": False,
+        "rr": 1.2, "rsi": 45, "at_active": False,
         "use_trailing": False, "use_dynamic_pbema_tp": True,
-        "strategy_mode": "keltner_bounce", "disabled": False, "confidence": "high",
+        "strategy_mode": "ssl_flow", "disabled": False, "confidence": "high",
     },
     "aggressive": {
-        "rr": 2.1, "rsi": 35, "slope": 0.5, "at_active": False,
+        "rr": 2.1, "rsi": 35, "at_active": False,
         "use_trailing": False, "use_dynamic_pbema_tp": True,
-        "strategy_mode": "keltner_bounce", "disabled": False, "confidence": "high",
+        "strategy_mode": "ssl_flow", "disabled": False, "confidence": "high",
     },
     "with_at": {
-        "rr": 1.5, "rsi": 45, "slope": 0.5, "at_active": True,
+        "rr": 1.5, "rsi": 45, "at_active": True,
         "use_trailing": False, "use_dynamic_pbema_tp": True,
-        "strategy_mode": "keltner_bounce", "disabled": False, "confidence": "high",
+        "strategy_mode": "ssl_flow", "disabled": False, "confidence": "high",
     },
 }
 
@@ -8280,7 +8280,7 @@ def run_rolling_walkforward(
             has_open = any(t.get("symbol") == sym and t.get("timeframe") == tf for t in tm.open_trades)
             if not has_open and not tm.check_cooldown(sym, tf, candle_time):
                 # Get signal
-                strategy_mode = cfg.get("strategy_mode", "keltner_bounce")
+                strategy_mode = cfg.get("strategy_mode", "ssl_flow")
                 rr = cfg.get("rr", 2.0)
                 rsi_limit = cfg.get("rsi", 60)
                 at_active = cfg.get("at_active", False)
