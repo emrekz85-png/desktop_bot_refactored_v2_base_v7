@@ -8575,6 +8575,7 @@ def run_rolling_walkforward(
     result = {
         "run_id": run_id,
         "mode": mode,
+        "output_dir": output_dir,  # Include output_dir for trade log writer
         "config": {
             "lookback_days": lookback_days,
             "forward_days": forward_days,

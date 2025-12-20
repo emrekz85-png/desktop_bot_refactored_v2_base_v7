@@ -536,9 +536,16 @@ def write_trade_log(result: dict, output_dir: str = None) -> str:
     win_rate = metrics.get("win_rate", 0)
     total_pnl = metrics.get("total_pnl", 0)
 
-    # Determine output directory
+    # Determine output directory - prefer from result, then parameter, then construct
+    if output_dir is None:
+        output_dir = result.get("output_dir")
     if output_dir is None:
         output_dir = os.path.join("data", "rolling_wf_runs", run_id)
+
+    # Check if there are any trades to log
+    if not all_trades:
+        print(f"⚠️ No trades to log for run {run_id}")
+        return None
 
     os.makedirs(output_dir, exist_ok=True)
     filepath = os.path.join(output_dir, "trades_detailed.txt")
