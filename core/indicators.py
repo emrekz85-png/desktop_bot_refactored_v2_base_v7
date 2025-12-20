@@ -39,16 +39,21 @@ def calculate_alphatrend(
     AlphaTrend is a trend-following indicator that combines ATR and MFI/RSI.
     It provides dynamic support/resistance levels and buyer/seller dominance signals.
 
-    The indicator calculates:
+    The indicator calculates (exactly matching TradingView Pine Script):
     - alphatrend: Single line that switches between tracking support (upT) and
-      resistance (downT) based on momentum. This matches TradingView's AlphaTrend.
-    - at_buyers (blue line): Support tracking line (for debugging/display)
-    - at_sellers (red line): Resistance tracking line (for debugging/display)
+      resistance (downT) based on momentum.
+    - alphatrend_2: alphatrend shifted by 2 bars (for crossover detection)
+    - at_buyers: Same as alphatrend (BLUE line in TradingView)
+    - at_sellers: Same as alphatrend_2 (RED line in TradingView)
 
-    Trade signals (based on LINE DIRECTION - matches TradingView):
-    - LONG: alphatrend > alphatrend_2 (line rising = blue in TradingView)
-    - SHORT: alphatrend < alphatrend_2 (line falling = red in TradingView)
-    - NO TRADE: at_is_flat = True (no flow, sideways market)
+    TradingView Pine Script reference:
+        k1 = plot(AlphaTrend, color=#0022FC)      // BLUE = current
+        k2 = plot(AlphaTrend[2], color=#FC0400)   // RED = 2 bars ago
+
+    Trade signals:
+    - LONG: at_buyers > at_sellers (blue above red = line rising)
+    - SHORT: at_sellers > at_buyers (red above blue = line falling)
+    - NO TRADE: at_is_flat = True (no significant movement)
 
     Args:
         df: DataFrame with OHLCV data
@@ -97,36 +102,10 @@ def calculate_alphatrend(
         downT = df['_at_downT'].ffill().bfill().values
         close_vals = df['close'].values
 
-        # Initialize dual lines
-        at_buyers = np.zeros(n)
-        at_sellers = np.zeros(n)
-
-        # Initial values
-        at_buyers[0] = close_vals[0]
-        at_sellers[0] = close_vals[0]
-
-        for i in range(1, n):
-            # Buyer line (support tracking)
-            # When momentum >= 50, buyers are strong - track higher support
-            if momentum[i] >= 50:
-                at_buyers[i] = max(at_buyers[i - 1], upT[i])
-            else:
-                at_buyers[i] = upT[i]
-
-            # Seller line (resistance tracking)
-            # When momentum < 50, sellers are strong - track lower resistance
-            if momentum[i] < 50:
-                at_sellers[i] = min(at_sellers[i - 1], downT[i])
-            else:
-                at_sellers[i] = downT[i]
-
-        df['at_buyers'] = at_buyers
-        df['at_sellers'] = at_sellers
-
         # ================================================================
-        # SINGLE AlphaTrend line (matches TradingView behavior)
-        # This is the CORRECT calculation that switches between tracking
-        # support (upT) and resistance (downT) based on momentum.
+        # SINGLE AlphaTrend line (matches TradingView Pine Script exactly)
+        # TradingView code:
+        #   AlphaTrend := (RSI >= 50) ? max(upT, nz(AlphaTrend[1])) : min(downT, nz(AlphaTrend[1]))
         # ================================================================
         alphatrend = np.zeros(n)
         alphatrend[0] = close_vals[0]
@@ -143,13 +122,24 @@ def calculate_alphatrend(
         df['alphatrend_2'] = df['alphatrend'].shift(2)
 
         # ================================================================
-        # DOMINANCE based on LINE DIRECTION (TradingView standard)
-        # - Buyers dominant: AlphaTrend line is RISING (blue color in TV)
-        # - Sellers dominant: AlphaTrend line is FALLING (red color in TV)
+        # at_buyers / at_sellers - TradingView UYUMLU
+        # TradingView'da:
+        #   k1 = plot(AlphaTrend, color=#0022FC)      // MAVİ = AlphaTrend (mevcut)
+        #   k2 = plot(AlphaTrend[2], color=#FC0400)   // KIRMIZI = AlphaTrend[2] (2 bar önceki)
+        #
+        # Şimdi log'larda gördüğün at_buyers/at_sellers değerleri
+        # TradingView'daki mavi/kırmızı çizgilerle BİREBİR eşleşecek!
         # ================================================================
-        # Use 2-period lookback for stable direction detection
-        df['at_buyers_dominant'] = df['alphatrend'] > df['alphatrend_2']
-        df['at_sellers_dominant'] = df['alphatrend'] < df['alphatrend_2']
+        df['at_buyers'] = df['alphatrend']      # Mavi çizgi (AlphaTrend)
+        df['at_sellers'] = df['alphatrend_2']   # Kırmızı çizgi (AlphaTrend[2])
+
+        # ================================================================
+        # DOMINANCE based on LINE POSITION (TradingView standard)
+        # - at_buyers > at_sellers = Mavi üstte = Çizgi YÜKSELİYOR = BUYERS dominant
+        # - at_sellers > at_buyers = Kırmızı üstte = Çizgi DÜŞÜYOR = SELLERS dominant
+        # ================================================================
+        df['at_buyers_dominant'] = df['at_buyers'] > df['at_sellers']
+        df['at_sellers_dominant'] = df['at_sellers'] > df['at_buyers']
 
         # Flat/no-flow detection
         # If alphatrend line hasn't moved significantly, market is flat
@@ -169,13 +159,14 @@ def calculate_alphatrend(
     except Exception as e:
         # Fallback: set basic columns to prevent errors
         print(f"AlphaTrend hesaplama hatası: {e}")
-        df['at_buyers'] = df['close']
-        df['at_sellers'] = df['close']
-        df['at_buyers_dominant'] = True
-        df['at_sellers_dominant'] = False
-        df['at_is_flat'] = False
         df['alphatrend'] = df['close']
         df['alphatrend_2'] = df['close'].shift(2)
+        # at_buyers = blue line (alphatrend), at_sellers = red line (alphatrend_2)
+        df['at_buyers'] = df['alphatrend']
+        df['at_sellers'] = df['alphatrend_2']
+        df['at_buyers_dominant'] = df['at_buyers'] > df['at_sellers']
+        df['at_sellers_dominant'] = df['at_sellers'] > df['at_buyers']
+        df['at_is_flat'] = False
         return df
 
 
