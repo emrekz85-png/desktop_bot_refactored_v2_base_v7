@@ -597,6 +597,7 @@ def _generate_candidate_configs():
                 "slope": 0.5,  # Sabit deger - artik kullanilmiyor
                 "at_active": bool(at_active),
                 "use_trailing": False,
+                "use_partial": True,
                 "use_dynamic_pbema_tp": bool(dyn_tp),
                 "strategy_mode": "ssl_flow",
             }
@@ -639,6 +640,7 @@ def _generate_quick_candidate_configs():
                 "slope": 0.5,
                 "at_active": bool(at_active),
                 "use_trailing": False,
+                "use_partial": True,
                 "use_dynamic_pbema_tp": bool(dyn_tp),
                 "strategy_mode": "ssl_flow",
             }
