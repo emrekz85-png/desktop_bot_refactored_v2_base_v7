@@ -88,12 +88,13 @@ def check_signal(
         )
     else:
         # Default: ssl_flow strategy - Trend following with SSL HYBRID [ACTIVE]
+        # NOTE: AlphaTrend is now MANDATORY for SSL_Flow (no use_alphatrend parameter)
         return check_ssl_flow_signal(
             df,
             index=index,
             min_rr=config.get("rr", DEFAULT_STRATEGY_CONFIG["rr"]),
             rsi_limit=config.get("rsi", DEFAULT_STRATEGY_CONFIG["rsi"]),
-            use_alphatrend=config.get("at_active", DEFAULT_STRATEGY_CONFIG.get("at_active", True)),
+            # use_alphatrend REMOVED - AlphaTrend is now MANDATORY for SSL_Flow
             ssl_touch_tolerance=config.get("ssl_touch_tolerance", DEFAULT_STRATEGY_CONFIG.get("ssl_touch_tolerance", 0.002)),
             ssl_body_tolerance=config.get("ssl_body_tolerance", DEFAULT_STRATEGY_CONFIG.get("ssl_body_tolerance", 0.003)),
             min_pbema_distance=config.get("min_pbema_distance", DEFAULT_STRATEGY_CONFIG.get("min_pbema_distance", 0.004)),

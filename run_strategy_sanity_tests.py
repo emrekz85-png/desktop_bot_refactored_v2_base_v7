@@ -213,9 +213,9 @@ def run_test_a_window_equality(
                       for t in tm1.open_trades)
         if not has_open and not tm1.check_cooldown(symbol, timeframe, candle_time):
             if strategy_mode == "ssl_flow":
+                # NOTE: AlphaTrend is now MANDATORY for SSL_Flow (no use_alphatrend param)
                 sig = TradingEngine.check_ssl_flow_signal(
-                    df, idx, min_rr=rr, rsi_limit=rsi_limit,
-                    use_alphatrend=at_active
+                    df, idx, min_rr=rr, rsi_limit=rsi_limit
                 )
             else:
                 sig = TradingEngine.check_signal_diagnostic(
@@ -289,9 +289,9 @@ def run_test_a_window_equality(
                       for t in tm2.open_trades)
         if not has_open and not tm2.check_cooldown(symbol, timeframe, candle_time):
             if strategy_mode == "ssl_flow":
+                # NOTE: AlphaTrend is now MANDATORY for SSL_Flow (no use_alphatrend param)
                 sig = TradingEngine.check_ssl_flow_signal(
-                    df, idx, min_rr=rr, rsi_limit=rsi_limit,
-                    use_alphatrend=at_active
+                    df, idx, min_rr=rr, rsi_limit=rsi_limit
                 )
             else:
                 sig = TradingEngine.check_signal_diagnostic(

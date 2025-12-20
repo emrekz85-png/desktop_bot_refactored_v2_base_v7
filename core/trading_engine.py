@@ -377,7 +377,7 @@ class TradingEngine:
             index: int = -2,
             min_rr: float = 2.0,
             rsi_limit: float = 70.0,
-            use_alphatrend: bool = True,
+            # use_alphatrend REMOVED - AlphaTrend is now MANDATORY for SSL_Flow
             ssl_touch_tolerance: float = 0.002,
             ssl_body_tolerance: float = 0.003,
             min_pbema_distance: float = 0.004,
@@ -394,20 +394,22 @@ class TradingEngine:
 
         Concept:
         - SSL HYBRID (HMA60) determines flow direction (price above = bullish, below = bearish)
-        - AlphaTrend confirms buyer/seller dominance (filters fake SSL signals)
+        - AlphaTrend confirms buyer/seller dominance (filters fake SSL signals) - MANDATORY
         - Entry when price retests SSL baseline as support/resistance
         - TP target at PBEMA cloud (EMA200)
 
         Entry Logic:
         - LONG: Price above SSL baseline + AlphaTrend buyers dominant + retest
         - SHORT: Price below SSL baseline + AlphaTrend sellers dominant + retest
+
+        NOTE: AlphaTrend is now MANDATORY for SSL_Flow strategy.
         """
         return check_ssl_flow_signal(
             df=df,
             index=index,
             min_rr=min_rr,
             rsi_limit=rsi_limit,
-            use_alphatrend=use_alphatrend,
+            # use_alphatrend REMOVED - AlphaTrend is now MANDATORY
             ssl_touch_tolerance=ssl_touch_tolerance,
             ssl_body_tolerance=ssl_body_tolerance,
             min_pbema_distance=min_pbema_distance,

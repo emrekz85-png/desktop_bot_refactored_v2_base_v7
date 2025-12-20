@@ -34,7 +34,8 @@ def check_ssl_flow_signal(
         index: int = -2,
         min_rr: float = 2.0,
         rsi_limit: float = 70.0,
-        use_alphatrend: bool = True,
+        # use_alphatrend REMOVED - AlphaTrend is now MANDATORY for SSL_Flow strategy
+        # This prevents LONG trades when SELLERS are dominant (and vice versa)
         ssl_touch_tolerance: float = 0.002,
         ssl_body_tolerance: float = 0.003,
         min_pbema_distance: float = 0.004,
@@ -61,7 +62,6 @@ def check_ssl_flow_signal(
         index: Candle index for signal check (default: -2, second to last candle)
         min_rr: Minimum risk/reward ratio
         rsi_limit: RSI threshold (LONG: not overbought, SHORT: not oversold)
-        use_alphatrend: Whether to require AlphaTrend confirmation (recommended: True)
         ssl_touch_tolerance: Tolerance for SSL baseline touch detection (0.002 = 0.2%)
         ssl_body_tolerance: Tolerance for candle body position relative to baseline
         min_pbema_distance: Minimum distance between price and PBEMA for valid TP
@@ -191,40 +191,31 @@ def check_ssl_flow_signal(
     debug_info["body_below_baseline"] = body_below_baseline
 
     # ================= ALPHATREND FLOW CONFIRMATION =================
-    # Critical: AlphaTrend confirms real flow vs fake SSL signals
-    at_buyers_dominant = False
-    at_sellers_dominant = False
-    at_is_flat = False
+    # CRITICAL: AlphaTrend is MANDATORY for SSL_Flow strategy
+    # This prevents LONG trades when SELLERS are dominant (and vice versa)
+    # Without this, fake SSL signals lead to wrong-direction trades
 
-    if use_alphatrend:
-        has_at_dual = all(col in df.columns for col in ['at_buyers', 'at_sellers', 'at_is_flat'])
+    has_at_dual = all(col in df.columns for col in ['at_buyers', 'at_sellers', 'at_is_flat'])
 
-        if has_at_dual:
-            at_buyers = float(curr.get("at_buyers", 0))
-            at_sellers = float(curr.get("at_sellers", 0))
-            at_is_flat = bool(curr.get("at_is_flat", False))
+    if not has_at_dual:
+        return _ret(None, None, None, None, "AlphaTrend columns missing (REQUIRED)")
 
-            at_buyers_dominant = at_buyers > at_sellers
-            at_sellers_dominant = at_sellers > at_buyers
+    at_buyers = float(curr.get("at_buyers", 0))
+    at_sellers = float(curr.get("at_sellers", 0))
+    at_is_flat = bool(curr.get("at_is_flat", False))
 
-            debug_info["at_buyers"] = at_buyers
-            debug_info["at_sellers"] = at_sellers
-            debug_info["at_buyers_dominant"] = at_buyers_dominant
-            debug_info["at_sellers_dominant"] = at_sellers_dominant
-            debug_info["at_is_flat"] = at_is_flat
+    at_buyers_dominant = at_buyers > at_sellers
+    at_sellers_dominant = at_sellers > at_buyers
 
-            # NO TRADE if AlphaTrend is flat (sideways market, no flow)
-            if at_is_flat:
-                return _ret(None, None, None, None, "AlphaTrend Flat (No Flow)")
-        else:
-            # Fallback: if AlphaTrend dual-line not available, skip AT filter
-            at_buyers_dominant = True
-            at_sellers_dominant = True
-            debug_info["at_fallback"] = True
-    else:
-        # AlphaTrend disabled - allow trades without AT confirmation
-        at_buyers_dominant = True
-        at_sellers_dominant = True
+    debug_info["at_buyers"] = at_buyers
+    debug_info["at_sellers"] = at_sellers
+    debug_info["at_buyers_dominant"] = at_buyers_dominant
+    debug_info["at_sellers_dominant"] = at_sellers_dominant
+    debug_info["at_is_flat"] = at_is_flat
+
+    # NO TRADE if AlphaTrend is flat (sideways market, no flow)
+    if at_is_flat:
+        return _ret(None, None, None, None, "AlphaTrend Flat (No Flow)")
 
     # ================= PBEMA DISTANCE CHECK =================
     # Ensure there's enough room between price and PBEMA for profitable trade
