@@ -39,13 +39,15 @@ def calculate_alphatrend(
     AlphaTrend is a trend-following indicator that combines ATR and MFI/RSI.
     It provides dynamic support/resistance levels and buyer/seller dominance signals.
 
-    The indicator calculates two lines:
-    - at_buyers (blue line): Tracks buyer strength / support levels
-    - at_sellers (red line): Tracks seller strength / resistance levels
+    The indicator calculates:
+    - alphatrend: Single line that switches between tracking support (upT) and
+      resistance (downT) based on momentum. This matches TradingView's AlphaTrend.
+    - at_buyers (blue line): Support tracking line (for debugging/display)
+    - at_sellers (red line): Resistance tracking line (for debugging/display)
 
-    Trade signals:
-    - LONG: at_buyers > at_sellers (buyers dominant)
-    - SHORT: at_sellers > at_buyers (sellers dominant)
+    Trade signals (based on LINE DIRECTION - matches TradingView):
+    - LONG: alphatrend > alphatrend_2 (line rising = blue in TradingView)
+    - SHORT: alphatrend < alphatrend_2 (line falling = red in TradingView)
     - NO TRADE: at_is_flat = True (no flow, sideways market)
 
     Args:
@@ -121,33 +123,45 @@ def calculate_alphatrend(
         df['at_buyers'] = at_buyers
         df['at_sellers'] = at_sellers
 
-        # Dominance signals
-        df['at_buyers_dominant'] = df['at_buyers'] > df['at_sellers']
-        df['at_sellers_dominant'] = df['at_sellers'] > df['at_buyers']
+        # ================================================================
+        # SINGLE AlphaTrend line (matches TradingView behavior)
+        # This is the CORRECT calculation that switches between tracking
+        # support (upT) and resistance (downT) based on momentum.
+        # ================================================================
+        alphatrend = np.zeros(n)
+        alphatrend[0] = close_vals[0]
+
+        for i in range(1, n):
+            if momentum[i] >= 50:
+                # Bullish momentum: track support, ratchet UP
+                alphatrend[i] = max(alphatrend[i - 1], upT[i])
+            else:
+                # Bearish momentum: track resistance, ratchet DOWN
+                alphatrend[i] = min(alphatrend[i - 1], downT[i])
+
+        df['alphatrend'] = alphatrend
+        df['alphatrend_2'] = df['alphatrend'].shift(2)
+
+        # ================================================================
+        # DOMINANCE based on LINE DIRECTION (TradingView standard)
+        # - Buyers dominant: AlphaTrend line is RISING (blue color in TV)
+        # - Sellers dominant: AlphaTrend line is FALLING (red color in TV)
+        # ================================================================
+        # Use 2-period lookback for stable direction detection
+        df['at_buyers_dominant'] = df['alphatrend'] > df['alphatrend_2']
+        df['at_sellers_dominant'] = df['alphatrend'] < df['alphatrend_2']
 
         # Flat/no-flow detection
-        # If both lines have minimal change over lookback period, market is flat
-        df['_at_buyers_change'] = df['at_buyers'].pct_change(flat_lookback).abs()
-        df['_at_sellers_change'] = df['at_sellers'].pct_change(flat_lookback).abs()
+        # If alphatrend line hasn't moved significantly, market is flat
+        df['_at_change'] = df['alphatrend'].pct_change(flat_lookback).abs()
 
-        df['at_is_flat'] = (
-            (df['_at_buyers_change'] < flat_threshold) &
-            (df['_at_sellers_change'] < flat_threshold)
-        )
+        df['at_is_flat'] = df['_at_change'] < flat_threshold
         # Fill NaN values (first few rows) as False
         df['at_is_flat'] = df['at_is_flat'].fillna(False)
 
-        # Backward compatibility: single alphatrend line = dominant line
-        df['alphatrend'] = np.where(
-            df['at_buyers_dominant'],
-            df['at_buyers'],
-            df['at_sellers']
-        )
-        df['alphatrend_2'] = df['alphatrend'].shift(2)
-
         # Cleanup temporary columns
         cleanup_cols = ['_at_tr', '_at_atr', '_at_momentum', '_at_upT', '_at_downT',
-                        '_at_buyers_change', '_at_sellers_change']
+                        '_at_change']
         df.drop(columns=[c for c in cleanup_cols if c in df.columns], inplace=True, errors='ignore')
 
         return df

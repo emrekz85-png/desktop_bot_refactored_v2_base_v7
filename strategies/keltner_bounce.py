@@ -298,27 +298,33 @@ def check_keltner_bounce_signal(
         is_short = False
 
     # --- AlphaTrend (optional) ---
-    # Uses dual-line system: at_buyers (blue) vs at_sellers (red)
-    # LONG requires: buyers dominant (blue > red)
-    # SHORT requires: sellers dominant (red > blue)
+    # Uses LINE DIRECTION to determine dominance (matches TradingView behavior):
+    # - BUYERS dominant: AlphaTrend line is RISING (blue in TradingView)
+    # - SELLERS dominant: AlphaTrend line is FALLING (red in TradingView)
     # NO TRADE if: at_is_flat = True (sideways market, no flow)
     if use_alphatrend:
-        # Check if new dual-line columns are available
-        has_at_dual = all(col in df.columns for col in ['at_buyers', 'at_sellers', 'at_is_flat'])
+        # Check for required AlphaTrend columns
+        required_at_cols = ['alphatrend', 'alphatrend_2', 'at_buyers_dominant', 'at_sellers_dominant', 'at_is_flat']
+        has_at_cols = all(col in df.columns for col in required_at_cols)
 
-        if has_at_dual:
+        if has_at_cols:
+            # Get values for logging
             at_buyers = float(curr.get("at_buyers", 0))
             at_sellers = float(curr.get("at_sellers", 0))
             at_is_flat = bool(curr.get("at_is_flat", False))
+
+            # USE PRE-CALCULATED DOMINANCE based on LINE DIRECTION
+            at_buyers_dominant = bool(curr.get("at_buyers_dominant", False))
+            at_sellers_dominant = bool(curr.get("at_sellers_dominant", False))
 
             # Add debug info for AlphaTrend
             debug_info["at_buyers"] = at_buyers
             debug_info["at_sellers"] = at_sellers
             debug_info["at_is_flat"] = at_is_flat
-            debug_info["at_buyers_dominant"] = at_buyers > at_sellers
-            debug_info["at_sellers_dominant"] = at_sellers > at_buyers
+            debug_info["at_buyers_dominant"] = at_buyers_dominant
+            debug_info["at_sellers_dominant"] = at_sellers_dominant
 
-            # FLOW CHECK: If AlphaTrend lines are flat, no trade (sideways market)
+            # FLOW CHECK: If AlphaTrend line is flat, no trade (sideways market)
             if at_is_flat:
                 if is_long:
                     is_long = False
@@ -327,13 +333,13 @@ def check_keltner_bounce_signal(
                     is_short = False
                     debug_info["short_rejected_flat_at"] = True
 
-            # LONG filter: Buyers must be dominant (blue > red)
-            if is_long and not (at_buyers > at_sellers):
+            # LONG filter: Buyers must be dominant (line rising = blue in TV)
+            if is_long and not at_buyers_dominant:
                 is_long = False
                 debug_info["long_rejected_at_filter"] = True
 
-            # SHORT filter: Sellers must be dominant (red > blue)
-            if is_short and not (at_sellers > at_buyers):
+            # SHORT filter: Sellers must be dominant (line falling = red in TV)
+            if is_short and not at_sellers_dominant:
                 is_short = False
                 debug_info["short_rejected_at_filter"] = True
 

@@ -8311,7 +8311,9 @@ def run_rolling_walkforward(
                         "at_buyers": float(row.get("at_buyers", 0)) if pd.notna(row.get("at_buyers")) else None,
                         "at_sellers": float(row.get("at_sellers", 0)) if pd.notna(row.get("at_sellers")) else None,
                         "at_is_flat": bool(row.get("at_is_flat", False)) if pd.notna(row.get("at_is_flat")) else False,
-                        "at_dominant": "BUYERS" if row.get("at_buyers", 0) > row.get("at_sellers", 0) else "SELLERS",
+                        # Dominance based on LINE DIRECTION (alphatrend vs alphatrend_2)
+                        # BUYERS = line rising (blue in TV), SELLERS = line falling (red in TV)
+                        "at_dominant": "BUYERS" if row.get("at_buyers_dominant", False) else ("SELLERS" if row.get("at_sellers_dominant", False) else "FLAT"),
                         "baseline": float(row.get("baseline", 0)) if pd.notna(row.get("baseline")) else None,
                         "pb_ema_top": float(row.get("pb_ema_top", 0)) if pd.notna(row.get("pb_ema_top")) else None,
                         "pb_ema_bot": float(row.get("pb_ema_bot", 0)) if pd.notna(row.get("pb_ema_bot")) else None,

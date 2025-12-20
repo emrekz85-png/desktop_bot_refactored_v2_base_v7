@@ -195,18 +195,30 @@ def check_ssl_flow_signal(
     # This prevents LONG trades when SELLERS are dominant (and vice versa)
     # Without this, fake SSL signals lead to wrong-direction trades
 
-    has_at_dual = all(col in df.columns for col in ['at_buyers', 'at_sellers', 'at_is_flat'])
+    # Check for required AlphaTrend columns
+    required_at_cols = ['alphatrend', 'alphatrend_2', 'at_buyers_dominant', 'at_sellers_dominant', 'at_is_flat']
+    has_at_cols = all(col in df.columns for col in required_at_cols)
 
-    if not has_at_dual:
+    if not has_at_cols:
         return _ret(None, None, None, None, "AlphaTrend columns missing (REQUIRED)")
 
-    at_buyers = float(curr.get("at_buyers", 0))
-    at_sellers = float(curr.get("at_sellers", 0))
+    # Get AlphaTrend values for logging
+    alphatrend_val = float(curr.get("alphatrend", 0))
+    alphatrend_2_val = float(curr.get("alphatrend_2", 0))
     at_is_flat = bool(curr.get("at_is_flat", False))
 
-    at_buyers_dominant = at_buyers > at_sellers
-    at_sellers_dominant = at_sellers > at_buyers
+    # USE PRE-CALCULATED DOMINANCE based on LINE DIRECTION
+    # Buyers dominant = AlphaTrend line is RISING (blue in TradingView)
+    # Sellers dominant = AlphaTrend line is FALLING (red in TradingView)
+    at_buyers_dominant = bool(curr.get("at_buyers_dominant", False))
+    at_sellers_dominant = bool(curr.get("at_sellers_dominant", False))
 
+    # Also get legacy at_buyers/at_sellers for backward compat logging
+    at_buyers = float(curr.get("at_buyers", 0))
+    at_sellers = float(curr.get("at_sellers", 0))
+
+    debug_info["alphatrend"] = alphatrend_val
+    debug_info["alphatrend_2"] = alphatrend_2_val
     debug_info["at_buyers"] = at_buyers
     debug_info["at_sellers"] = at_sellers
     debug_info["at_buyers_dominant"] = at_buyers_dominant
