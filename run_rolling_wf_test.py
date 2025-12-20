@@ -662,8 +662,10 @@ def run_comparison_test(start_date: str = None, end_date: str = None):
     )
 
     # Write detailed trade logs for each mode
+    # Note: compare_rolling_modes returns {"results": {...}, "comparison": {...}}
+    mode_results = result.get("results", {})
     for mode in ["fixed", "monthly", "weekly"]:
-        mode_result = result.get(mode, {})
+        mode_result = mode_results.get(mode, {})
         if mode_result.get("trades"):
             write_trade_log(mode_result)
 
@@ -686,8 +688,10 @@ def run_full_year_test():
     )
 
     # Write detailed trade logs for each mode
+    # Note: compare_rolling_modes returns {"results": {...}, "comparison": {...}}
+    mode_results = result.get("results", {})
     for mode in ["fixed", "monthly", "weekly"]:
-        mode_result = result.get(mode, {})
+        mode_result = mode_results.get(mode, {})
         if mode_result.get("trades"):
             write_trade_log(mode_result)
 
