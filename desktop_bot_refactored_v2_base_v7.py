@@ -7477,6 +7477,7 @@ BASELINE_CONFIG = {
     "slope": 0.5,
     "at_active": True,  # AlphaTrend ZORUNLU - SSL Flow için gerekli
     "use_trailing": False,
+    "use_partial": True,  # Partial TP aktif
     "use_dynamic_pbema_tp": True,
     "strategy_mode": "ssl_flow",
     "disabled": False,
@@ -7488,17 +7489,17 @@ BASELINE_CONFIG = {
 BASELINE_CONFIGS_ALT = {
     "conservative": {
         "rr": 1.2, "rsi": 45, "at_active": True,
-        "use_trailing": False, "use_dynamic_pbema_tp": True,
+        "use_trailing": False, "use_partial": True, "use_dynamic_pbema_tp": True,
         "strategy_mode": "ssl_flow", "disabled": False, "confidence": "high",
     },
     "aggressive": {
         "rr": 2.1, "rsi": 35, "at_active": True,
-        "use_trailing": False, "use_dynamic_pbema_tp": True,
+        "use_trailing": False, "use_partial": True, "use_dynamic_pbema_tp": True,
         "strategy_mode": "ssl_flow", "disabled": False, "confidence": "high",
     },
     "standard": {
         "rr": 2.0, "rsi": 70, "at_active": True,
-        "use_trailing": False, "use_dynamic_pbema_tp": True,
+        "use_trailing": False, "use_partial": True, "use_dynamic_pbema_tp": True,
         "strategy_mode": "ssl_flow", "disabled": False, "confidence": "high",
     },
 }
