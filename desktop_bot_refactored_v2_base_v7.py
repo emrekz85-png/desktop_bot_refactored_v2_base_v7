@@ -7925,6 +7925,7 @@ def run_rolling_walkforward(
     calibration_days: int = 60,  # For mode="fixed" - days to find config
     verbose: bool = True,
     output_dir: str = None,   # Run-specific output directory
+    preloaded_streams: dict = None,  # PERFORMANCE: Pre-fetched data to avoid API calls
 ) -> dict:
     """Run Rolling Walk-Forward backtest with stitched OOS results.
 
@@ -7945,6 +7946,7 @@ def run_rolling_walkforward(
         calibration_days: mode="fixed" için ilk N gün calibration (test dışı)
         verbose: Detaylı çıktı
         output_dir: Run çıktılarının kaydedileceği klasör
+        preloaded_streams: Önceden çekilmiş veri (compare_rolling_modes için)
 
     Returns:
         dict with:
@@ -8400,7 +8402,12 @@ def run_rolling_walkforward(
     # ==========================================
     # Instead of fetching data for each window separately (50+ API calls),
     # fetch the entire date range once and filter in memory (~5x faster)
-    if windows:
+
+    # If preloaded_streams provided (from compare_rolling_modes), use it directly
+    if preloaded_streams is not None:
+        master_streams = preloaded_streams
+        log(f"\n🚀 [PERFORMANS] Önceden yüklenmiş veri kullanılıyor ({len(master_streams)} stream)")
+    elif windows:
         # Calculate the full date range needed
         earliest_start = min(
             w.get("optimize_start") or w["trade_start"] - timedelta(days=30)
@@ -8695,6 +8702,7 @@ def compare_rolling_modes(
         dict with comparison results for all 5 modes
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    from datetime import datetime, timedelta
 
     def log(msg: str):
         if verbose:
@@ -8707,6 +8715,75 @@ def compare_rolling_modes(
     if parallel:
         log(f"   🚀 PARALEL MOD AKTİF - 5 mod aynı anda çalışacak")
     log(f"{'='*70}\n")
+
+    # ==========================================
+    # PERFORMANCE: Pre-fetch ALL data ONCE for all modes
+    # ==========================================
+    # This prevents 429 rate limit errors when running modes in parallel
+    # Each mode would otherwise make its own API calls
+
+    if symbols is None:
+        symbols = SYMBOLS
+    if timeframes is None:
+        timeframes = TIMEFRAMES
+
+    # Set default dates
+    if end_date is None:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+    if start_date is None:
+        start_dt = datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=365)
+        start_date = start_dt.strftime("%Y-%m-%d")
+
+    # Calculate max lookback needed (triday uses 90 days)
+    max_lookback = 90
+    earliest_start = datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=max_lookback + 30)
+    latest_end = datetime.strptime(end_date, "%Y-%m-%d")
+
+    log(f"🚀 [PERFORMANS] Tüm modlar için veri tek seferde çekiliyor...")
+    log(f"   📅 Tam aralık: {earliest_start.strftime('%Y-%m-%d')} → {latest_end.strftime('%Y-%m-%d')}")
+
+    # Define fetch_data_for_period locally (same as in run_rolling_walkforward)
+    def fetch_data_for_comparison(start_dt, end_dt, symbols_list, timeframes_list):
+        """Fetch OHLCV data for all symbols/timeframes in a date range."""
+        buffer_days = 30
+        fetch_start = start_dt - timedelta(days=buffer_days)
+        fetch_start_str = fetch_start.strftime("%Y-%m-%d")
+        fetch_end_str = end_dt.strftime("%Y-%m-%d")
+
+        streams = {}
+
+        def fetch_one(sym, tf):
+            try:
+                df = TradingEngine.get_historical_data_pagination(
+                    sym, tf, start_date=fetch_start_str, end_date=fetch_end_str
+                )
+                if df is None or df.empty or len(df) < 250:
+                    return None
+                df = TradingEngine.calculate_indicators(df)
+                return (sym, tf, df.reset_index(drop=True))
+            except Exception:
+                return None
+
+        jobs = [(s, t) for s in symbols_list for t in timeframes_list]
+
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(fetch_one, s, t): (s, t) for s, t in jobs}
+            for future in as_completed(futures):
+                res = future.result()
+                if res:
+                    sym, tf, df = res
+                    streams[(sym, tf)] = df
+
+        return streams
+
+    # Fetch ALL data once
+    preloaded_streams = fetch_data_for_comparison(earliest_start, latest_end, symbols, timeframes)
+
+    if preloaded_streams:
+        log(f"   ✓ {len(preloaded_streams)} stream önbelleğe alındı (tüm modlar bu veriyi kullanacak)")
+    else:
+        log(f"   ⚠️ Veri çekilemedi!")
+        preloaded_streams = {}
 
     results = {}
 
@@ -8726,13 +8803,15 @@ def compare_rolling_modes(
             timeframes=timeframes,
             start_date=start_date,
             end_date=end_date,
-            verbose=False if parallel else verbose,  # Disable verbose in parallel to avoid log collision
+            verbose=False if parallel else verbose,
+            preloaded_streams=preloaded_streams,  # PERFORMANCE: Use pre-fetched data
             **config
         )
 
     if parallel:
         # PERFORMANCE: Run all 5 modes in parallel (~3-4x faster)
-        log("🚀 Tüm modlar paralel başlatılıyor...")
+        # No more 429 errors because data is already fetched!
+        log("\n🚀 Tüm modlar paralel başlatılıyor (veri zaten yüklendi)...")
 
         with ThreadPoolExecutor(max_workers=5) as executor:
             futures = {
