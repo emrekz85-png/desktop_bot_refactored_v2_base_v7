@@ -8300,7 +8300,25 @@ def run_rolling_walkforward(
                 # signal_type is "LONG", "SHORT", or None
                 if sig and len(sig) >= 5 and sig[0] is not None:
                     signal_type, entry, tp, sl, reason = sig[:5]
-                    # Build trade data with config snapshot
+
+                    # Capture indicator snapshot at entry time (for trade logging)
+                    row = df.iloc[idx]
+                    indicators_at_entry = {
+                        "at_buyers": float(row.get("at_buyers", 0)) if pd.notna(row.get("at_buyers")) else None,
+                        "at_sellers": float(row.get("at_sellers", 0)) if pd.notna(row.get("at_sellers")) else None,
+                        "at_is_flat": bool(row.get("at_is_flat", False)) if pd.notna(row.get("at_is_flat")) else False,
+                        "at_dominant": "BUYERS" if row.get("at_buyers", 0) > row.get("at_sellers", 0) else "SELLERS",
+                        "baseline": float(row.get("baseline", 0)) if pd.notna(row.get("baseline")) else None,
+                        "pb_ema_top": float(row.get("pb_ema_top", 0)) if pd.notna(row.get("pb_ema_top")) else None,
+                        "pb_ema_bot": float(row.get("pb_ema_bot", 0)) if pd.notna(row.get("pb_ema_bot")) else None,
+                        "rsi": float(row.get("rsi", 0)) if pd.notna(row.get("rsi")) else None,
+                        "adx": float(row.get("adx", 0)) if pd.notna(row.get("adx")) else None,
+                        "keltner_upper": float(row.get("keltner_upper", 0)) if pd.notna(row.get("keltner_upper")) else None,
+                        "keltner_lower": float(row.get("keltner_lower", 0)) if pd.notna(row.get("keltner_lower")) else None,
+                        "close": float(row.get("close", 0)) if pd.notna(row.get("close")) else None,
+                    }
+
+                    # Build trade data with config snapshot and indicators
                     trade_data = {
                         "symbol": sym,
                         "timeframe": tf,
@@ -8311,6 +8329,7 @@ def run_rolling_walkforward(
                         "open_time_utc": candle_time,
                         "setup": reason or "Unknown",
                         "config_snapshot": cfg,  # Snapshot at entry time
+                        "indicators_at_entry": indicators_at_entry,  # Indicator snapshot
                     }
                     tm.open_trade(trade_data)
 

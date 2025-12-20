@@ -910,6 +910,7 @@ class SimTradeManager(BaseTradeManager):
             "opt_rr": opt_rr,
             "opt_rsi": opt_rsi,
             "risk_amount": risk_amount,
+            "indicators_at_entry": trade_data.get("indicators_at_entry", {}),  # Indicator snapshot at entry
         }
 
         self.wallet_balance -= required_margin
