@@ -2138,7 +2138,7 @@ class TradeManager:
 
                 # ---------- PARTIAL TP + BREAKEVEN ----------
                 if in_profit and use_partial:
-                    if (not self.open_trades[i].get("partial_taken")) and progress >= 0.50:
+                    if (not self.open_trades[i].get("partial_taken")) and progress >= 0.40:
                         partial_size = size / 2.0
 
                         # Partial fill için conservative fiyat kullan
@@ -2185,8 +2185,8 @@ class TradeManager:
                         self.open_trades[i]["partial_price"] = float(partial_fill)
                         self.open_trades[i]["partial_taken"] = True
                         _append_trade_event(self.open_trades[i], "PARTIAL", candle_time_utc, partial_fill)
-                        # Breakeven'e çek - küçük buffer ile (spread/slippage koruması)
-                        be_buffer = 0.0003  # %0.03 buffer
+                        # Breakeven'e çek - buffer ile (spread/slippage koruması)
+                        be_buffer = 0.002  # %0.2 buffer
                         if t_type == "LONG":
                             be_sl = entry * (1 + be_buffer)
                         else:
@@ -2197,8 +2197,8 @@ class TradeManager:
                         trades_updated = True
 
                     elif (not trade.get("breakeven")) and progress >= 0.40:
-                        # Breakeven'e çek - küçük buffer ile
-                        be_buffer = 0.0003  # %0.03 buffer
+                        # Breakeven'e çek - buffer ile
+                        be_buffer = 0.002  # %0.2 buffer
                         if t_type == "LONG":
                             be_sl = entry * (1 + be_buffer)
                         else:
@@ -2216,8 +2216,8 @@ class TradeManager:
                 # ---------- TRAILING SL ----------
                 if in_profit and use_trailing:
                     if (not trade.get("breakeven")) and progress >= 0.40:
-                        # Breakeven'e çek - küçük buffer ile
-                        be_buffer = 0.0003  # %0.03 buffer
+                        # Breakeven'e çek - buffer ile
+                        be_buffer = 0.002  # %0.2 buffer
                         if t_type == "LONG":
                             be_sl = entry * (1 + be_buffer)
                         else:
