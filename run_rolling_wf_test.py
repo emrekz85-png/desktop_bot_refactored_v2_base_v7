@@ -660,8 +660,8 @@ def run_comparison_test(start_date: str = None, end_date: str = None):
 
     # Use BASELINE_CONFIG for fixed mode
     result = compare_rolling_modes(
-        symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "LINKUSDT"],
-        timeframes=["15m", "1h", "4h"],
+        symbols=SYMBOLS,  # Tüm semboller
+        timeframes=TIMEFRAMES,  # Tüm timeframe'ler
         start_date=start_date or "2025-06-01",
         end_date=end_date or "2025-12-18",
         fixed_config=BASELINE_CONFIG,
