@@ -10,7 +10,7 @@ Bu script, Rolling Walk-Forward framework'ünü test eder:
 Modlar:
 - Fixed: Sabit config, re-optimization yok
 - Monthly: Aylık re-optimization (60 gün lookback, 30 gün forward)
-- Weekly: Haftalık re-optimization (60 gün lookback, 7 gün forward)
+- Weekly: Haftalık re-optimization (30 gün lookback, 7 gün forward)
 
 Kullanım:
     python run_rolling_wf_test.py                    # Varsayılan test (son 6 ay)

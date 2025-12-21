@@ -8677,7 +8677,7 @@ def compare_rolling_modes(
     Bu fonksiyon 3 modu aynı veri üzerinde çalıştırır:
     1. Fixed: Tek sabit config (calibration dönemi ile belirlenir)
     2. Monthly: Aylık re-optimization (60 gün lookback, 30 gün forward)
-    3. Weekly: Haftalık re-optimization (60 gün lookback, 7 gün forward)
+    3. Weekly: Haftalık re-optimization (30 gün lookback, 7 gün forward)
 
     Args:
         symbols: Test edilecek semboller
