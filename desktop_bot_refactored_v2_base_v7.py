@@ -8113,8 +8113,13 @@ def run_rolling_walkforward(
     # ==========================================
 
     def fetch_data_for_period(start_dt, end_dt, symbols_list, timeframes_list):
-        """Fetch OHLCV data for all symbols/timeframes in a date range."""
+        """Fetch OHLCV data for all symbols/timeframes in a date range.
+
+        SAFE OPTIMIZATION: Increased thread pool for IO-bound operations.
+        This does NOT affect backtest results - only data fetching speed.
+        """
         from concurrent.futures import ThreadPoolExecutor, as_completed
+        import os
 
         # Add buffer for indicator warmup (200 candles worth of data before start)
         buffer_days = 30  # ~200 candles for 4h, more than enough for lower TFs
@@ -8139,7 +8144,12 @@ def run_rolling_walkforward(
 
         jobs = [(s, t) for s in symbols_list for t in timeframes_list]
 
-        with ThreadPoolExecutor(max_workers=5) as executor:
+        # SAFE OPTIMIZATION: Higher parallelism for IO-bound network requests
+        # Ryzen 7 4800H (8C/16T) can handle more concurrent network requests
+        # This only affects data fetch speed, NOT backtest logic/results
+        max_workers = min(12, max(8, os.cpu_count() or 4))
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(fetch_one, s, t): (s, t) for s, t in jobs}
             for future in as_completed(futures):
                 res = future.result()
