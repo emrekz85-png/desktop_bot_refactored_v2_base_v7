@@ -1908,6 +1908,7 @@ class TradeManager:
             # Fallback: signal_data'da yoksa diskten yükle (eski trade'ler için)
             config_snapshot = signal_data.get("config_snapshot") or load_optimized_config(sym, tf)
             use_trailing = config_snapshot.get("use_trailing", False)
+            use_partial = config_snapshot.get("use_partial", True)  # Partial TP default True
             use_dynamic_pbema_tp = config_snapshot.get("use_dynamic_pbema_tp", True)
             opt_rr = config_snapshot.get("rr", 3.0)
             opt_rsi = config_snapshot.get("rsi", 60)
@@ -2009,9 +2010,11 @@ class TradeManager:
                 "events": [],
                 "status": "OPEN", "pnl": 0.0,
                 "breakeven": False, "trailing_active": False, "partial_taken": False, "partial_price": None,
+                "trailing_be_to_partial": False,
                 "has_cash": True, "close_time": "", "close_price": "",
                 # Trade açılırken snapshot edilen config ayarları (yaşam döngüsü boyunca sabit kalır)
                 "use_trailing": use_trailing,
+                "use_partial": use_partial,  # Partial TP config'den
                 "use_dynamic_pbema_tp": use_dynamic_pbema_tp,
                 "opt_rr": opt_rr,
                 "opt_rsi": opt_rsi,
@@ -2209,6 +2212,33 @@ class TradeManager:
                         self.open_trades[i]["breakeven"] = True
                         _append_trade_event(self.open_trades[i], "BE_SET", candle_time_utc, be_sl)
                         trades_updated = True
+
+                # ---------- TRAILING BE TO PARTIAL ----------
+                # %90 progress'e ulaşınca BE'yi partial fiyatına taşı (daha fazla kar koruma)
+                if (self.open_trades[i].get("partial_taken") and
+                    self.open_trades[i].get("breakeven") and
+                    progress >= 0.90 and
+                    not self.open_trades[i].get("trailing_be_to_partial")):
+
+                    partial_price = self.open_trades[i].get("partial_price")
+                    if partial_price is not None:
+                        current_sl = float(self.open_trades[i]["sl"])
+                        be_buffer = 0.002  # %0.2 buffer
+
+                        if t_type == "LONG":
+                            new_be = partial_price * (1 + be_buffer)
+                            if new_be > current_sl:
+                                self.open_trades[i]["sl"] = new_be
+                                self.open_trades[i]["trailing_be_to_partial"] = True
+                                _append_trade_event(self.open_trades[i], "BE_TO_PARTIAL", candle_time_utc, new_be)
+                                trades_updated = True
+                        else:
+                            new_be = partial_price * (1 - be_buffer)
+                            if new_be < current_sl:
+                                self.open_trades[i]["sl"] = new_be
+                                self.open_trades[i]["trailing_be_to_partial"] = True
+                                _append_trade_event(self.open_trades[i], "BE_TO_PARTIAL", candle_time_utc, new_be)
+                                trades_updated = True
 
                 # 1m için fiyat TP'ye çok yaklaşınca SL'i kâra çek
                 if _apply_1m_profit_lock(self.open_trades[i], tf, t_type, entry, dyn_tp, progress):
