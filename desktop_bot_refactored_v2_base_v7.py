@@ -8395,36 +8395,6 @@ def run_rolling_walkforward(
             for tf in timeframes:
                 global_config_map[(sym, tf)] = fixed_config.copy()
 
-    # ==========================================
-    # PERFORMANCE OPTIMIZATION: Pre-fetch ALL data ONCE
-    # ==========================================
-    # Instead of fetching data for each window separately (50+ API calls),
-    # fetch the entire date range once and filter in memory (~5x faster)
-    if windows:
-        # Calculate the full date range needed
-        earliest_start = min(
-            w.get("optimize_start") or w["trade_start"] - timedelta(days=30)
-            for w in windows
-        )
-        latest_end = max(w["trade_end"] for w in windows)
-
-        # Add buffer for indicator warmup
-        full_fetch_start = earliest_start - timedelta(days=30)
-
-        log(f"\n🚀 [PERFORMANS] Tüm veri tek seferde çekiliyor...")
-        log(f"   📅 Tam aralık: {full_fetch_start.strftime('%Y-%m-%d')} → {latest_end.strftime('%Y-%m-%d')}")
-
-        # Fetch ALL data once
-        master_streams = fetch_data_for_period(full_fetch_start, latest_end, symbols, timeframes)
-
-        if master_streams:
-            log(f"   ✓ {len(master_streams)} stream önbelleğe alındı (her window için tekrar çekilmeyecek)")
-        else:
-            log(f"   ⚠️ Veri çekilemedi!")
-            master_streams = {}
-    else:
-        master_streams = {}
-
     for window in windows:
         log(f"\n{'─'*50}")
         log(f"📦 Window {window['window_id']}: Trade [{window['trade_start'].strftime('%Y-%m-%d')} → {window['trade_end'].strftime('%Y-%m-%d')}]")
@@ -8437,17 +8407,9 @@ def run_rolling_walkforward(
 
         fetch_end = window["trade_end"]
 
-        # 4.2 Use cached data (PERFORMANCE: no API call per window)
-        # Filter master_streams to this window's date range
-        streams = {}
-        for (sym, tf), master_df in master_streams.items():
-            # Add buffer before fetch_start for indicators
-            buffer_start = fetch_start - timedelta(days=15)
-            filtered = filter_data_by_date(master_df.copy(), buffer_start, fetch_end)
-            if len(filtered) >= 250:
-                streams[(sym, tf)] = filtered
-
-        log(f"   📊 Önbellekten {len(streams)} stream filtrelendi")
+        # 4.2 Fetch data
+        log(f"   📥 Veri çekiliyor: {fetch_start.strftime('%Y-%m-%d')} → {fetch_end.strftime('%Y-%m-%d')}")
+        streams = fetch_data_for_period(fetch_start, fetch_end, symbols, timeframes)
 
         if not streams:
             log(f"   ⚠️ Veri yok, window atlanıyor")
@@ -8671,7 +8633,6 @@ def compare_rolling_modes(
     end_date: str = None,
     fixed_config: dict = None,
     verbose: bool = True,
-    parallel: bool = True,  # PERFORMANCE: Run modes in parallel (~3-4x faster)
 ) -> dict:
     """Compare Fixed vs Monthly vs Weekly vs 5day vs Triday re-optimization modes.
 
@@ -8689,12 +8650,10 @@ def compare_rolling_modes(
         end_date: Test dönemi sonu
         fixed_config: Fixed mode için kullanılacak config (None = calibration ile bulunur)
         verbose: Detaylı çıktı
-        parallel: Modları paralel çalıştır (True = ~3-4x hızlı)
 
     Returns:
         dict with comparison results for all 5 modes
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     def log(msg: str):
         if verbose:
@@ -8704,73 +8663,73 @@ def compare_rolling_modes(
     log(f"🔬 ROLLING WALK-FORWARD KARŞILAŞTIRMA")
     log(f"{'='*70}")
     log(f"   Modlar: Fixed vs Monthly vs Weekly vs 5day vs Triday")
-    if parallel:
-        log(f"   🚀 PARALEL MOD AKTİF - 5 mod aynı anda çalışacak")
     log(f"{'='*70}\n")
 
     results = {}
 
-    # Mode configurations
-    mode_configs = {
-        "fixed": {"mode": "fixed", "fixed_config": fixed_config},
-        "monthly": {"mode": "monthly", "lookback_days": 60, "forward_days": 30},
-        "weekly": {"mode": "weekly", "lookback_days": 30, "forward_days": 7},
-        "5day": {"mode": "5day", "lookback_days": 75, "forward_days": 5},
-        "triday": {"mode": "triday", "lookback_days": 90, "forward_days": 3},
-    }
+    # Run Fixed mode
+    log("📊 [1/5] Fixed mode çalıştırılıyor...")
+    results["fixed"] = run_rolling_walkforward(
+        symbols=symbols,
+        timeframes=timeframes,
+        mode="fixed",
+        fixed_config=fixed_config,
+        start_date=start_date,
+        end_date=end_date,
+        verbose=verbose,
+    )
 
-    def run_mode(mode_name, config):
-        """Run a single mode and return result."""
-        return mode_name, run_rolling_walkforward(
-            symbols=symbols,
-            timeframes=timeframes,
-            start_date=start_date,
-            end_date=end_date,
-            verbose=False if parallel else verbose,  # Disable verbose in parallel to avoid log collision
-            **config
-        )
+    # Run Monthly mode
+    log("\n📊 [2/5] Monthly mode çalıştırılıyor...")
+    results["monthly"] = run_rolling_walkforward(
+        symbols=symbols,
+        timeframes=timeframes,
+        mode="monthly",
+        lookback_days=60,
+        forward_days=30,
+        start_date=start_date,
+        end_date=end_date,
+        verbose=verbose,
+    )
 
-    if parallel:
-        # PERFORMANCE: Run all 5 modes in parallel (~3-4x faster)
-        log("🚀 Tüm modlar paralel başlatılıyor...")
+    # Run Weekly mode
+    log("\n📊 [3/5] Weekly mode çalıştırılıyor...")
+    results["weekly"] = run_rolling_walkforward(
+        symbols=symbols,
+        timeframes=timeframes,
+        mode="weekly",
+        lookback_days=30,
+        forward_days=7,
+        start_date=start_date,
+        end_date=end_date,
+        verbose=verbose,
+    )
 
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = {
-                executor.submit(run_mode, mode_name, config): mode_name
-                for mode_name, config in mode_configs.items()
-            }
+    # Run 5day mode
+    log("\n📊 [4/5] 5day mode çalıştırılıyor...")
+    results["5day"] = run_rolling_walkforward(
+        symbols=symbols,
+        timeframes=timeframes,
+        mode="5day",
+        lookback_days=75,
+        forward_days=5,
+        start_date=start_date,
+        end_date=end_date,
+        verbose=verbose,
+    )
 
-            completed_count = 0
-            for future in as_completed(futures):
-                mode_name = futures[future]
-                try:
-                    result_name, result_data = future.result()
-                    results[result_name] = result_data
-                    completed_count += 1
-                    pnl = result_data.get("metrics", {}).get("total_pnl", 0)
-                    trades = result_data.get("metrics", {}).get("total_trades", 0)
-                    log(f"   ✓ [{completed_count}/5] {mode_name.upper()} tamamlandı: PnL=${pnl:.2f}, Trades={trades}")
-                except Exception as e:
-                    log(f"   ⚠️ {mode_name} hatası: {e}")
-                    results[mode_name] = {"metrics": {"total_pnl": 0, "total_trades": 0}}
-
-        log(f"\n✅ Tüm modlar tamamlandı!")
-    else:
-        # Sequential execution (original behavior)
-        log("📊 [1/5] Fixed mode çalıştırılıyor...")
-        _, results["fixed"] = run_mode("fixed", mode_configs["fixed"])
-
-        log("\n📊 [2/5] Monthly mode çalıştırılıyor...")
-        _, results["monthly"] = run_mode("monthly", mode_configs["monthly"])
-
-        log("\n📊 [3/5] Weekly mode çalıştırılıyor...")
-        _, results["weekly"] = run_mode("weekly", mode_configs["weekly"])
-
-        log("\n📊 [4/5] 5day mode çalıştırılıyor...")
-        _, results["5day"] = run_mode("5day", mode_configs["5day"])
-
-        log("\n📊 [5/5] Triday mode çalıştırılıyor...")
-        _, results["triday"] = run_mode("triday", mode_configs["triday"])
+    # Run Triday mode
+    log("\n📊 [5/5] Triday mode çalıştırılıyor...")
+    results["triday"] = run_rolling_walkforward(
+        symbols=symbols,
+        timeframes=timeframes,
+        mode="triday",
+        lookback_days=90,
+        forward_days=3,
+        start_date=start_date,
+        end_date=end_date,
+        verbose=verbose,
+    )
 
     # ==========================================
     # COMPARISON REPORT
