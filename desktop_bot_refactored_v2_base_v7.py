@@ -7999,20 +7999,9 @@ def run_rolling_walkforward(
     # Determine forward_days based on mode
     if mode == "weekly":
         forward_days = 7
-    elif mode == "5day":
-        forward_days = 5
-    elif mode == "triday":
-        forward_days = 3
     elif mode == "monthly":
         forward_days = 30
     # mode == "fixed" uses calibration_days concept differently
-
-    # Mode-specific lookback adjustment for better sample size
-    # Shorter forward periods need more lookback data to reduce noise
-    if mode == "5day":
-        lookback_days = 75  # 15x ratio
-    elif mode == "triday":
-        lookback_days = 90  # 30x ratio - more data for very short forward
 
     # Calculate required lookback for start_date
     end_dt = datetime.strptime(end_date, "%Y-%m-%d")
@@ -8683,14 +8672,12 @@ def compare_rolling_modes(
     verbose: bool = True,
     parallel: bool = True,  # PERFORMANCE: Run modes in parallel (~3-4x faster)
 ) -> dict:
-    """Compare Fixed vs Monthly vs Weekly vs 5day vs Triday re-optimization modes.
+    """Compare Fixed vs Monthly vs Weekly re-optimization modes.
 
-    Bu fonksiyon 5 modu aynı veri üzerinde çalıştırır:
+    Bu fonksiyon 3 modu aynı veri üzerinde çalıştırır:
     1. Fixed: Tek sabit config (calibration dönemi ile belirlenir)
     2. Monthly: Aylık re-optimization (60 gün lookback, 30 gün forward)
     3. Weekly: Haftalık re-optimization (30 gün lookback, 7 gün forward)
-    4. 5day: 5 günlük re-optimization (75 gün lookback, 5 gün forward)
-    5. Triday: 3 günlük re-optimization (90 gün lookback, 3 gün forward)
 
     Args:
         symbols: Test edilecek semboller
@@ -8702,7 +8689,7 @@ def compare_rolling_modes(
         parallel: Modları paralel çalıştır (True = ~3-4x hızlı)
 
     Returns:
-        dict with comparison results for all 5 modes
+        dict with comparison results for all 3 modes
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from datetime import datetime, timedelta
@@ -8861,7 +8848,7 @@ def compare_rolling_modes(
     log(f"📊 KARŞILAŞTIRMA SONUÇLARI")
     log(f"{'='*70}")
 
-    headers = ["Metrik", "Fixed", "Monthly", "Weekly", "5day", "Triday", "En İyi"]
+    headers = ["Metrik", "Fixed", "Monthly", "Weekly", "En İyi"]
     rows = []
 
     # PnL comparison
@@ -8869,8 +8856,6 @@ def compare_rolling_modes(
         "fixed": results["fixed"]["metrics"]["total_pnl"],
         "monthly": results["monthly"]["metrics"]["total_pnl"],
         "weekly": results["weekly"]["metrics"]["total_pnl"],
-        "5day": results["5day"]["metrics"]["total_pnl"],
-        "triday": results["triday"]["metrics"]["total_pnl"],
     }
     best_pnl = max(pnls, key=pnls.get)
     rows.append([
@@ -8878,8 +8863,6 @@ def compare_rolling_modes(
         f"${pnls['fixed']:.2f}",
         f"${pnls['monthly']:.2f}",
         f"${pnls['weekly']:.2f}",
-        f"${pnls['5day']:.2f}",
-        f"${pnls['triday']:.2f}",
         best_pnl.upper(),
     ])
 
@@ -8888,8 +8871,6 @@ def compare_rolling_modes(
         "fixed": results["fixed"]["metrics"]["max_drawdown"],
         "monthly": results["monthly"]["metrics"]["max_drawdown"],
         "weekly": results["weekly"]["metrics"]["max_drawdown"],
-        "5day": results["5day"]["metrics"]["max_drawdown"],
-        "triday": results["triday"]["metrics"]["max_drawdown"],
     }
     best_dd = min(dds, key=lambda x: abs(dds[x]))  # Lowest absolute DD is best
     rows.append([
@@ -8897,8 +8878,6 @@ def compare_rolling_modes(
         f"${dds['fixed']:.2f}",
         f"${dds['monthly']:.2f}",
         f"${dds['weekly']:.2f}",
-        f"${dds['5day']:.2f}",
-        f"${dds['triday']:.2f}",
         best_dd.upper(),
     ])
 
@@ -8907,8 +8886,6 @@ def compare_rolling_modes(
         "fixed": results["fixed"]["metrics"]["window_hit_rate"],
         "monthly": results["monthly"]["metrics"]["window_hit_rate"],
         "weekly": results["weekly"]["metrics"]["window_hit_rate"],
-        "5day": results["5day"]["metrics"]["window_hit_rate"],
-        "triday": results["triday"]["metrics"]["window_hit_rate"],
     }
     best_hr = max(hit_rates, key=hit_rates.get)
     rows.append([
@@ -8916,8 +8893,6 @@ def compare_rolling_modes(
         f"{hit_rates['fixed']*100:.1f}%",
         f"{hit_rates['monthly']*100:.1f}%",
         f"{hit_rates['weekly']*100:.1f}%",
-        f"{hit_rates['5day']*100:.1f}%",
-        f"{hit_rates['triday']*100:.1f}%",
         best_hr.upper(),
     ])
 
@@ -8926,8 +8901,6 @@ def compare_rolling_modes(
         "fixed": results["fixed"]["metrics"]["worst_window_pnl"],
         "monthly": results["monthly"]["metrics"]["worst_window_pnl"],
         "weekly": results["weekly"]["metrics"]["worst_window_pnl"],
-        "5day": results["5day"]["metrics"]["worst_window_pnl"],
-        "triday": results["triday"]["metrics"]["worst_window_pnl"],
     }
     best_worst = max(worst, key=worst.get)  # Highest (least negative) is best
     rows.append([
@@ -8935,13 +8908,11 @@ def compare_rolling_modes(
         f"${worst['fixed']:.2f}",
         f"${worst['monthly']:.2f}",
         f"${worst['weekly']:.2f}",
-        f"${worst['5day']:.2f}",
-        f"${worst['triday']:.2f}",
         best_worst.upper(),
     ])
 
     # Print table
-    col_widths = [20, 12, 12, 12, 12, 12, 10]
+    col_widths = [20, 12, 12, 12, 10]
     header_line = "".join(h.ljust(w) for h, w in zip(headers, col_widths))
     log(header_line)
     log("─" * sum(col_widths))
@@ -8956,7 +8927,7 @@ def compare_rolling_modes(
     log("─" * 70)
 
     # Determine best mode based on multiple criteria
-    scores = {"fixed": 0, "monthly": 0, "weekly": 0, "5day": 0, "triday": 0}
+    scores = {"fixed": 0, "monthly": 0, "weekly": 0}
     scores[best_pnl] += 2  # PnL worth 2 points
     scores[best_dd] += 1   # DD worth 1 point
     scores[best_hr] += 1   # Hit rate worth 1 point
@@ -8964,7 +8935,7 @@ def compare_rolling_modes(
 
     best_mode = max(scores, key=scores.get)
 
-    log(f"   Puanlar: Fixed={scores['fixed']}, Monthly={scores['monthly']}, Weekly={scores['weekly']}, 5day={scores['5day']}, Triday={scores['triday']}")
+    log(f"   Puanlar: Fixed={scores['fixed']}, Monthly={scores['monthly']}, Weekly={scores['weekly']}")
     log(f"\n   🏆 ÖNERİLEN MOD: {best_mode.upper()}")
 
     # Specific recommendations
@@ -8973,17 +8944,9 @@ def compare_rolling_modes(
     elif best_mode == "monthly":
         log("   → Aylık re-opt en iyi denge - stabil ama adaptif")
         log("   → Live'da: Aylık re-opt + Haftalık health check önerilir")
-    elif best_mode == "weekly":
+    else:  # weekly
         log("   → Haftalık re-opt en iyi - piyasa hızlı değişiyor")
         log("   → DİKKAT: Overfit riski yüksek, dikkatli izlenmeli")
-    elif best_mode == "5day":
-        log("   → 5 günlük re-opt en iyi - piyasa hızlı değişiyor (75 gün lookback)")
-        log("   → Weekly ile triday arasında denge noktası")
-        log("   → DİKKAT: Overfit riski yüksek, dikkatli izlenmeli")
-    else:  # triday
-        log("   → 3 günlük re-opt en iyi - piyasa çok hızlı değişiyor (90 gün lookback)")
-        log("   → DİKKAT: Overfit riski çok yüksek, agresif adaptasyon")
-        log("   → Bu mod genellikle yüksek volatilite dönemlerinde işe yarar")
 
     # Check if ANY mode is profitable
     if all(pnls[m] <= 0 for m in pnls):
