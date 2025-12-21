@@ -424,6 +424,35 @@ class BaseTradeManager(ABC):
                 self.open_trades[trade_idx]["breakeven"] = True
                 append_trade_event(self.open_trades[trade_idx], "BE_SET", candle_time_utc, be_sl)
 
+        # Trailing BE to Partial: Move BE from entry to partial price when 90% progress reached
+        # This protects more profit if price reverses after approaching TP
+        if (trade.get("partial_taken") and
+            trade.get("breakeven") and
+            progress >= 0.90 and
+            not trade.get("trailing_be_to_partial")):
+
+            partial_price = trade.get("partial_price")
+            if partial_price is not None:
+                current_sl = float(self.open_trades[trade_idx]["sl"])
+                be_buffer = 0.002  # Same buffer as BE_SET
+
+                if t_type == "LONG":
+                    # New BE at partial price (with buffer above it)
+                    new_be = partial_price * (1 + be_buffer)
+                    # Only update if new BE is higher than current SL (more protective)
+                    if new_be > current_sl:
+                        self.open_trades[trade_idx]["sl"] = new_be
+                        self.open_trades[trade_idx]["trailing_be_to_partial"] = True
+                        append_trade_event(self.open_trades[trade_idx], "BE_TO_PARTIAL", candle_time_utc, new_be)
+                else:
+                    # SHORT: New BE at partial price (with buffer below it)
+                    new_be = partial_price * (1 - be_buffer)
+                    # Only update if new BE is lower than current SL (more protective)
+                    if new_be < current_sl:
+                        self.open_trades[trade_idx]["sl"] = new_be
+                        self.open_trades[trade_idx]["trailing_be_to_partial"] = True
+                        append_trade_event(self.open_trades[trade_idx], "BE_TO_PARTIAL", candle_time_utc, new_be)
+
         # 1m profit lock
         if apply_1m_profit_lock(self.open_trades[trade_idx], tf, t_type, entry, dyn_tp, progress):
             append_trade_event(self.open_trades[trade_idx], "PROFIT_LOCK", candle_time_utc,
@@ -905,6 +934,7 @@ class SimTradeManager(BaseTradeManager):
             "trailing_active": False,
             "partial_taken": False,
             "partial_price": None,
+            "trailing_be_to_partial": False,
             "has_cash": True,
             "close_time_utc": "",
             "close_time_local": "",
