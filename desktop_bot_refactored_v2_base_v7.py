@@ -7955,8 +7955,6 @@ def run_rolling_walkforward(
     calibration_days: int = 60,  # For mode="fixed" - days to find config
     verbose: bool = True,
     output_dir: str = None,   # Run-specific output directory
-    lightweight: bool = False,  # Skip indicator snapshots for speed
-    summary_only: bool = False,  # Only log summary metrics, not full trade lists
 ) -> dict:
     """Run Rolling Walk-Forward backtest with stitched OOS results.
 
@@ -8115,14 +8113,8 @@ def run_rolling_walkforward(
     # ==========================================
 
     def fetch_data_for_period(start_dt, end_dt, symbols_list, timeframes_list):
-        """Fetch OHLCV data for all symbols/timeframes in a date range.
-
-        OPTIMIZED: Uses higher parallelism for Ryzen 7 4800H (8C/16T)
-        - IO-bound fetch: 16 threads (max)
-        - CPU-bound indicators: calculated inline after fetch
-        """
+        """Fetch OHLCV data for all symbols/timeframes in a date range."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        import os
 
         # Add buffer for indicator warmup (200 candles worth of data before start)
         buffer_days = 30  # ~200 candles for 4h, more than enough for lower TFs
@@ -8147,11 +8139,7 @@ def run_rolling_walkforward(
 
         jobs = [(s, t) for s in symbols_list for t in timeframes_list]
 
-        # OPTIMIZATION: Higher parallelism for 8C/16T CPU
-        # IO-bound tasks can use more threads than CPU cores
-        max_workers = min(16, max(8, os.cpu_count() or 4))
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=5) as executor:
             futures = {executor.submit(fetch_one, s, t): (s, t) for s, t in jobs}
             for future in as_completed(futures):
                 res = future.result()
@@ -8194,15 +8182,8 @@ def run_rolling_walkforward(
         )
 
     def run_window_backtest(streams, config_map, trade_start_dt, trade_end_dt,
-                           carried_positions=None, log_func=log, lightweight=False):
+                           carried_positions=None, log_func=log):
         """Run backtest for a single window with frozen configs.
-
-        OPTIMIZED VERSION (v40.x):
-        - Int64 nanosecond timestamps instead of pd.Timestamp
-        - Cached timedelta values
-        - O(1) open trade lookup with set
-        - Binary search for start index (np.searchsorted)
-        - Pre-extracted indicator arrays
 
         Args:
             streams: Dict of (sym, tf) -> DataFrame
@@ -8210,13 +8191,11 @@ def run_rolling_walkforward(
             trade_start_dt: Start of trade window
             trade_end_dt: End of trade window
             carried_positions: Open positions carried from previous window
-            lightweight: If True, skip indicator snapshots for speed
 
         Returns:
             dict with window results and updated carried positions
         """
         import heapq
-        import numpy as np
 
         # Initialize trade manager with current equity
         tm = SimTradeManager(initial_balance=running_equity)
@@ -8229,93 +8208,63 @@ def run_rolling_walkforward(
                 tm.locked_margin += float(trade.get("margin", 0))
                 tm.wallet_balance -= float(trade.get("margin", 0))
 
-        # ==========================================
-        # OPTIMIZATION 1: Pre-cache timedeltas (nanoseconds)
-        # ==========================================
-        td_ns_cache = {}
-        for tf in set(tf for (_, tf) in streams.keys()):
-            td = tf_to_timedelta(tf)
-            td_ns_cache[tf] = int(td.value)  # nanoseconds
-
-        # ==========================================
-        # OPTIMIZATION 2: Pre-extract arrays with int64 timestamps
-        # ==========================================
+        # Pre-extract arrays for performance
         streams_arrays = {}
-        streams_indicator_arrays = {}  # For indicator snapshots
-
         for (sym, tf), df in streams.items():
             cfg = config_map.get((sym, tf), {})
+            strategy_mode = cfg.get("strategy_mode", "ssl_flow")
+            # Her iki strateji icin de EMA200 kullan
             pb_top_col = "pb_ema_top"
             pb_bot_col = "pb_ema_bot"
 
-            # Convert timestamps to int64 nanoseconds
-            ts_series = pd.to_datetime(df["timestamp"])
-            ts_ns = ts_series.astype('int64').values
-
             streams_arrays[(sym, tf)] = {
-                "timestamps_ns": ts_ns,
-                "timestamps_raw": ts_series.values,  # Keep for trade records
-                "highs": df["high"].values.astype(np.float64),
-                "lows": df["low"].values.astype(np.float64),
-                "closes": df["close"].values.astype(np.float64),
-                "opens": df["open"].values.astype(np.float64),
-                "pb_tops": df[pb_top_col].values.astype(np.float64) if pb_top_col in df.columns else df["close"].values.astype(np.float64),
-                "pb_bots": df[pb_bot_col].values.astype(np.float64) if pb_bot_col in df.columns else df["close"].values.astype(np.float64),
+                "timestamps": pd.to_datetime(df["timestamp"]).values,
+                "highs": df["high"].values,
+                "lows": df["low"].values,
+                "closes": df["close"].values,
+                "opens": df["open"].values,
+                "pb_tops": df.get(pb_top_col, df["close"]).values if pb_top_col in df.columns else df["close"].values,
+                "pb_bots": df.get(pb_bot_col, df["close"]).values if pb_bot_col in df.columns else df["close"].values,
             }
 
-            # Pre-extract indicator arrays for fast access (avoid df.iloc[idx])
-            if not lightweight:
-                streams_indicator_arrays[(sym, tf)] = {
-                    "at_buyers": df["at_buyers"].values if "at_buyers" in df.columns else None,
-                    "at_sellers": df["at_sellers"].values if "at_sellers" in df.columns else None,
-                    "at_is_flat": df["at_is_flat"].values if "at_is_flat" in df.columns else None,
-                    "at_buyers_dominant": df["at_buyers_dominant"].values if "at_buyers_dominant" in df.columns else None,
-                    "at_sellers_dominant": df["at_sellers_dominant"].values if "at_sellers_dominant" in df.columns else None,
-                    "baseline": df["baseline"].values if "baseline" in df.columns else None,
-                    "rsi": df["rsi"].values if "rsi" in df.columns else None,
-                    "adx": df["adx"].values if "adx" in df.columns else None,
-                }
-
-        # ==========================================
-        # OPTIMIZATION 3: Convert boundaries to int64 nanoseconds
-        # ==========================================
-        first_stream_key = next(iter(streams_arrays.keys())) if streams_arrays else None
-        if not first_stream_key:
-            return {"pnl": 0, "trades": 0, "wins": 0, "max_dd": 0, "closed_trades": [], "open_positions": [], "final_equity": running_equity}
-
-        # Convert to nanoseconds
-        trade_start_ns = int(pd.Timestamp(trade_start_dt).tz_localize(None).value)
-        trade_end_ns = int(pd.Timestamp(trade_end_dt).tz_localize(None).value)
-
-        # ==========================================
-        # OPTIMIZATION 4: Build heap with int64 timestamps + binary search
-        # ==========================================
-        heap = []  # (time_ns, sym, tf)
+        # Build event heap
+        heap = []
         ptr = {}
 
+        # Check if timestamps are timezone-aware by converting first one to pd.Timestamp
+        first_stream_key = list(streams_arrays.keys())[0] if streams_arrays else None
+        is_tz_aware = False
+        if first_stream_key:
+            first_ts = pd.Timestamp(streams_arrays[first_stream_key]["timestamps"][0])
+            is_tz_aware = first_ts.tzinfo is not None
+
+        # Convert trade window boundaries
+        if is_tz_aware:
+            trade_start_ts = pd.Timestamp(trade_start_dt).tz_localize('UTC')
+            trade_end_ts = pd.Timestamp(trade_end_dt).tz_localize('UTC')
+        else:
+            trade_start_ts = pd.Timestamp(trade_start_dt)
+            trade_end_ts = pd.Timestamp(trade_end_dt)
+
         for (sym, tf), df in sorted(streams.items()):
-            arr = streams_arrays[(sym, tf)]
-            ts_ns = arr["timestamps_ns"]
+            # Find the index where trade window starts
+            timestamps = streams_arrays[(sym, tf)]["timestamps"]
 
-            # Binary search for first index >= trade_start
-            start_idx = np.searchsorted(ts_ns, trade_start_ns, side='left')
-            start_idx = max(start_idx, 250)  # Ensure warmup
+            # Find first index >= trade_start
+            start_idx = 0
+            for i, ts in enumerate(timestamps):
+                if pd.Timestamp(ts) >= trade_start_ts:
+                    start_idx = max(i, 250)  # Ensure warmup
+                    break
 
-            if start_idx >= len(ts_ns) - 2:
+            if start_idx >= len(df) - 2:
                 continue
 
             ptr[(sym, tf)] = start_idx
-
-            # Push with int64 timestamp + timedelta
-            next_time_ns = ts_ns[start_idx] + td_ns_cache[tf]
-            heapq.heappush(heap, (next_time_ns, sym, tf))
-
-        # ==========================================
-        # OPTIMIZATION 5: O(1) open trade lookup
-        # ==========================================
-        open_trade_keys = set()  # (sym, tf) pairs with open trades
-        for trade in tm.open_trades:
-            open_trade_keys.add((trade.get("symbol"), trade.get("timeframe")))
+            heapq.heappush(
+                heap,
+                (pd.Timestamp(timestamps[start_idx]) + tf_to_timedelta(tf), sym, tf),
+            )
 
         # Track window metrics
         window_trades = []
@@ -8323,25 +8272,22 @@ def run_rolling_walkforward(
         window_peak_pnl = 0.0
         window_max_dd = 0.0
 
-        # ==========================================
-        # MAIN EVENT LOOP (OPTIMIZED)
-        # ==========================================
+        # Process events
         while heap:
-            ev_time_ns, sym, tf = heapq.heappop(heap)
+            ev_time, sym, tf = heapq.heappop(heap)
 
             # Stop if we've passed the trade window end
-            if ev_time_ns >= trade_end_ns:
+            if ev_time >= trade_end_ts:
                 break
 
             idx = ptr[(sym, tf)]
             arr = streams_arrays[(sym, tf)]
-            ts_ns = arr["timestamps_ns"]
+            df = streams[(sym, tf)]
 
-            if idx >= len(ts_ns) - 2:
+            if idx >= len(arr["timestamps"]) - 2:
                 continue
 
-            # Get candle data (fast array access)
-            candle_time = arr["timestamps_raw"][idx]
+            candle_time = arr["timestamps"][idx]
             candle_high = arr["highs"][idx]
             candle_low = arr["lows"][idx]
             candle_close = arr["closes"][idx]
@@ -8352,10 +8298,10 @@ def run_rolling_walkforward(
             cfg = config_map.get((sym, tf), {})
             if cfg.get("disabled", False):
                 ptr[(sym, tf)] = idx + 1
-                if idx + 1 < len(ts_ns) - 2:
-                    next_time_ns = ts_ns[idx + 1] + td_ns_cache[tf]
-                    if next_time_ns < trade_end_ns:
-                        heapq.heappush(heap, (next_time_ns, sym, tf))
+                if idx + 1 < len(arr["timestamps"]) - 2:
+                    next_time = pd.Timestamp(arr["timestamps"][idx + 1]) + tf_to_timedelta(tf)
+                    if next_time < trade_end_ts:
+                        heapq.heappush(heap, (next_time, sym, tf))
                 continue
 
             # Update existing trades
@@ -8370,11 +8316,9 @@ def run_rolling_walkforward(
                 window_peak_pnl = max(window_peak_pnl, window_pnl)
                 window_max_dd = max(window_max_dd, window_peak_pnl - window_pnl)
                 window_trades.append(trade)
-                # Remove from open trade set
-                open_trade_keys.discard((sym, tf))
 
-            # Check for new signals (O(1) lookup instead of O(n) any())
-            has_open = (sym, tf) in open_trade_keys
+            # Check for new signals (only if no open position for this stream)
+            has_open = any(t.get("symbol") == sym and t.get("timeframe") == tf for t in tm.open_trades)
             if not has_open and not tm.check_cooldown(sym, tf, candle_time):
                 # Get signal
                 strategy_mode = cfg.get("strategy_mode", "ssl_flow")
@@ -8382,33 +8326,42 @@ def run_rolling_walkforward(
                 rsi_limit = cfg.get("rsi", 60)
                 at_active = cfg.get("at_active", True)
 
-                df = streams[(sym, tf)]
                 if strategy_mode == "ssl_flow":
-                    sig = TradingEngine.check_ssl_flow_signal(df, idx, min_rr=rr, rsi_limit=rsi_limit)
+                    # NOTE: AlphaTrend is now MANDATORY for SSL_Flow (no use_alphatrend param)
+                    sig = TradingEngine.check_ssl_flow_signal(
+                        df, idx, min_rr=rr, rsi_limit=rsi_limit
+                    )
                 else:
-                    sig = TradingEngine.check_signal_diagnostic(df, idx, min_rr=rr, rsi_limit=rsi_limit, slope_thresh=0.0, use_alphatrend=at_active)
+                    sig = TradingEngine.check_signal_diagnostic(
+                        df, idx, min_rr=rr, rsi_limit=rsi_limit,
+                        slope_thresh=0.0, use_alphatrend=at_active
+                    )
 
+                # Signal is a tuple: (signal_type, entry, tp, sl, reason)
+                # signal_type is "LONG", "SHORT", or None
                 if sig and len(sig) >= 5 and sig[0] is not None:
                     signal_type, entry, tp, sl, reason = sig[:5]
 
-                    # OPTIMIZATION: Use pre-extracted arrays instead of df.iloc[idx]
-                    if lightweight:
-                        indicators_at_entry = {}
-                    else:
-                        ind_arr = streams_indicator_arrays.get((sym, tf), {})
-                        indicators_at_entry = {
-                            "at_buyers": float(ind_arr["at_buyers"][idx]) if ind_arr.get("at_buyers") is not None and not np.isnan(ind_arr["at_buyers"][idx]) else None,
-                            "at_sellers": float(ind_arr["at_sellers"][idx]) if ind_arr.get("at_sellers") is not None and not np.isnan(ind_arr["at_sellers"][idx]) else None,
-                            "at_is_flat": bool(ind_arr["at_is_flat"][idx]) if ind_arr.get("at_is_flat") is not None else False,
-                            "at_dominant": "BUYERS" if (ind_arr.get("at_buyers_dominant") is not None and ind_arr["at_buyers_dominant"][idx]) else ("SELLERS" if (ind_arr.get("at_sellers_dominant") is not None and ind_arr["at_sellers_dominant"][idx]) else "FLAT"),
-                            "baseline": float(ind_arr["baseline"][idx]) if ind_arr.get("baseline") is not None and not np.isnan(ind_arr["baseline"][idx]) else None,
-                            "pb_ema_top": float(pb_top),
-                            "pb_ema_bot": float(pb_bot),
-                            "rsi": float(ind_arr["rsi"][idx]) if ind_arr.get("rsi") is not None and not np.isnan(ind_arr["rsi"][idx]) else None,
-                            "adx": float(ind_arr["adx"][idx]) if ind_arr.get("adx") is not None and not np.isnan(ind_arr["adx"][idx]) else None,
-                            "close": float(candle_close),
-                        }
+                    # Capture indicator snapshot at entry time (for trade logging)
+                    row = df.iloc[idx]
+                    indicators_at_entry = {
+                        "at_buyers": float(row.get("at_buyers", 0)) if pd.notna(row.get("at_buyers")) else None,
+                        "at_sellers": float(row.get("at_sellers", 0)) if pd.notna(row.get("at_sellers")) else None,
+                        "at_is_flat": bool(row.get("at_is_flat", False)) if pd.notna(row.get("at_is_flat")) else False,
+                        # Dominance based on LINE DIRECTION (alphatrend vs alphatrend_2)
+                        # BUYERS = line rising (blue in TV), SELLERS = line falling (red in TV)
+                        "at_dominant": "BUYERS" if row.get("at_buyers_dominant", False) else ("SELLERS" if row.get("at_sellers_dominant", False) else "FLAT"),
+                        "baseline": float(row.get("baseline", 0)) if pd.notna(row.get("baseline")) else None,
+                        "pb_ema_top": float(row.get("pb_ema_top", 0)) if pd.notna(row.get("pb_ema_top")) else None,
+                        "pb_ema_bot": float(row.get("pb_ema_bot", 0)) if pd.notna(row.get("pb_ema_bot")) else None,
+                        "rsi": float(row.get("rsi", 0)) if pd.notna(row.get("rsi")) else None,
+                        "adx": float(row.get("adx", 0)) if pd.notna(row.get("adx")) else None,
+                        "keltner_upper": float(row.get("keltner_upper", 0)) if pd.notna(row.get("keltner_upper")) else None,
+                        "keltner_lower": float(row.get("keltner_lower", 0)) if pd.notna(row.get("keltner_lower")) else None,
+                        "close": float(row.get("close", 0)) if pd.notna(row.get("close")) else None,
+                    }
 
+                    # Build trade data with config snapshot and indicators
                     trade_data = {
                         "symbol": sym,
                         "timeframe": tf,
@@ -8418,22 +8371,23 @@ def run_rolling_walkforward(
                         "sl": sl,
                         "open_time_utc": candle_time,
                         "setup": reason or "Unknown",
-                        "config_snapshot": cfg,
-                        "indicators_at_entry": indicators_at_entry,
+                        "config_snapshot": cfg,  # Snapshot at entry time
+                        "indicators_at_entry": indicators_at_entry,  # Indicator snapshot
                     }
-                    if tm.open_trade(trade_data):
-                        open_trade_keys.add((sym, tf))
+                    tm.open_trade(trade_data)
 
-            # Advance pointer and push next event
+            # Advance pointer
             ptr[(sym, tf)] = idx + 1
-            if idx + 1 < len(ts_ns) - 2:
-                next_time_ns = ts_ns[idx + 1] + td_ns_cache[tf]
-                if next_time_ns < trade_end_ns:
-                    heapq.heappush(heap, (next_time_ns, sym, tf))
+            if idx + 1 < len(arr["timestamps"]) - 2:
+                next_time = pd.Timestamp(arr["timestamps"][idx + 1]) + tf_to_timedelta(tf)
+                if next_time < trade_end_ts:
+                    heapq.heappush(heap, (next_time, sym, tf))
 
-        # Return results
+        # Return results - use tm.history to include partial TP records
+        # tm.history contains BOTH partial records AND final close records
         all_window_trades = tm.history.copy()
         wins = sum(1 for t in all_window_trades if float(t.get("pnl", 0)) > 0)
+        # Recalculate window_pnl from history to include partial PnL
         window_pnl = sum(float(t.get("pnl", 0)) for t in all_window_trades)
 
         return {
@@ -8441,8 +8395,8 @@ def run_rolling_walkforward(
             "trades": len(all_window_trades),
             "wins": wins,
             "max_dd": window_max_dd,
-            "closed_trades": all_window_trades,
-            "open_positions": tm.open_trades.copy(),
+            "closed_trades": all_window_trades,  # Now includes partials!
+            "open_positions": tm.open_trades.copy(),  # Carry forward
             "final_equity": tm.wallet_balance + tm.locked_margin,
         }
 
@@ -8557,7 +8511,7 @@ def run_rolling_walkforward(
             result = run_window_backtest(
                 trade_streams, config_map,
                 window["trade_start"], window["trade_end"],
-                carried_positions, log, lightweight=lightweight
+                carried_positions, log
             )
 
             # Update carried positions for next window
@@ -9062,8 +9016,6 @@ def compare_rolling_modes_fast(
                     start_date=start_date,
                     end_date=end_date,
                     verbose=False,  # Disable verbose in parallel mode
-                    lightweight=True,  # OPTIMIZATION: Skip indicator snapshots
-                    summary_only=True,  # OPTIMIZATION: Reduce log/JSON overhead
                     **mode_params,
                 ))
             except Exception as e:
