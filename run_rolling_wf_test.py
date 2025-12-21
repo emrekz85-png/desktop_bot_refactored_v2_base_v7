@@ -13,9 +13,13 @@ Modlar:
 - Weekly: Haftalık re-optimization (30 gün lookback, 7 gün forward)
 
 Kullanım:
-    python run_rolling_wf_test.py                    # Varsayılan test (son 6 ay)
+    python run_rolling_wf_test.py                    # Varsayılan test (tüm semboller)
     python run_rolling_wf_test.py --full-year       # 2025 tam yıl testi
     python run_rolling_wf_test.py --quick           # Hızlı test (3 ay, az sembol)
+
+    # Özel sembol ve timeframe seçimi:
+    python run_rolling_wf_test.py --symbols BTCUSDT ETHUSDT SOLUSDT --timeframes 15m 1h 4h
+    python run_rolling_wf_test.py --symbols BTCUSDT --timeframes 1h --start-date 2025-01-01
 """
 
 import sys
@@ -650,16 +654,21 @@ def run_quick_test():
     return result
 
 
-def run_comparison_test(start_date: str = None, end_date: str = None):
+def run_comparison_test(start_date: str = None, end_date: str = None,
+                        symbols: list = None, timeframes: list = None):
     """Fixed vs Monthly vs Weekly karşılaştırma testi"""
     print("\n" + "="*70)
     print("🔬 ROLLING WALK-FORWARD KARŞILAŞTIRMA TESTİ")
     print("="*70 + "\n")
 
+    # Use provided symbols/timeframes or defaults
+    test_symbols = symbols if symbols else SYMBOLS
+    test_timeframes = timeframes if timeframes else TIMEFRAMES
+
     # Use BASELINE_CONFIG for fixed mode
     result = compare_rolling_modes(
-        symbols=SYMBOLS,  # Tüm semboller
-        timeframes=TIMEFRAMES,  # Tüm timeframe'ler
+        symbols=test_symbols,
+        timeframes=test_timeframes,
         start_date=start_date or "2025-06-01",
         end_date=end_date or "2025-12-18",
         fixed_config=BASELINE_CONFIG,
@@ -711,6 +720,8 @@ def main():
     parser.add_argument('--full-year', action='store_true', help='2025 tam yıl testi')
     parser.add_argument('--start-date', type=str, help='Başlangıç tarihi YYYY-MM-DD')
     parser.add_argument('--end-date', type=str, help='Bitiş tarihi YYYY-MM-DD')
+    parser.add_argument('--symbols', nargs='+', help='Test edilecek semboller (ör: BTCUSDT ETHUSDT)')
+    parser.add_argument('--timeframes', nargs='+', help='Test edilecek timeframe\'ler (ör: 15m 1h 4h)')
 
     args = parser.parse_args()
 
@@ -719,7 +730,12 @@ def main():
     elif args.full_year:
         result = run_full_year_test()
     else:
-        result = run_comparison_test(args.start_date, args.end_date)
+        result = run_comparison_test(
+            start_date=args.start_date,
+            end_date=args.end_date,
+            symbols=args.symbols,
+            timeframes=args.timeframes,
+        )
 
     print("\n" + "="*70)
     print("✅ TEST TAMAMLANDI")
