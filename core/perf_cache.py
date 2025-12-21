@@ -211,8 +211,20 @@ def get_cache_path(cache_key: str) -> str:
         return os.path.join(CACHE_DIR, f"{cache_key}.pkl")
 
 
-def load_from_disk_cache(sym: str, tf: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
-    """Load data from disk cache if available."""
+def load_from_disk_cache(sym: str, tf: str, start_date: str, end_date: str,
+                         memory_map: bool = True) -> Optional[pd.DataFrame]:
+    """Load data from disk cache if available.
+
+    Args:
+        sym: Symbol
+        tf: Timeframe
+        start_date: Start date
+        end_date: End date
+        memory_map: Use memory-mapped file access for large files (default: True)
+
+    Returns:
+        DataFrame or None if cache miss/stale
+    """
     cache_key = get_cache_key(sym, tf, start_date, end_date)
     cache_path = get_cache_path(cache_key)
 
@@ -236,9 +248,27 @@ def load_from_disk_cache(sym: str, tf: str, start_date: str, end_date: str) -> O
             return None
 
         if USE_PARQUET:
-            return pd.read_parquet(cache_path)
+            # OPTIMIZATION: Use memory-mapped file access for large datasets
+            # This reduces RAM usage by only loading pages as needed
+            if memory_map:
+                try:
+                    import pyarrow.parquet as pq
+                    table = pq.read_table(cache_path, memory_map=True)
+                    return table.to_pandas()
+                except ImportError:
+                    # Fallback to regular read if pyarrow not available
+                    return pd.read_parquet(cache_path)
+            else:
+                return pd.read_parquet(cache_path)
         elif USE_FEATHER:
-            return pd.read_feather(cache_path)
+            if memory_map:
+                try:
+                    import pyarrow.feather as feather
+                    return feather.read_feather(cache_path, memory_map=True)
+                except ImportError:
+                    return pd.read_feather(cache_path)
+            else:
+                return pd.read_feather(cache_path)
         else:
             return pd.read_pickle(cache_path)
     except Exception:
