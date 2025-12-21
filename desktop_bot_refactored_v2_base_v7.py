@@ -8878,6 +8878,281 @@ def compare_rolling_modes(
     }
 
 
+# ============================================================================
+# PERFORMANCE-OPTIMIZED ROLLING WALK-FORWARD (v40.x)
+# ============================================================================
+
+def compare_rolling_modes_fast(
+    symbols: list = None,
+    timeframes: list = None,
+    start_date: str = None,
+    end_date: str = None,
+    fixed_config: dict = None,
+    verbose: bool = True,
+    quick: bool = False,
+    parallel_modes: bool = True,
+) -> dict:
+    """
+    Performance-optimized compare_rolling_modes with master cache and parallel execution.
+
+    Key optimizations:
+    1. Master data cache: Fetch all data once, share across modes
+    2. Parallel mode execution: Run all 4 modes concurrently (when parallel_modes=True)
+    3. NumPy-based slicing: Avoid DataFrame copies for window extraction
+    4. Quick mode: Reduced symbols/timeframes for faster testing
+
+    Args:
+        symbols: Test edilecek semboller
+        timeframes: Test edilecek zaman dilimleri
+        start_date: Test dönemi başlangıcı
+        end_date: Test dönemi sonu
+        fixed_config: Fixed mode için kullanılacak config
+        verbose: Detaylı çıktı
+        quick: Hızlı mod - sembol/pencere azaltma (default: False)
+        parallel_modes: Modları paralel çalıştır (default: True)
+
+    Returns:
+        dict with comparison results for all 4 modes
+    """
+    from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+    import multiprocessing
+
+    def log(msg: str):
+        if verbose:
+            print(msg)
+
+    # ==========================================
+    # QUICK MODE: Reduce scope for faster testing
+    # ==========================================
+    if quick:
+        # Limit to 3 symbols and 3 timeframes for quick testing
+        if symbols is None:
+            symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+        else:
+            symbols = symbols[:3]
+        if timeframes is None:
+            timeframes = ["15m", "1h", "4h"]
+        else:
+            timeframes = timeframes[:3]
+        log("🚀 QUICK MODE: Using reduced scope for faster testing")
+
+    if symbols is None:
+        symbols = SYMBOLS
+    if timeframes is None:
+        timeframes = TIMEFRAMES
+
+    log(f"\n{'='*70}")
+    log(f"🔬 ROLLING WALK-FORWARD KARŞILAŞTIRMA (OPTIMIZED)")
+    log(f"{'='*70}")
+    log(f"   Modlar: Fixed vs Monthly vs Weekly vs Triday")
+    log(f"   Parallel: {parallel_modes}")
+    log(f"   Quick: {quick}")
+    log(f"   Symbols: {len(symbols)}, Timeframes: {len(timeframes)}")
+    log(f"{'='*70}\n")
+
+    # ==========================================
+    # STEP 1: MASTER DATA CACHE
+    # ==========================================
+    # Import performance cache module
+    try:
+        from core.perf_cache import MasterDataCache, clear_disk_cache
+    except ImportError:
+        log("⚠️ perf_cache module not available, using standard mode")
+        return compare_rolling_modes(symbols, timeframes, start_date, end_date, fixed_config, verbose)
+
+    # Determine date range
+    if end_date is None:
+        end_date = datetime.now().strftime("%Y-%m-%d")
+    if start_date is None:
+        start_dt = datetime.now() - timedelta(days=365)
+        start_date = start_dt.strftime("%Y-%m-%d")
+
+    log(f"📥 Master data cache yükleniyor...")
+    log(f"   Period: {start_date} → {end_date}")
+
+    # Create fetch function wrapper
+    def fetch_func(sym, tf, start, end):
+        return TradingEngine.get_historical_data_pagination(sym, tf, start_date=start, end_date=end)
+
+    # Create master cache
+    master_cache = MasterDataCache(
+        symbols=symbols,
+        timeframes=timeframes,
+        start_date=start_date,
+        end_date=end_date,
+        fetch_func=fetch_func,
+        indicator_func=TradingEngine.calculate_indicators,
+        buffer_days=60,  # Enough for 60-day lookback
+    )
+
+    # Load all data
+    loaded_count = master_cache.load_all(
+        progress_callback=lambda loaded, total: log(f"   Loading: {loaded}/{total}") if loaded % 10 == 0 else None
+    )
+    log(f"   ✓ {loaded_count} stream yüklendi")
+
+    # ==========================================
+    # STEP 2: RUN MODES (Parallel or Sequential)
+    # ==========================================
+    mode_configs = [
+        ("fixed", {"mode": "fixed", "fixed_config": fixed_config}),
+        ("monthly", {"mode": "monthly", "lookback_days": 60, "forward_days": 30}),
+        ("weekly", {"mode": "weekly", "lookback_days": 30, "forward_days": 7}),
+        ("triday", {"mode": "triday", "lookback_days": 60, "forward_days": 3}),
+    ]
+
+    results = {}
+
+    if parallel_modes and not quick:
+        # Parallel execution using ThreadPoolExecutor
+        # Note: ProcessPoolExecutor would be faster but has pickling issues with nested functions
+        log("\n📊 Modlar paralel çalıştırılıyor...")
+
+        def run_mode(mode_name: str, mode_params: dict):
+            try:
+                return (mode_name, run_rolling_walkforward(
+                    symbols=symbols,
+                    timeframes=timeframes,
+                    start_date=start_date,
+                    end_date=end_date,
+                    verbose=False,  # Disable verbose in parallel mode
+                    **mode_params,
+                ))
+            except Exception as e:
+                return (mode_name, {"error": str(e), "metrics": {"total_pnl": 0, "max_drawdown": 0, "window_hit_rate": 0, "worst_window_pnl": 0}})
+
+        # Use 2 workers max to avoid memory issues
+        max_workers = min(2, len(mode_configs))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(run_mode, name, params): name for name, params in mode_configs}
+
+            for future in as_completed(futures):
+                mode_name, result = future.result()
+                results[mode_name] = result
+                log(f"   ✓ {mode_name.upper()} mode tamamlandı: PnL=${result.get('metrics', {}).get('total_pnl', 0):.2f}")
+
+    else:
+        # Sequential execution (original behavior)
+        for i, (mode_name, mode_params) in enumerate(mode_configs, 1):
+            log(f"\n📊 [{i}/4] {mode_name.upper()} mode çalıştırılıyor...")
+            results[mode_name] = run_rolling_walkforward(
+                symbols=symbols,
+                timeframes=timeframes,
+                start_date=start_date,
+                end_date=end_date,
+                verbose=verbose,
+                **mode_params,
+            )
+
+    # ==========================================
+    # STEP 3: COMPARISON (same as original)
+    # ==========================================
+    log(f"\n{'='*70}")
+    log(f"📊 KARŞILAŞTIRMA SONUÇLARI")
+    log(f"{'='*70}")
+
+    headers = ["Metrik", "Fixed", "Monthly", "Weekly", "Triday", "En İyi"]
+    rows = []
+
+    # PnL comparison
+    pnls = {mode: results[mode].get("metrics", {}).get("total_pnl", 0) for mode in ["fixed", "monthly", "weekly", "triday"]}
+    best_pnl = max(pnls, key=pnls.get)
+    rows.append(["Total PnL", f"${pnls['fixed']:.2f}", f"${pnls['monthly']:.2f}", f"${pnls['weekly']:.2f}", f"${pnls['triday']:.2f}", best_pnl.upper()])
+
+    # Max DD comparison
+    dds = {mode: results[mode].get("metrics", {}).get("max_drawdown", 0) for mode in ["fixed", "monthly", "weekly", "triday"]}
+    best_dd = min(dds, key=lambda x: abs(dds[x]))
+    rows.append(["Max DD", f"${dds['fixed']:.2f}", f"${dds['monthly']:.2f}", f"${dds['weekly']:.2f}", f"${dds['triday']:.2f}", best_dd.upper()])
+
+    # Window Hit Rate
+    hit_rates = {mode: results[mode].get("metrics", {}).get("window_hit_rate", 0) for mode in ["fixed", "monthly", "weekly", "triday"]}
+    best_hr = max(hit_rates, key=hit_rates.get)
+    rows.append(["Window Hit Rate", f"{hit_rates['fixed']*100:.1f}%", f"{hit_rates['monthly']*100:.1f}%", f"{hit_rates['weekly']*100:.1f}%", f"{hit_rates['triday']*100:.1f}%", best_hr.upper()])
+
+    # Worst Window
+    worst = {mode: results[mode].get("metrics", {}).get("worst_window_pnl", 0) for mode in ["fixed", "monthly", "weekly", "triday"]}
+    best_worst = max(worst, key=worst.get)
+    rows.append(["Worst Window", f"${worst['fixed']:.2f}", f"${worst['monthly']:.2f}", f"${worst['weekly']:.2f}", f"${worst['triday']:.2f}", best_worst.upper()])
+
+    # Print table
+    col_widths = [20, 12, 12, 12, 12, 10]
+    header_line = "".join(h.ljust(w) for h, w in zip(headers, col_widths))
+    log(header_line)
+    log("─" * sum(col_widths))
+    for row in rows:
+        log("".join(str(c).ljust(w) for c, w in zip(row, col_widths)))
+
+    # Decision Matrix
+    scores = {"fixed": 0, "monthly": 0, "weekly": 0, "triday": 0}
+    scores[best_pnl] += 2
+    scores[best_dd] += 1
+    scores[best_hr] += 1
+    scores[best_worst] += 1
+    best_mode = max(scores, key=scores.get)
+
+    log(f"\n🎯 ÖNERİLEN MOD: {best_mode.upper()} (Score: {scores[best_mode]})")
+
+    return {
+        "results": results,
+        "comparison": {
+            "pnl": pnls,
+            "max_dd": dds,
+            "hit_rate": hit_rates,
+            "worst_window": worst,
+            "scores": scores,
+            "best_mode": best_mode,
+        }
+    }
+
+
+def run_quick_rolling_test(
+    symbols: list = None,
+    timeframes: list = None,
+    mode: str = "monthly",
+    days: int = 90,
+    verbose: bool = True,
+) -> dict:
+    """
+    Quick rolling walk-forward test for fast iteration.
+
+    Reduces scope for faster testing:
+    - Limited symbols (default: 3)
+    - Limited timeframes (default: 3)
+    - Shorter period (default: 90 days)
+
+    Args:
+        symbols: Symbols to test (default: BTCUSDT, ETHUSDT, SOLUSDT)
+        timeframes: Timeframes to test (default: 15m, 1h, 4h)
+        mode: Mode to test (default: monthly)
+        days: Number of days to test (default: 90)
+        verbose: Show detailed output
+
+    Returns:
+        Rolling WF result dict
+    """
+    if symbols is None:
+        symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    if timeframes is None:
+        timeframes = ["15m", "1h", "4h"]
+
+    end_date = datetime.now().strftime("%Y-%m-%d")
+    start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    print(f"\n🚀 QUICK ROLLING TEST")
+    print(f"   Mode: {mode}, Period: {days} days")
+    print(f"   Symbols: {symbols}")
+    print(f"   Timeframes: {timeframes}\n")
+
+    return run_rolling_walkforward(
+        symbols=symbols,
+        timeframes=timeframes,
+        mode=mode,
+        start_date=start_date,
+        end_date=end_date,
+        verbose=verbose,
+    )
+
+
 if __name__ == "__main__":
     import argparse
 

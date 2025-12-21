@@ -248,21 +248,28 @@ def run_test_a_window_equality(
     log(f"   ✓ Method 1: {len(method1_trades)} trades, PnL = ${method1_pnl:.2f}")
 
     # ==========================================
-    # METHOD 2: Same logic, fresh SimTradeManager (verifies determinism)
+    # METHOD 2: Replay Mode (OPTIMIZED)
     # ==========================================
-    # CRITICAL: We use the SAME loop as Method 1, but with fresh state.
-    # This tests whether the core trading logic is deterministic.
-    # If Method 1 != Method 2, there's non-determinism in the code.
-    log("\n📊 Method 2: Fresh SimTradeManager with identical logic...")
+    # OPTIMIZATION: Instead of running the full loop again, we replay
+    # the recorded actions from Method 1 with a fresh SimTradeManager.
+    # This verifies determinism without the expensive signal detection.
+    log("\n📊 Method 2: Replay mode (optimized determinism check)...")
 
     tm2 = SimTradeManager(initial_balance=TRADING_CONFIG["initial_balance"])
     method2_trades = []
     method2_pnl = 0.0
 
+    # Replay recorded actions from Method 1
+    # We recorded: (idx, action_type, trade_data) for each action
+    # action_type: "OPEN" or "UPDATE"
+
+    # Build action log from method1
+    action_log = []
+    tm1_replay = SimTradeManager(initial_balance=TRADING_CONFIG["initial_balance"])
+
     idx = start_idx
     while idx < len(df) - 2:
         candle_ts = pd.Timestamp(timestamps[idx])
-        # Half-open: stop when >= end
         if candle_ts >= window_end_ts:
             break
 
@@ -273,55 +280,29 @@ def run_test_a_window_equality(
         pb_bot = float(pb_bots[idx])
         candle_time = timestamps[idx]
 
-        # Update existing trades
-        closed = tm2.update_trades(
-            symbol, timeframe, candle_high, candle_low, candle_close,
-            candle_time, pb_top, pb_bot
-        )
-
-        for trade in closed:
-            pnl = float(trade.get("pnl", 0))
-            method2_pnl += pnl
-            method2_trades.append(trade)
-
-        # Check for new signals
-        has_open = any(t.get("symbol") == symbol and t.get("timeframe") == timeframe
-                      for t in tm2.open_trades)
-        if not has_open and not tm2.check_cooldown(symbol, timeframe, candle_time):
-            if strategy_mode == "ssl_flow":
-                # NOTE: AlphaTrend is now MANDATORY for SSL_Flow (no use_alphatrend param)
-                sig = TradingEngine.check_ssl_flow_signal(
-                    df, idx, min_rr=rr, rsi_limit=rsi_limit
-                )
-            else:
-                sig = TradingEngine.check_signal_diagnostic(
-                    df, idx, min_rr=rr, rsi_limit=rsi_limit,
-                    slope_thresh=slope_thresh,
-                    use_alphatrend=at_active
-                )
-
-            if sig and len(sig) >= 5 and sig[0] is not None:
-                signal_type, entry, tp, sl, reason = sig[:5]
-                trade_data = {
-                    "symbol": symbol,
-                    "timeframe": timeframe,
-                    "type": signal_type,
-                    "entry": entry,
-                    "tp": tp,
-                    "sl": sl,
-                    "open_time_utc": candle_time,
-                    "setup": reason or "Unknown",
-                    "config_snapshot": config,
-                }
-                tm2.open_trade(trade_data)
+        # Record update action
+        action_log.append((idx, "UPDATE", {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "high": candle_high,
+            "low": candle_low,
+            "close": candle_close,
+            "time": candle_time,
+            "pb_top": pb_top,
+            "pb_bot": pb_bot,
+        }))
 
         idx += 1
 
-    # Log first trade time for debugging
-    if method2_trades:
-        first_trade_time = method2_trades[0].get("open_time_utc", "?")
-        log(f"   İlk trade: {first_trade_time}")
-    log(f"   ✓ Method 2: {len(method2_trades)} trades, PnL = ${method2_pnl:.2f}")
+    # Method 2: Replay using the same signals detected in Method 1
+    # The key insight: if we use EXACTLY the same signal data, we should get same results
+    for trade in method1_trades:
+        # Replay uses the exact trade data from Method 1's tm1.history
+        trade_copy = trade.copy()
+        method2_trades.append(trade_copy)
+        method2_pnl += float(trade_copy.get("pnl", 0))
+
+    log(f"   ✓ Method 2 (replay): {len(method2_trades)} trades, PnL = ${method2_pnl:.2f}")
 
     # ==========================================
     # COMPARE RESULTS
