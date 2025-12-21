@@ -3,7 +3,7 @@
 Rolling Walk-Forward Test Script
 
 Bu script, Rolling Walk-Forward framework'ünü test eder:
-1. Fixed vs Monthly vs Weekly karşılaştırması yapar
+1. Fixed vs Monthly vs Weekly vs Triday karşılaştırması yapar
 2. 2025 yılı için stitched OOS sonuçlarını hesaplar
 3. En iyi modu önerir
 
@@ -11,6 +11,7 @@ Modlar:
 - Fixed: Sabit config, re-optimization yok
 - Monthly: Aylık re-optimization (60 gün lookback, 30 gün forward)
 - Weekly: Haftalık re-optimization (30 gün lookback, 7 gün forward)
+- Triday: 3 günlük re-optimization (60 gün lookback, 3 gün forward)
 
 Kullanım:
     python run_rolling_wf_test.py                    # Varsayılan test (son 6 ay)
@@ -517,7 +518,7 @@ def write_trade_log(result: dict, output_dir: str = None) -> str:
     Args:
         result: Result dict from run_rolling_walkforward containing:
             - run_id: Test ID
-            - mode: "fixed", "monthly", or "weekly"
+            - mode: "fixed", "monthly", "weekly", or "triday"
             - config: Test configuration
             - metrics: Overall metrics
             - window_results: Per-window results
@@ -651,15 +652,15 @@ def run_quick_test():
 
 
 def run_comparison_test(start_date: str = None, end_date: str = None):
-    """Fixed vs Monthly vs Weekly karşılaştırma testi"""
+    """Fixed vs Monthly vs Weekly vs Triday karşılaştırma testi"""
     print("\n" + "="*70)
     print("🔬 ROLLING WALK-FORWARD KARŞILAŞTIRMA TESTİ")
     print("="*70 + "\n")
 
     # Use BASELINE_CONFIG for fixed mode
     result = compare_rolling_modes(
-        symbols=SYMBOLS,  # Tüm semboller
-        timeframes=TIMEFRAMES,  # Tüm timeframe'ler
+        symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "LINKUSDT"],
+        timeframes=["15m", "1h", "4h"],
         start_date=start_date or "2025-06-01",
         end_date=end_date or "2025-12-18",
         fixed_config=BASELINE_CONFIG,
@@ -669,7 +670,7 @@ def run_comparison_test(start_date: str = None, end_date: str = None):
     # Write detailed trade logs for each mode
     # Note: compare_rolling_modes returns {"results": {...}, "comparison": {...}}
     mode_results = result.get("results", {})
-    for mode in ["fixed", "monthly", "weekly"]:
+    for mode in ["fixed", "monthly", "weekly", "triday"]:
         mode_result = mode_results.get(mode, {})
         if mode_result.get("trades"):
             write_trade_log(mode_result)
@@ -695,7 +696,7 @@ def run_full_year_test():
     # Write detailed trade logs for each mode
     # Note: compare_rolling_modes returns {"results": {...}, "comparison": {...}}
     mode_results = result.get("results", {})
-    for mode in ["fixed", "monthly", "weekly"]:
+    for mode in ["fixed", "monthly", "weekly", "triday"]:
         mode_result = mode_results.get(mode, {})
         if mode_result.get("trades"):
             write_trade_log(mode_result)
@@ -729,7 +730,7 @@ def main():
     if "comparison" in result:
         comp = result["comparison"]
         print(f"\n🏆 EN İYİ MOD: {comp['best_mode'].upper()}")
-        print(f"   PnL: Fixed=${comp['pnl']['fixed']:.2f}, Monthly=${comp['pnl']['monthly']:.2f}, Weekly=${comp['pnl']['weekly']:.2f}")
+        print(f"   PnL: Fixed=${comp['pnl']['fixed']:.2f}, Monthly=${comp['pnl']['monthly']:.2f}, Weekly=${comp['pnl']['weekly']:.2f}, Triday=${comp['pnl']['triday']:.2f}")
 
 
 if __name__ == "__main__":

@@ -7925,7 +7925,6 @@ def run_rolling_walkforward(
     calibration_days: int = 60,  # For mode="fixed" - days to find config
     verbose: bool = True,
     output_dir: str = None,   # Run-specific output directory
-    preloaded_streams: dict = None,  # PERFORMANCE: Pre-fetched data to avoid API calls
 ) -> dict:
     """Run Rolling Walk-Forward backtest with stitched OOS results.
 
@@ -7946,7 +7945,6 @@ def run_rolling_walkforward(
         calibration_days: mode="fixed" için ilk N gün calibration (test dışı)
         verbose: Detaylı çıktı
         output_dir: Run çıktılarının kaydedileceği klasör
-        preloaded_streams: Önceden çekilmiş veri (compare_rolling_modes için)
 
     Returns:
         dict with:
@@ -7999,6 +7997,8 @@ def run_rolling_walkforward(
     # Determine forward_days based on mode
     if mode == "weekly":
         forward_days = 7
+    elif mode == "triday":
+        forward_days = 3
     elif mode == "monthly":
         forward_days = 30
     # mode == "fixed" uses calibration_days concept differently
@@ -8386,41 +8386,6 @@ def run_rolling_walkforward(
             for tf in timeframes:
                 global_config_map[(sym, tf)] = fixed_config.copy()
 
-    # ==========================================
-    # PERFORMANCE OPTIMIZATION: Pre-fetch ALL data ONCE
-    # ==========================================
-    # Instead of fetching data for each window separately (50+ API calls),
-    # fetch the entire date range once and filter in memory (~5x faster)
-
-    # If preloaded_streams provided (from compare_rolling_modes), use it directly
-    if preloaded_streams is not None:
-        master_streams = preloaded_streams
-        log(f"\n🚀 [PERFORMANS] Önceden yüklenmiş veri kullanılıyor ({len(master_streams)} stream)")
-    elif windows:
-        # Calculate the full date range needed
-        earliest_start = min(
-            w.get("optimize_start") or w["trade_start"] - timedelta(days=30)
-            for w in windows
-        )
-        latest_end = max(w["trade_end"] for w in windows)
-
-        # Add buffer for indicator warmup
-        full_fetch_start = earliest_start - timedelta(days=30)
-
-        log(f"\n🚀 [PERFORMANS] Tüm veri tek seferde çekiliyor...")
-        log(f"   📅 Tam aralık: {full_fetch_start.strftime('%Y-%m-%d')} → {latest_end.strftime('%Y-%m-%d')}")
-
-        # Fetch ALL data once
-        master_streams = fetch_data_for_period(full_fetch_start, latest_end, symbols, timeframes)
-
-        if master_streams:
-            log(f"   ✓ {len(master_streams)} stream önbelleğe alındı (her window için tekrar çekilmeyecek)")
-        else:
-            log(f"   ⚠️ Veri çekilemedi!")
-            master_streams = {}
-    else:
-        master_streams = {}
-
     for window in windows:
         log(f"\n{'─'*50}")
         log(f"📦 Window {window['window_id']}: Trade [{window['trade_start'].strftime('%Y-%m-%d')} → {window['trade_end'].strftime('%Y-%m-%d')}]")
@@ -8433,19 +8398,9 @@ def run_rolling_walkforward(
 
         fetch_end = window["trade_end"]
 
-        # 4.2 Use cached data (PERFORMANCE: no API call per window)
-        # Filter master_streams to this window's date range
-        # Note: Indicators are ALREADY calculated on master_streams, so we only need
-        # enough candles for the backtest logic (50+), not for indicator warmup (250)
-        streams = {}
-        for (sym, tf), master_df in master_streams.items():
-            # Add buffer before fetch_start for indicators
-            buffer_start = fetch_start - timedelta(days=15)
-            filtered = filter_data_by_date(master_df.copy(), buffer_start, fetch_end)
-            if len(filtered) >= 50:  # Reduced from 250 - indicators already calculated
-                streams[(sym, tf)] = filtered
-
-        log(f"   📊 Önbellekten {len(streams)} stream filtrelendi")
+        # 4.2 Fetch data
+        log(f"   📥 Veri çekiliyor: {fetch_start.strftime('%Y-%m-%d')} → {fetch_end.strftime('%Y-%m-%d')}")
+        streams = fetch_data_for_period(fetch_start, fetch_end, symbols, timeframes)
 
         if not streams:
             log(f"   ⚠️ Veri yok, window atlanıyor")
@@ -8479,7 +8434,7 @@ def run_rolling_walkforward(
             calib_streams = {}
             for (sym, tf), df in streams.items():
                 filtered = filter_data_by_date(df, window["optimize_start"], window["optimize_end"])
-                if len(filtered) >= 100:  # Reduced from 250 - need sample for optimization
+                if len(filtered) >= 250:
                     calib_streams[(sym, tf)] = filtered
 
             if calib_streams:
@@ -8499,7 +8454,7 @@ def run_rolling_walkforward(
             opt_streams = {}
             for (sym, tf), df in streams.items():
                 filtered = filter_data_by_date(df, window["optimize_start"], window["optimize_end"])
-                if len(filtered) >= 100:  # Reduced from 250 - need sample for optimization
+                if len(filtered) >= 250:
                     opt_streams[(sym, tf)] = filtered
 
             if opt_streams:
@@ -8515,12 +8470,11 @@ def run_rolling_walkforward(
         log(f"   📊 Backtest çalıştırılıyor: {window['trade_start'].strftime('%m/%d')} → {window['trade_end'].strftime('%m/%d')}")
 
         # Filter streams to include trade period (need some data before for indicators)
-        # Note: Indicators are already calculated, just need enough data for signal detection
         trade_streams = {}
-        buffer_start = window["trade_start"] - timedelta(days=15)  # Buffer for signals
+        buffer_start = window["trade_start"] - timedelta(days=15)  # Buffer for indicators
         for (sym, tf), df in streams.items():
             filtered = filter_data_by_date(df, buffer_start, window["trade_end"])
-            if len(filtered) >= 10:  # Reduced from 250 - just need candles for trading
+            if len(filtered) >= 250:
                 trade_streams[(sym, tf)] = filtered
 
         if trade_streams and config_map:
@@ -8670,14 +8624,14 @@ def compare_rolling_modes(
     end_date: str = None,
     fixed_config: dict = None,
     verbose: bool = True,
-    parallel: bool = True,  # PERFORMANCE: Run modes in parallel (~2-3x faster)
 ) -> dict:
-    """Compare Fixed vs Monthly vs Weekly re-optimization modes.
+    """Compare Fixed vs Monthly vs Weekly vs Triday re-optimization modes.
 
-    Bu fonksiyon 3 modu aynı veri üzerinde çalıştırır:
+    Bu fonksiyon 4 modu aynı veri üzerinde çalıştırır:
     1. Fixed: Tek sabit config (calibration dönemi ile belirlenir)
     2. Monthly: Aylık re-optimization (60 gün lookback, 30 gün forward)
     3. Weekly: Haftalık re-optimization (30 gün lookback, 7 gün forward)
+    4. Triday: 3 günlük re-optimization (60 gün lookback, 3 gün forward)
 
     Args:
         symbols: Test edilecek semboller
@@ -8686,13 +8640,10 @@ def compare_rolling_modes(
         end_date: Test dönemi sonu
         fixed_config: Fixed mode için kullanılacak config (None = calibration ile bulunur)
         verbose: Detaylı çıktı
-        parallel: Modları paralel çalıştır (True = ~2-3x hızlı)
 
     Returns:
         dict with comparison results for all 3 modes
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    from datetime import datetime, timedelta
 
     def log(msg: str):
         if verbose:
@@ -8701,137 +8652,61 @@ def compare_rolling_modes(
     log(f"\n{'='*70}")
     log(f"🔬 ROLLING WALK-FORWARD KARŞILAŞTIRMA")
     log(f"{'='*70}")
-    log(f"   Modlar: Fixed vs Monthly vs Weekly")
-    if parallel:
-        log(f"   🚀 PARALEL MOD AKTİF - 3 mod aynı anda çalışacak")
+    log(f"   Modlar: Fixed vs Monthly vs Weekly vs Triday")
     log(f"{'='*70}\n")
-
-    # ==========================================
-    # PERFORMANCE: Pre-fetch ALL data ONCE for all modes
-    # ==========================================
-    # This prevents 429 rate limit errors when running modes in parallel
-    # Each mode would otherwise make its own API calls
-
-    if symbols is None:
-        symbols = SYMBOLS
-    if timeframes is None:
-        timeframes = TIMEFRAMES
-
-    # Set default dates
-    if end_date is None:
-        end_date = datetime.now().strftime("%Y-%m-%d")
-    if start_date is None:
-        start_dt = datetime.strptime(end_date, "%Y-%m-%d") - timedelta(days=365)
-        start_date = start_dt.strftime("%Y-%m-%d")
-
-    # Calculate max lookback needed (monthly/weekly use 60 days)
-    max_lookback = 60
-    earliest_start = datetime.strptime(start_date, "%Y-%m-%d") - timedelta(days=max_lookback + 30)
-    latest_end = datetime.strptime(end_date, "%Y-%m-%d")
-
-    log(f"🚀 [PERFORMANS] Tüm modlar için veri tek seferde çekiliyor...")
-    log(f"   📅 Tam aralık: {earliest_start.strftime('%Y-%m-%d')} → {latest_end.strftime('%Y-%m-%d')}")
-
-    # Define fetch_data_for_period locally (same as in run_rolling_walkforward)
-    def fetch_data_for_comparison(start_dt, end_dt, symbols_list, timeframes_list):
-        """Fetch OHLCV data for all symbols/timeframes in a date range."""
-        buffer_days = 30
-        fetch_start = start_dt - timedelta(days=buffer_days)
-        fetch_start_str = fetch_start.strftime("%Y-%m-%d")
-        fetch_end_str = end_dt.strftime("%Y-%m-%d")
-
-        streams = {}
-
-        def fetch_one(sym, tf):
-            try:
-                df = TradingEngine.get_historical_data_pagination(
-                    sym, tf, start_date=fetch_start_str, end_date=fetch_end_str
-                )
-                if df is None or df.empty or len(df) < 250:
-                    return None
-                df = TradingEngine.calculate_indicators(df)
-                return (sym, tf, df.reset_index(drop=True))
-            except Exception:
-                return None
-
-        jobs = [(s, t) for s in symbols_list for t in timeframes_list]
-
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            futures = {executor.submit(fetch_one, s, t): (s, t) for s, t in jobs}
-            for future in as_completed(futures):
-                res = future.result()
-                if res:
-                    sym, tf, df = res
-                    streams[(sym, tf)] = df
-
-        return streams
-
-    # Fetch ALL data once
-    preloaded_streams = fetch_data_for_comparison(earliest_start, latest_end, symbols, timeframes)
-
-    if preloaded_streams:
-        log(f"   ✓ {len(preloaded_streams)} stream önbelleğe alındı (tüm modlar bu veriyi kullanacak)")
-    else:
-        log(f"   ⚠️ Veri çekilemedi!")
-        preloaded_streams = {}
 
     results = {}
 
-    # Mode configurations
-    mode_configs = {
-        "fixed": {"mode": "fixed", "fixed_config": fixed_config},
-        "monthly": {"mode": "monthly", "lookback_days": 60, "forward_days": 30},
-        "weekly": {"mode": "weekly", "lookback_days": 60, "forward_days": 7},
-    }
+    # Run Fixed mode
+    log("📊 [1/4] Fixed mode çalıştırılıyor...")
+    results["fixed"] = run_rolling_walkforward(
+        symbols=symbols,
+        timeframes=timeframes,
+        mode="fixed",
+        fixed_config=fixed_config,
+        start_date=start_date,
+        end_date=end_date,
+        verbose=verbose,
+    )
 
-    def run_mode(mode_name, config):
-        """Run a single mode and return result."""
-        return mode_name, run_rolling_walkforward(
-            symbols=symbols,
-            timeframes=timeframes,
-            start_date=start_date,
-            end_date=end_date,
-            verbose=False if parallel else verbose,
-            preloaded_streams=preloaded_streams,  # PERFORMANCE: Use pre-fetched data
-            **config
-        )
+    # Run Monthly mode
+    log("\n📊 [2/4] Monthly mode çalıştırılıyor...")
+    results["monthly"] = run_rolling_walkforward(
+        symbols=symbols,
+        timeframes=timeframes,
+        mode="monthly",
+        lookback_days=60,
+        forward_days=30,
+        start_date=start_date,
+        end_date=end_date,
+        verbose=verbose,
+    )
 
-    if parallel:
-        # PERFORMANCE: Run all 3 modes in parallel (~2-3x faster)
-        # No more 429 errors because data is already fetched!
-        log("\n🚀 Tüm modlar paralel başlatılıyor (veri zaten yüklendi)...")
+    # Run Weekly mode
+    log("\n📊 [3/4] Weekly mode çalıştırılıyor...")
+    results["weekly"] = run_rolling_walkforward(
+        symbols=symbols,
+        timeframes=timeframes,
+        mode="weekly",
+        lookback_days=30,
+        forward_days=7,
+        start_date=start_date,
+        end_date=end_date,
+        verbose=verbose,
+    )
 
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = {
-                executor.submit(run_mode, mode_name, config): mode_name
-                for mode_name, config in mode_configs.items()
-            }
-
-            completed_count = 0
-            for future in as_completed(futures):
-                mode_name = futures[future]
-                try:
-                    result_name, result_data = future.result()
-                    results[result_name] = result_data
-                    completed_count += 1
-                    pnl = result_data.get("metrics", {}).get("total_pnl", 0)
-                    trades = result_data.get("metrics", {}).get("total_trades", 0)
-                    log(f"   ✓ [{completed_count}/3] {mode_name.upper()} tamamlandı: PnL=${pnl:.2f}, Trades={trades}")
-                except Exception as e:
-                    log(f"   ⚠️ {mode_name} hatası: {e}")
-                    results[mode_name] = {"metrics": {"total_pnl": 0, "total_trades": 0}}
-
-        log(f"\n✅ Tüm modlar tamamlandı!")
-    else:
-        # Sequential execution (original behavior)
-        log("📊 [1/3] Fixed mode çalıştırılıyor...")
-        _, results["fixed"] = run_mode("fixed", mode_configs["fixed"])
-
-        log("\n📊 [2/3] Monthly mode çalıştırılıyor...")
-        _, results["monthly"] = run_mode("monthly", mode_configs["monthly"])
-
-        log("\n📊 [3/3] Weekly mode çalıştırılıyor...")
-        _, results["weekly"] = run_mode("weekly", mode_configs["weekly"])
+    # Run Triday mode
+    log("\n📊 [4/4] Triday mode çalıştırılıyor...")
+    results["triday"] = run_rolling_walkforward(
+        symbols=symbols,
+        timeframes=timeframes,
+        mode="triday",
+        lookback_days=60,
+        forward_days=3,
+        start_date=start_date,
+        end_date=end_date,
+        verbose=verbose,
+    )
 
     # ==========================================
     # COMPARISON REPORT
@@ -8840,7 +8715,7 @@ def compare_rolling_modes(
     log(f"📊 KARŞILAŞTIRMA SONUÇLARI")
     log(f"{'='*70}")
 
-    headers = ["Metrik", "Fixed", "Monthly", "Weekly", "En İyi"]
+    headers = ["Metrik", "Fixed", "Monthly", "Weekly", "Triday", "En İyi"]
     rows = []
 
     # PnL comparison
@@ -8848,6 +8723,7 @@ def compare_rolling_modes(
         "fixed": results["fixed"]["metrics"]["total_pnl"],
         "monthly": results["monthly"]["metrics"]["total_pnl"],
         "weekly": results["weekly"]["metrics"]["total_pnl"],
+        "triday": results["triday"]["metrics"]["total_pnl"],
     }
     best_pnl = max(pnls, key=pnls.get)
     rows.append([
@@ -8855,6 +8731,7 @@ def compare_rolling_modes(
         f"${pnls['fixed']:.2f}",
         f"${pnls['monthly']:.2f}",
         f"${pnls['weekly']:.2f}",
+        f"${pnls['triday']:.2f}",
         best_pnl.upper(),
     ])
 
@@ -8863,6 +8740,7 @@ def compare_rolling_modes(
         "fixed": results["fixed"]["metrics"]["max_drawdown"],
         "monthly": results["monthly"]["metrics"]["max_drawdown"],
         "weekly": results["weekly"]["metrics"]["max_drawdown"],
+        "triday": results["triday"]["metrics"]["max_drawdown"],
     }
     best_dd = min(dds, key=lambda x: abs(dds[x]))  # Lowest absolute DD is best
     rows.append([
@@ -8870,6 +8748,7 @@ def compare_rolling_modes(
         f"${dds['fixed']:.2f}",
         f"${dds['monthly']:.2f}",
         f"${dds['weekly']:.2f}",
+        f"${dds['triday']:.2f}",
         best_dd.upper(),
     ])
 
@@ -8878,6 +8757,7 @@ def compare_rolling_modes(
         "fixed": results["fixed"]["metrics"]["window_hit_rate"],
         "monthly": results["monthly"]["metrics"]["window_hit_rate"],
         "weekly": results["weekly"]["metrics"]["window_hit_rate"],
+        "triday": results["triday"]["metrics"]["window_hit_rate"],
     }
     best_hr = max(hit_rates, key=hit_rates.get)
     rows.append([
@@ -8885,6 +8765,7 @@ def compare_rolling_modes(
         f"{hit_rates['fixed']*100:.1f}%",
         f"{hit_rates['monthly']*100:.1f}%",
         f"{hit_rates['weekly']*100:.1f}%",
+        f"{hit_rates['triday']*100:.1f}%",
         best_hr.upper(),
     ])
 
@@ -8893,6 +8774,7 @@ def compare_rolling_modes(
         "fixed": results["fixed"]["metrics"]["worst_window_pnl"],
         "monthly": results["monthly"]["metrics"]["worst_window_pnl"],
         "weekly": results["weekly"]["metrics"]["worst_window_pnl"],
+        "triday": results["triday"]["metrics"]["worst_window_pnl"],
     }
     best_worst = max(worst, key=worst.get)  # Highest (least negative) is best
     rows.append([
@@ -8900,11 +8782,12 @@ def compare_rolling_modes(
         f"${worst['fixed']:.2f}",
         f"${worst['monthly']:.2f}",
         f"${worst['weekly']:.2f}",
+        f"${worst['triday']:.2f}",
         best_worst.upper(),
     ])
 
     # Print table
-    col_widths = [20, 12, 12, 12, 10]
+    col_widths = [20, 12, 12, 12, 12, 10]
     header_line = "".join(h.ljust(w) for h, w in zip(headers, col_widths))
     log(header_line)
     log("─" * sum(col_widths))
@@ -8919,7 +8802,7 @@ def compare_rolling_modes(
     log("─" * 70)
 
     # Determine best mode based on multiple criteria
-    scores = {"fixed": 0, "monthly": 0, "weekly": 0}
+    scores = {"fixed": 0, "monthly": 0, "weekly": 0, "triday": 0}
     scores[best_pnl] += 2  # PnL worth 2 points
     scores[best_dd] += 1   # DD worth 1 point
     scores[best_hr] += 1   # Hit rate worth 1 point
@@ -8927,7 +8810,7 @@ def compare_rolling_modes(
 
     best_mode = max(scores, key=scores.get)
 
-    log(f"   Puanlar: Fixed={scores['fixed']}, Monthly={scores['monthly']}, Weekly={scores['weekly']}")
+    log(f"   Puanlar: Fixed={scores['fixed']}, Monthly={scores['monthly']}, Weekly={scores['weekly']}, Triday={scores['triday']}")
     log(f"\n   🏆 ÖNERİLEN MOD: {best_mode.upper()}")
 
     # Specific recommendations
@@ -8936,9 +8819,13 @@ def compare_rolling_modes(
     elif best_mode == "monthly":
         log("   → Aylık re-opt en iyi denge - stabil ama adaptif")
         log("   → Live'da: Aylık re-opt + Haftalık health check önerilir")
-    else:  # weekly
+    elif best_mode == "weekly":
         log("   → Haftalık re-opt en iyi - piyasa hızlı değişiyor")
         log("   → DİKKAT: Overfit riski yüksek, dikkatli izlenmeli")
+    else:  # triday
+        log("   → 3 günlük re-opt en iyi - piyasa çok hızlı değişiyor")
+        log("   → DİKKAT: Overfit riski çok yüksek, agresif adaptasyon")
+        log("   → Bu mod genellikle yüksek volatilite dönemlerinde işe yarar")
 
     # Check if ANY mode is profitable
     if all(pnls[m] <= 0 for m in pnls):
