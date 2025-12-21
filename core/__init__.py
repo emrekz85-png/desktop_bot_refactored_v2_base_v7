@@ -81,6 +81,13 @@ from .logging_config import (
 
 from .trading_engine import TradingEngine
 
+# Performance optimization (v40.x)
+from .perf_cache import (
+    MasterDataCache, StreamArrays, FastEventHeap, OpenTradeIndex,
+    get_timedelta, get_timedelta_ns, datetime_to_ns,
+    clear_disk_cache, estimate_candle_count,
+)
+
 __all__ = [
     # Environment
     'IS_COLAB', 'IS_HEADLESS', 'IS_NOTEBOOK', 'HAS_TQDM', 'HTF_ONLY_MODE',
@@ -128,4 +135,8 @@ __all__ = [
     'print_to_log', 'info', 'debug', 'warning', 'error',
     # Trading Engine
     'TradingEngine',
+    # Performance optimization
+    'MasterDataCache', 'StreamArrays', 'FastEventHeap', 'OpenTradeIndex',
+    'get_timedelta', 'get_timedelta_ns', 'datetime_to_ns',
+    'clear_disk_cache', 'estimate_candle_count',
 ]

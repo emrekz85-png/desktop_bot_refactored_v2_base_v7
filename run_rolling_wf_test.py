@@ -621,6 +621,8 @@ def write_trade_log(result: dict, output_dir: str = None) -> str:
 from desktop_bot_refactored_v2_base_v7 import (
     run_rolling_walkforward,
     compare_rolling_modes,
+    compare_rolling_modes_fast,
+    run_quick_rolling_test,
     BASELINE_CONFIG,
     SYMBOLS,
     TIMEFRAMES,
@@ -651,21 +653,45 @@ def run_quick_test():
     return result
 
 
-def run_comparison_test(start_date: str = None, end_date: str = None):
-    """Fixed vs Monthly vs Weekly vs Triday karşılaştırma testi"""
+def run_comparison_test(start_date: str = None, end_date: str = None, fast: bool = True, quick: bool = False):
+    """Fixed vs Monthly vs Weekly vs Triday karşılaştırma testi
+
+    Args:
+        start_date: Başlangıç tarihi YYYY-MM-DD
+        end_date: Bitiş tarihi YYYY-MM-DD
+        fast: Performans optimize edilmiş versiyon kullan (default: True)
+        quick: Hızlı test modu (az sembol/timeframe) (default: False)
+    """
     print("\n" + "="*70)
     print("🔬 ROLLING WALK-FORWARD KARŞILAŞTIRMA TESTİ")
+    if fast:
+        print("   [OPTIMIZED MODE - Master cache + parallel execution]")
+    if quick:
+        print("   [QUICK MODE - Reduced scope for faster testing]")
     print("="*70 + "\n")
 
-    # Use BASELINE_CONFIG for fixed mode
-    result = compare_rolling_modes(
-        symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "LINKUSDT"],
-        timeframes=["15m", "1h", "4h"],
-        start_date=start_date or "2025-06-01",
-        end_date=end_date or "2025-12-18",
-        fixed_config=BASELINE_CONFIG,
-        verbose=True,
-    )
+    # Use optimized version if available
+    if fast:
+        result = compare_rolling_modes_fast(
+            symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "LINKUSDT"],
+            timeframes=["15m", "1h", "4h"],
+            start_date=start_date or "2025-06-01",
+            end_date=end_date or "2025-12-18",
+            fixed_config=BASELINE_CONFIG,
+            verbose=True,
+            quick=quick,
+            parallel_modes=True,
+        )
+    else:
+        # Use BASELINE_CONFIG for fixed mode
+        result = compare_rolling_modes(
+            symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "LINKUSDT"],
+            timeframes=["15m", "1h", "4h"],
+            start_date=start_date or "2025-06-01",
+            end_date=end_date or "2025-12-18",
+            fixed_config=BASELINE_CONFIG,
+            verbose=True,
+        )
 
     # Write detailed trade logs for each mode
     # Note: compare_rolling_modes returns {"results": {...}, "comparison": {...}}
@@ -712,15 +738,20 @@ def main():
     parser.add_argument('--full-year', action='store_true', help='2025 tam yıl testi')
     parser.add_argument('--start-date', type=str, help='Başlangıç tarihi YYYY-MM-DD')
     parser.add_argument('--end-date', type=str, help='Bitiş tarihi YYYY-MM-DD')
+    parser.add_argument('--fast', action='store_true', default=True, help='Optimized mode (master cache + parallel) - default')
+    parser.add_argument('--no-fast', action='store_true', help='Disable optimized mode, use original sequential')
+    parser.add_argument('--quick-compare', action='store_true', help='Quick comparison mode (3 symbols, 3 timeframes)')
 
     args = parser.parse_args()
+
+    use_fast = args.fast and not args.no_fast
 
     if args.quick:
         result = run_quick_test()
     elif args.full_year:
         result = run_full_year_test()
     else:
-        result = run_comparison_test(args.start_date, args.end_date)
+        result = run_comparison_test(args.start_date, args.end_date, fast=use_fast, quick=args.quick_compare)
 
     print("\n" + "="*70)
     print("✅ TEST TAMAMLANDI")
