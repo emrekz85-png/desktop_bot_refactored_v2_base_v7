@@ -8108,14 +8108,21 @@ def run_rolling_walkforward(
                 return None
 
         jobs = [(s, t) for s in symbols_list for t in timeframes_list]
+        total_jobs = len(jobs)
+        log(f"   📊 {len(symbols_list)} sembol × {len(timeframes_list)} TF = {total_jobs} stream çekilecek...")
 
         with ThreadPoolExecutor(max_workers=5) as executor:
             futures = {executor.submit(fetch_one, s, t): (s, t) for s, t in jobs}
+            completed = 0
             for future in as_completed(futures):
+                completed += 1
+                sym, tf = futures[future]
                 res = future.result()
                 if res:
-                    sym, tf, df = res
+                    _, _, df = res
                     streams[(sym, tf)] = df
+                    if completed % 10 == 0 or completed == total_jobs:
+                        log(f"   [{completed}/{total_jobs}] Veri çekiliyor...")
 
         return streams
 
@@ -8755,18 +8762,26 @@ def compare_rolling_modes(
                 return None
 
         jobs = [(s, t) for s in symbols_list for t in timeframes_list]
+        total_jobs = len(jobs)
 
         with ThreadPoolExecutor(max_workers=5) as executor:
             futures = {executor.submit(fetch_one, s, t): (s, t) for s, t in jobs}
+            completed = 0
             for future in as_completed(futures):
+                completed += 1
+                sym, tf = futures[future]
                 res = future.result()
                 if res:
-                    sym, tf, df = res
+                    _, _, df = res
                     streams[(sym, tf)] = df
+                    log(f"   [{completed}/{total_jobs}] ✓ {sym}-{tf} ({len(df)} mum)")
+                else:
+                    log(f"   [{completed}/{total_jobs}] ⚠️ {sym}-{tf} (veri yok)")
 
         return streams
 
     # Fetch ALL data once
+    log(f"   📊 {len(symbols)} sembol × {len(timeframes)} TF = {len(symbols) * len(timeframes)} stream çekilecek...")
     preloaded_streams = fetch_data_for_comparison(earliest_start, latest_end, symbols, timeframes)
 
     if preloaded_streams:
