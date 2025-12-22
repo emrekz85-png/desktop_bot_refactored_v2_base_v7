@@ -181,7 +181,10 @@ if not IS_HEADLESS:
         from PyQt5.QtGui import QColor, QFont
         HAS_GUI = True
     except ImportError:
-        print("⚠️ PyQt5 bulunamadı - GUI devre dışı, sadece CLI modu kullanılabilir")
+        # Only print warning once in main process (avoid spam in parallel workers)
+        import multiprocessing
+        if multiprocessing.current_process().name == 'MainProcess':
+            print("⚠️ PyQt5 bulunamadı - GUI devre dışı, sadece CLI modu kullanılabilir")
         HAS_GUI = False
         IS_HEADLESS = True
         # Placeholder classes when PyQt5 import fails
