@@ -271,9 +271,9 @@ class BaseTradeManager(ABC):
         Process update for a single trade.
 
         This contains the core trade management logic:
-        - Dynamic TP adjustment
-        - Partial TP
-        - Breakeven
+        - Dynamic TP adjustment (conditional: only after partial or always)
+        - Partial TP with RR-based trigger adjustment
+        - Breakeven (tied to effective_partial_trigger)
         - Trailing SL
         - TP/SL hit detection
 
@@ -304,6 +304,39 @@ class BaseTradeManager(ABC):
         use_partial = trade.get("use_partial", True)  # Config'den oku, default True
         use_dynamic_tp = trade.get("use_dynamic_pbema_tp", True)
 
+        # === AŞAMA 3: RR bazlı effective_partial_trigger hesaplama ===
+        # Config'den partial TP parametrelerini al
+        partial_trigger = float(trade.get("partial_trigger", 0.65))
+        partial_fraction = float(trade.get("partial_fraction", 0.33))
+        partial_rr_adjustment = trade.get("partial_rr_adjustment", True)
+
+        # RR değerini al (opt_rr veya entry/tp/sl'den hesapla)
+        trade_rr = float(trade.get("opt_rr", 0))
+        if trade_rr <= 0:
+            # Fallback: entry, tp, sl'den hesapla
+            tp_dist = abs(tp - entry)
+            sl_dist = abs(entry - sl)
+            trade_rr = tp_dist / sl_dist if sl_dist > 0 else 2.0
+
+        # Effective partial trigger hesapla (RR'a göre dinamik)
+        if partial_rr_adjustment:
+            rr_high_threshold = float(trade.get("partial_rr_high_threshold", 1.8))
+            rr_high_trigger = float(trade.get("partial_rr_high_trigger", 0.75))
+            rr_low_threshold = float(trade.get("partial_rr_low_threshold", 1.2))
+            rr_low_trigger = float(trade.get("partial_rr_low_trigger", 0.55))
+
+            if trade_rr >= rr_high_threshold:
+                effective_partial_trigger = rr_high_trigger
+            elif trade_rr <= rr_low_threshold:
+                effective_partial_trigger = rr_low_trigger
+            else:
+                effective_partial_trigger = partial_trigger
+        else:
+            effective_partial_trigger = partial_trigger
+
+        # === AŞAMA 5: BE trigger = effective_partial_trigger ===
+        effective_be_trigger = effective_partial_trigger
+
         # Calculate prices and progress
         if t_type == "LONG":
             close_price = candle_close
@@ -316,14 +349,44 @@ class BaseTradeManager(ABC):
             partial_fill_price = close_price * 0.70 + extreme_price * 0.30
             in_profit = extreme_price < entry
 
-        # Dynamic PBEMA TP
-        dyn_tp = tp
-        if use_dynamic_tp and pb_top is not None and pb_bot is not None:
+        # === AŞAMA 6: Dynamic TP koşullu ve güvenlik kontrolleri ===
+        initial_tp = float(trade.get("initial_tp", tp))  # Progress hesabı için sabit referans
+        dyn_tp = initial_tp  # Default: initial_tp kullan
+
+        # Dynamic TP sadece partial sonrası mı aktif?
+        dynamic_tp_only_after_partial = trade.get("dynamic_tp_only_after_partial", True)
+        dynamic_tp_min_distance = float(trade.get("dynamic_tp_min_distance", 0.004))
+
+        # Dynamic TP hesaplama koşulu
+        should_apply_dynamic_tp = use_dynamic_tp and (
+            not dynamic_tp_only_after_partial or trade.get("partial_taken", False)
+        )
+
+        if should_apply_dynamic_tp and pb_top is not None and pb_bot is not None:
             try:
-                dyn_tp = float(pb_bot) if t_type == "LONG" else float(pb_top)
-                self.open_trades[trade_idx]["tp"] = dyn_tp
+                candidate_dyn_tp = float(pb_bot) if t_type == "LONG" else float(pb_top)
+
+                # Güvenlik kontrolü 1: Minimum mesafe
+                dist = abs(candidate_dyn_tp - entry) / entry if entry > 0 else 0
+                if dist < dynamic_tp_min_distance:
+                    # Mesafe çok yakın, initial_tp kullan
+                    dyn_tp = initial_tp
+                # Güvenlik kontrolü 2: Yön kontrolü (kritik bug önleyici)
+                elif t_type == "LONG" and candidate_dyn_tp <= entry:
+                    # LONG için dyn_tp entry'nin üstünde olmalı
+                    dyn_tp = initial_tp
+                elif t_type == "SHORT" and candidate_dyn_tp >= entry:
+                    # SHORT için dyn_tp entry'nin altında olmalı
+                    dyn_tp = initial_tp
+                else:
+                    # Tüm kontroller geçti, dynamic TP kullan
+                    dyn_tp = candidate_dyn_tp
+                    self.open_trades[trade_idx]["tp"] = dyn_tp
             except Exception:
-                dyn_tp = tp
+                dyn_tp = initial_tp
+        else:
+            # Dynamic TP kapalı veya partial öncesi, initial_tp kullan
+            dyn_tp = initial_tp
 
         # Update live PnL
         if t_type == "LONG":
@@ -334,19 +397,18 @@ class BaseTradeManager(ABC):
 
         # Calculate progress towards target
         # KRITIK: Progress için initial_tp kullan, dinamik TP değil!
-        # Dinamik TP değiştikçe progress zıplamasın, partial/breakeven erken tetiklenmesin
-        initial_tp = float(trade.get("initial_tp", tp))  # Backward compat: yoksa tp kullan
         total_dist = abs(initial_tp - entry)
         if total_dist <= 0:
             return None
         current_dist = abs(extreme_price - entry)
         progress = current_dist / total_dist
 
-        # Partial TP + Breakeven
-        # FIX: Lowered partial TP threshold from 50% to 40% for earlier profit taking
+        # === AŞAMA 2, 4: Partial TP + Breakeven (düzeltilmiş sıralama ve fraction) ===
         if in_profit and use_partial:
-            if (not trade.get("partial_taken")) and progress >= 0.40:
-                partial_size = size / 2.0
+            if (not trade.get("partial_taken")) and progress >= effective_partial_trigger:
+                # === AŞAMA 4: partial_fraction config'den oku ===
+                closed_size = size * partial_fraction
+                remaining_size = size - closed_size
 
                 # Partial fill with slippage
                 partial_fill = self._apply_slippage(partial_fill_price, t_type, is_entry=False)
@@ -356,15 +418,20 @@ class BaseTradeManager(ABC):
                 else:
                     partial_pnl_percent = (entry - partial_fill) / entry
 
-                partial_pnl = partial_pnl_percent * (entry * partial_size)
-                partial_notional = abs(partial_size) * abs(partial_fill)
+                # PnL hesaplaması closed_size üzerinden
+                partial_pnl = partial_pnl_percent * (entry * closed_size)
+                partial_notional = abs(closed_size) * abs(partial_fill)
                 commission = partial_notional * TRADING_CONFIG["total_fee"]
                 net_partial_pnl = partial_pnl - commission
-                margin_release = initial_margin / 2.0
+
+                # Margin hesaplamaları
+                margin_release = initial_margin * partial_fraction
+                remaining_margin = initial_margin - margin_release
 
                 # R-Multiple for partial
                 trade_risk_amount = float(trade.get("risk_amount", 0))
-                partial_risk = trade_risk_amount / 2.0
+                partial_risk = trade_risk_amount * partial_fraction
+                remaining_risk = trade_risk_amount - partial_risk
                 if partial_risk > 0:
                     partial_r_multiple = net_partial_pnl / partial_risk
                     self.trade_r_multiples.append(partial_r_multiple)
@@ -376,45 +443,51 @@ class BaseTradeManager(ABC):
                 self.locked_margin -= margin_release
                 self.total_pnl += net_partial_pnl
 
-                # Record partial in history
+                # === AŞAMA 2: ÖNCE open_trade'i güncelle, SONRA record oluştur ===
+                # 1. ÖNCE open trade flaglerini güncelle
+                self.open_trades[trade_idx]["partial_taken"] = True
+                self.open_trades[trade_idx]["partial_price"] = float(partial_fill)
+
+                # 2. ÖNCE eventleri ekle
+                # Move to breakeven
+                be_buffer = 0.002
+                if t_type == "LONG":
+                    be_sl = entry * (1 + be_buffer)
+                else:
+                    be_sl = entry * (1 - be_buffer)
+                self.open_trades[trade_idx]["sl"] = be_sl
+                self.open_trades[trade_idx]["breakeven"] = True
+
+                append_trade_event(self.open_trades[trade_idx], "PARTIAL", candle_time_utc, partial_fill)
+                append_trade_event(self.open_trades[trade_idx], "BE_SET", candle_time_utc, be_sl)
+
+                # 3. SONRA partial_record oluştur (güncel state ile)
                 partial_record = trade.copy()
-                partial_record["size"] = partial_size
+                partial_record["size"] = closed_size
                 partial_record["notional"] = partial_notional
                 partial_record["pnl"] = net_partial_pnl
                 partial_record["r_multiple"] = partial_r_multiple
-                partial_record["status"] = "PARTIAL TP (50%)"
+                partial_record["status"] = f"PARTIAL TP ({int(partial_fraction*100)}%)"
                 partial_record["close_time_utc"] = format_time_utc(candle_time_utc)
                 partial_record["close_time_local"] = format_time_local(candle_time_utc, offset_hours=3)
                 partial_record["close_price"] = float(partial_fill)
                 partial_record["pb_ema_top"] = pb_top
                 partial_record["pb_ema_bot"] = pb_bot
-                partial_record["events"] = json.dumps(trade.get("events", []))
+                # Events güncel olarak ekle (PARTIAL ve BE_SET eventleri dahil)
+                partial_record["partial_taken"] = True
+                partial_record["events"] = json.dumps(self.open_trades[trade_idx].get("events", []))
+
                 self._on_partial_tp(partial_record)
                 self.history.append(partial_record)
 
-                # Update open trade
-                self.open_trades[trade_idx]["size"] = partial_size
-                self.open_trades[trade_idx]["notional"] = partial_notional
-                self.open_trades[trade_idx]["margin"] = margin_release
-                self.open_trades[trade_idx]["partial_taken"] = True
-                self.open_trades[trade_idx]["partial_price"] = float(partial_fill)
-                self.open_trades[trade_idx]["risk_amount"] = partial_risk
+                # 4. Kalan pozisyon bilgilerini güncelle
+                self.open_trades[trade_idx]["size"] = remaining_size
+                self.open_trades[trade_idx]["notional"] = remaining_size * entry
+                self.open_trades[trade_idx]["margin"] = remaining_margin
+                self.open_trades[trade_idx]["risk_amount"] = remaining_risk
 
-                # Move to breakeven
-                # FIX: Increased BE buffer from 0.03% to 0.2% to prevent premature stops
-                be_buffer = 0.002
-                if t_type == "LONG":
-                    be_sl = entry * (1 + be_buffer)
-                else:
-                    be_sl = entry * (1 - be_buffer)
-                self.open_trades[trade_idx]["sl"] = be_sl
-                self.open_trades[trade_idx]["breakeven"] = True
-                append_trade_event(self.open_trades[trade_idx], "PARTIAL", candle_time_utc, partial_fill)
-                append_trade_event(self.open_trades[trade_idx], "BE_SET", candle_time_utc, be_sl)
-
-            elif (not trade.get("breakeven")) and progress >= 0.40:
-                # Breakeven without partial
-                # FIX: Increased BE buffer from 0.03% to 0.2% to prevent premature stops
+            elif (not trade.get("breakeven")) and progress >= effective_be_trigger:
+                # Breakeven without partial (use effective_be_trigger)
                 be_buffer = 0.002
                 if t_type == "LONG":
                     be_sl = entry * (1 + be_buffer)
@@ -424,8 +497,8 @@ class BaseTradeManager(ABC):
                 self.open_trades[trade_idx]["breakeven"] = True
                 append_trade_event(self.open_trades[trade_idx], "BE_SET", candle_time_utc, be_sl)
 
-        # Trailing BE to Partial: Move BE from entry to partial price when 90% progress reached
-        # This protects more profit if price reverses after approaching TP
+        # === AŞAMA 7: Trailing BE to Partial koruması ===
+        # Move BE from entry to partial price when 90% progress reached
         if (trade.get("partial_taken") and
             trade.get("breakeven") and
             progress >= 0.90 and
@@ -458,10 +531,9 @@ class BaseTradeManager(ABC):
             append_trade_event(self.open_trades[trade_idx], "PROFIT_LOCK", candle_time_utc,
                              self.open_trades[trade_idx].get("sl"))
 
-        # Trailing SL
+        # Trailing SL (uses effective_be_trigger for BE activation)
         if in_profit and use_trailing:
-            if (not trade.get("breakeven")) and progress >= 0.40:
-                # FIX: Increased BE buffer from 0.03% to 0.2% to prevent premature stops
+            if (not trade.get("breakeven")) and progress >= effective_be_trigger:
                 be_buffer = 0.002
                 if t_type == "LONG":
                     be_sl = entry * (1 + be_buffer)
@@ -881,6 +953,19 @@ class SimTradeManager(BaseTradeManager):
         opt_rr = config_snapshot.get("rr", 3.0)
         opt_rsi = config_snapshot.get("rsi", 60)
 
+        # Partial TP parametreleri
+        partial_trigger = config_snapshot.get("partial_trigger", 0.65)
+        partial_fraction = config_snapshot.get("partial_fraction", 0.33)
+        partial_rr_adjustment = config_snapshot.get("partial_rr_adjustment", True)
+        partial_rr_high_threshold = config_snapshot.get("partial_rr_high_threshold", 1.8)
+        partial_rr_high_trigger = config_snapshot.get("partial_rr_high_trigger", 0.75)
+        partial_rr_low_threshold = config_snapshot.get("partial_rr_low_threshold", 1.2)
+        partial_rr_low_trigger = config_snapshot.get("partial_rr_low_trigger", 0.55)
+
+        # Dynamic TP parametreleri
+        dynamic_tp_only_after_partial = config_snapshot.get("dynamic_tp_only_after_partial", True)
+        dynamic_tp_min_distance = config_snapshot.get("dynamic_tp_min_distance", 0.004)
+
         # Confidence-based risk multiplier
         # Backward compat: eski JSON'larda _confidence olabilir
         confidence_level = config_snapshot.get("confidence") or config_snapshot.get("_confidence", "high")
@@ -947,6 +1032,17 @@ class SimTradeManager(BaseTradeManager):
             "opt_rsi": opt_rsi,
             "risk_amount": risk_amount,
             "indicators_at_entry": trade_data.get("indicators_at_entry", {}),  # Indicator snapshot at entry
+            # Partial TP parametreleri (AŞAMA 3-4)
+            "partial_trigger": partial_trigger,
+            "partial_fraction": partial_fraction,
+            "partial_rr_adjustment": partial_rr_adjustment,
+            "partial_rr_high_threshold": partial_rr_high_threshold,
+            "partial_rr_high_trigger": partial_rr_high_trigger,
+            "partial_rr_low_threshold": partial_rr_low_threshold,
+            "partial_rr_low_trigger": partial_rr_low_trigger,
+            # Dynamic TP parametreleri (AŞAMA 6)
+            "dynamic_tp_only_after_partial": dynamic_tp_only_after_partial,
+            "dynamic_tp_min_distance": dynamic_tp_min_distance,
         }
 
         self.wallet_balance -= required_margin
