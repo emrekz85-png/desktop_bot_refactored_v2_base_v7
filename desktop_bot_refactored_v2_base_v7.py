@@ -102,7 +102,7 @@ import numpy as np
 import requests
 import dateutil.parser
 import itertools
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
 from datetime import datetime, timedelta
 import traceback
@@ -1131,9 +1131,16 @@ def _optimize_backtest_configs(
     max_workers = max(1, (os.cpu_count() or 1) - 1)
     wf_status = "Açık" if walk_forward_enabled else "Kapalı"
     quick_icon = "⚡" if quick_mode else ""
+
+    # Windows multiprocessing uyumluluğu: Windows'ta ProcessPoolExecutor yerine
+    # ThreadPoolExecutor kullan (DLL import ve bellek sorunlarını önler)
+    import sys
+    use_threads = sys.platform == "win32"
+    executor_type = "Thread" if use_threads else "Process"
+
     log(
         f"[OPT]{quick_icon} {len(candidates)} farklı ayar taranacak ({mode_str}). "
-        f"Paralel: {max_workers}, Walk-Forward: {wf_status}"
+        f"Paralel: {max_workers} ({executor_type}), Walk-Forward: {wf_status}"
     )
 
     for sym, tf in requested_pairs:
@@ -1219,7 +1226,11 @@ def _optimize_backtest_configs(
                     best_expected_r = 0.0
 
         try:
-            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            # Windows: ThreadPoolExecutor kullan (DLL import ve bellek sorunlarını önler)
+            # Linux/Mac: ProcessPoolExecutor kullan (daha hızlı)
+            ExecutorClass = ThreadPoolExecutor if use_threads else ProcessPoolExecutor
+
+            with ExecutorClass(max_workers=max_workers) as executor:
                 futures = {
                     executor.submit(_score_config_for_stream, df, sym, tf, cfg): cfg
                     for cfg in stream_candidates
