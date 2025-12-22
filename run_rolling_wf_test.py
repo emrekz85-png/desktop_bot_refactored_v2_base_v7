@@ -618,19 +618,15 @@ def write_trade_log(result: dict, output_dir: str = None) -> str:
     print(f"📝 Trade log saved: {filepath}")
     return filepath
 
-from desktop_bot_refactored_v2_base_v7 import (
-    run_rolling_walkforward,
-    compare_rolling_modes,
-    compare_rolling_modes_fast,
-    run_quick_rolling_test,
-    BASELINE_CONFIG,
-    SYMBOLS,
-    TIMEFRAMES,
-)
+
+# Windows multiprocessing uyumluluğu için import'lar fonksiyon içinde yapılacak
+# Global import kaldırıldı - her fonksiyon kendi import'unu yapacak
 
 
 def run_quick_test():
     """Hızlı test - 3 ay, az sembol"""
+    from desktop_bot_refactored_v2_base_v7 import run_rolling_walkforward
+
     print("\n" + "="*70)
     print("🧪 HIZLI TEST (3 ay, 3 sembol)")
     print("="*70 + "\n")
@@ -662,6 +658,12 @@ def run_comparison_test(start_date: str = None, end_date: str = None, fast: bool
         fast: Performans optimize edilmiş versiyon kullan (default: True)
         quick: Hızlı test modu (az sembol/timeframe) (default: False)
     """
+    from desktop_bot_refactored_v2_base_v7 import (
+        compare_rolling_modes,
+        compare_rolling_modes_fast,
+        BASELINE_CONFIG,
+    )
+
     print("\n" + "="*70)
     print("🔬 ROLLING WALK-FORWARD KARŞILAŞTIRMA TESTİ")
     if fast:
@@ -706,6 +708,13 @@ def run_comparison_test(start_date: str = None, end_date: str = None, fast: bool
 
 def run_full_year_test():
     """2025 tam yıl testi"""
+    from desktop_bot_refactored_v2_base_v7 import (
+        compare_rolling_modes,
+        BASELINE_CONFIG,
+        SYMBOLS,
+        TIMEFRAMES,
+    )
+
     print("\n" + "="*70)
     print("📊 2025 TAM YIL TESTİ")
     print("="*70 + "\n")
