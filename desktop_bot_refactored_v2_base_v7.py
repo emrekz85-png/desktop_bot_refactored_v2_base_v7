@@ -9127,29 +9127,73 @@ def compare_rolling_modes_fast(
         # Parallel execution using ThreadPoolExecutor
         # Note: ProcessPoolExecutor would be faster but has pickling issues with nested functions
         log("\n📊 Modlar paralel çalıştırılıyor...")
+        log(f"   Modlar: {', '.join([m[0].upper() for m in mode_configs])}")
+        log(f"   ⏳ Her mod 5-15 dakika sürebilir, lütfen bekleyin...")
+
+        # Progress tracking
+        import threading
+        import time as time_module
+        completed_modes = []
+        running_modes = [m[0] for m in mode_configs]
+        start_time = time_module.time()
+        stop_progress = threading.Event()
+
+        def progress_monitor():
+            """Print progress every 30 seconds to show the test is still running."""
+            while not stop_progress.is_set():
+                stop_progress.wait(30)  # Wait 30 seconds or until stopped
+                if stop_progress.is_set():
+                    break
+                elapsed = int(time_module.time() - start_time)
+                mins, secs = divmod(elapsed, 60)
+                remaining = [m for m in running_modes if m not in completed_modes]
+                if remaining:
+                    log(f"   ⏳ [{mins}:{secs:02d}] Çalışıyor: {', '.join([m.upper() for m in remaining])} | Tamamlanan: {len(completed_modes)}/4")
+
+        # Start progress monitor thread
+        progress_thread = threading.Thread(target=progress_monitor, daemon=True)
+        progress_thread.start()
 
         def run_mode(mode_name: str, mode_params: dict):
             try:
-                return (mode_name, run_rolling_walkforward(
+                result = run_rolling_walkforward(
                     symbols=symbols,
                     timeframes=timeframes,
                     start_date=start_date,
                     end_date=end_date,
                     verbose=False,  # Disable verbose in parallel mode
                     **mode_params,
-                ))
+                )
+                return (mode_name, result)
             except Exception as e:
-                return (mode_name, {"error": str(e), "metrics": {"total_pnl": 0, "max_drawdown": 0, "window_hit_rate": 0, "worst_window_pnl": 0}})
+                import traceback
+                error_msg = f"{e}\n{traceback.format_exc()}"
+                return (mode_name, {"error": error_msg, "metrics": {"total_pnl": 0, "max_drawdown": 0, "window_hit_rate": 0, "worst_window_pnl": 0}})
 
         # Use 2 workers max to avoid memory issues
         max_workers = min(2, len(mode_configs))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(run_mode, name, params): name for name, params in mode_configs}
+        try:
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(run_mode, name, params): name for name, params in mode_configs}
 
-            for future in as_completed(futures):
-                mode_name, result = future.result()
-                results[mode_name] = result
-                log(f"   ✓ {mode_name.upper()} mode tamamlandı: PnL=${result.get('metrics', {}).get('total_pnl', 0):.2f}")
+                for future in as_completed(futures):
+                    mode_name, result = future.result()
+                    results[mode_name] = result
+                    completed_modes.append(mode_name)
+
+                    elapsed = int(time_module.time() - start_time)
+                    mins, secs = divmod(elapsed, 60)
+
+                    if result.get("error"):
+                        log(f"   ❌ [{mins}:{secs:02d}] {mode_name.upper()} mode HATA: {result['error'][:100]}...")
+                    else:
+                        pnl = result.get('metrics', {}).get('total_pnl', 0)
+                        trades = result.get('metrics', {}).get('total_trades', 0)
+                        log(f"   ✓ [{mins}:{secs:02d}] {mode_name.upper()} mode tamamlandı: PnL=${pnl:.2f}, Trades={trades}")
+        finally:
+            # Stop progress monitor
+            stop_progress.set()
+            progress_thread.join(timeout=1)
 
     else:
         # Sequential execution (original behavior)
