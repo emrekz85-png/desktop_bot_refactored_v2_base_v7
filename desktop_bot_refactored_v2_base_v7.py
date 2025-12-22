@@ -207,6 +207,16 @@ if not IS_HEADLESS:
             AlignCenter = 0
             AlignLeft = 0
             AlignRight = 0
+
+        class QMainWindow:
+            """Placeholder QMainWindow for when PyQt5 is not available."""
+            def __init__(self, *args, **kwargs): pass
+            def setWindowTitle(self, *args): pass
+            def setGeometry(self, *args): pass
+            def setStyleSheet(self, *args): pass
+            def setCentralWidget(self, *args): pass
+            def show(self): pass
+            def close(self): pass
 else:
     HAS_GUI = False
     # Placeholder classes for headless mode - allows class definitions to work
@@ -235,6 +245,16 @@ else:
         AlignCenter = 0
         AlignLeft = 0
         AlignRight = 0
+
+    class QMainWindow:
+        """Placeholder QMainWindow for headless mode."""
+        def __init__(self, *args, **kwargs): pass
+        def setWindowTitle(self, *args): pass
+        def setGeometry(self, *args): pass
+        def setStyleSheet(self, *args): pass
+        def setCentralWidget(self, *args): pass
+        def show(self): pass
+        def close(self): pass
 
 # Lazy import for plotly (heavy library, only needed for charts)
 _plotly_go = None
