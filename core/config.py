@@ -465,6 +465,19 @@ DEFAULT_STRATEGY_CONFIG = {
     "tp_min_dist_ratio": 0.0008,     # Min TP distance ratio
     "tp_max_dist_ratio": 0.050,      # Max TP distance ratio
     "adx_min": 15.0,                 # ADX minimum (trend strength)
+
+    # === Partial TP Parameters ===
+    "partial_trigger": 0.65,         # Progress seviyesi (0.65 = %65'te partial TP al)
+    "partial_fraction": 0.33,        # Kapatılacak pozisyon oranı (%33)
+    "partial_rr_adjustment": True,   # RR'a göre partial trigger ayarlama
+    "partial_rr_high_threshold": 1.8,  # Yüksek RR eşiği
+    "partial_rr_high_trigger": 0.75,   # Yüksek RR için partial trigger (%75)
+    "partial_rr_low_threshold": 1.2,   # Düşük RR eşiği
+    "partial_rr_low_trigger": 0.55,    # Düşük RR için partial trigger (%55)
+
+    # === Dynamic TP Parameters ===
+    "dynamic_tp_only_after_partial": True,  # Dynamic TP sadece partial sonrası aktif
+    "dynamic_tp_min_distance": 0.004,       # Minimum mesafe (entry'den %0.4)
 }
 
 # ==========================================

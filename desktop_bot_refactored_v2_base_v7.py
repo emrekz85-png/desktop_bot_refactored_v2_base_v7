@@ -614,27 +614,51 @@ def _generate_candidate_configs():
 
 
 def _generate_quick_candidate_configs():
-    """Create a minimal config grid for quick testing (~12 configs instead of ~120).
+    """Create a minimal config grid for quick testing (~55 configs instead of ~120).
 
     Used when quick_mode=True for faster backtest iterations.
     Covers key combinations without exhaustive search.
     Only SSL_Flow strategy is tested.
+
+    Includes partial TP/dynamic TP variations for optimization.
     """
     # Sadece en önemli RR ve RSI değerlerini kullan
     rr_vals = [1.2, 1.8, 2.4]  # 3 değer (vs 5)
     rsi_vals = [35, 55]        # 2 değer (vs 5)
     # AlphaTrend is now MANDATORY for SSL_Flow - only True option
     at_vals = [True]           # Sadece 1 değer (AlphaTrend zorunlu)
-    dyn_tp_vals = [True]       # Sadece 1 değer (dinamik TP genelde daha iyi)
+
+    # Partial TP varyasyonları
+    dyn_tp_vals = [True, False]              # Dynamic TP açık/kapalı
+    partial_trigger_vals = [0.55, 0.65]      # Partial trigger seviyeleri
+    partial_fraction_vals = [0.33, 0.50]     # Partial fraction seçenekleri
 
     candidates = []
 
     # SSL Flow strategy configs (trend following with SSL HYBRID baseline)
-    for rr, rsi, at_active, dyn_tp in itertools.product(
-        rr_vals, rsi_vals, at_vals, dyn_tp_vals
-    ):
-        candidates.append(
-            {
+    for rr, rsi, at_active in itertools.product(rr_vals, rsi_vals, at_vals):
+        # Base config - partial kapalı
+        candidates.append({
+            "rr": round(float(rr), 2),
+            "rsi": int(rsi),
+            "slope": 0.5,
+            "at_active": bool(at_active),
+            "use_trailing": False,
+            "use_partial": False,
+            "use_dynamic_pbema_tp": True,
+            "strategy_mode": "ssl_flow",
+            "partial_trigger": 0.65,
+            "partial_fraction": 0.33,
+            "partial_rr_adjustment": True,
+            "dynamic_tp_only_after_partial": True,
+            "dynamic_tp_min_distance": 0.004,
+        })
+
+        # Partial TP varyasyonları
+        for dyn_tp, partial_trigger, partial_fraction in itertools.product(
+            dyn_tp_vals, partial_trigger_vals, partial_fraction_vals
+        ):
+            candidates.append({
                 "rr": round(float(rr), 2),
                 "rsi": int(rsi),
                 "slope": 0.5,
@@ -643,15 +667,20 @@ def _generate_quick_candidate_configs():
                 "use_partial": True,
                 "use_dynamic_pbema_tp": bool(dyn_tp),
                 "strategy_mode": "ssl_flow",
-            }
-        )
+                "partial_trigger": partial_trigger,
+                "partial_fraction": partial_fraction,
+                "partial_rr_adjustment": True,
+                "dynamic_tp_only_after_partial": True,
+                "dynamic_tp_min_distance": 0.004,
+            })
 
     # 1 trailing config ekle
     trailing_cfg = dict(candidates[0])
     trailing_cfg["use_trailing"] = True
+    trailing_cfg["use_partial"] = True
     candidates.append(trailing_cfg)
 
-    return candidates  # ~13 config (vs ~120)
+    return candidates  # ~55 config (vs ~120)
 
 
 def _get_min_trades_for_timeframe(tf: str, num_candles: int = 20000) -> int:
@@ -7512,25 +7541,43 @@ BASELINE_CONFIG = {
     "strategy_mode": "ssl_flow",
     "disabled": False,
     "confidence": "high",
+    # === Partial TP Parameters ===
+    "partial_trigger": 0.65,         # Progress seviyesi (0.65 = %65'te partial TP al)
+    "partial_fraction": 0.33,        # Kapatılacak pozisyon oranı (%33)
+    "partial_rr_adjustment": True,   # RR'a göre partial trigger ayarlama
+    "partial_rr_high_threshold": 1.8,  # Yüksek RR eşiği
+    "partial_rr_high_trigger": 0.75,   # Yüksek RR için partial trigger (%75)
+    "partial_rr_low_threshold": 1.2,   # Düşük RR eşiği
+    "partial_rr_low_trigger": 0.55,    # Düşük RR için partial trigger (%55)
+    # === Dynamic TP Parameters ===
+    "dynamic_tp_only_after_partial": True,  # Dynamic TP sadece partial sonrası aktif
+    "dynamic_tp_min_distance": 0.004,       # Minimum mesafe (entry'den %0.4)
 }
 
 # Alternatif baseline configs (karşılaştırma için)
 # NOT: AlphaTrend tüm config'lerde ZORUNLU açık
+# NOT: Yeni partial TP parametreleri BASELINE_CONFIG'dan miras alınacak
 BASELINE_CONFIGS_ALT = {
     "conservative": {
         "rr": 1.2, "rsi": 45, "at_active": True,
         "use_trailing": False, "use_partial": True, "use_dynamic_pbema_tp": True,
         "strategy_mode": "ssl_flow", "disabled": False, "confidence": "high",
+        "partial_trigger": 0.55, "partial_fraction": 0.33, "partial_rr_adjustment": True,
+        "dynamic_tp_only_after_partial": True, "dynamic_tp_min_distance": 0.004,
     },
     "aggressive": {
         "rr": 2.1, "rsi": 35, "at_active": True,
         "use_trailing": False, "use_partial": True, "use_dynamic_pbema_tp": True,
         "strategy_mode": "ssl_flow", "disabled": False, "confidence": "high",
+        "partial_trigger": 0.75, "partial_fraction": 0.33, "partial_rr_adjustment": True,
+        "dynamic_tp_only_after_partial": True, "dynamic_tp_min_distance": 0.004,
     },
     "standard": {
         "rr": 2.0, "rsi": 70, "at_active": True,
         "use_trailing": False, "use_partial": True, "use_dynamic_pbema_tp": True,
         "strategy_mode": "ssl_flow", "disabled": False, "confidence": "high",
+        "partial_trigger": 0.65, "partial_fraction": 0.33, "partial_rr_adjustment": True,
+        "dynamic_tp_only_after_partial": True, "dynamic_tp_min_distance": 0.004,
     },
 }
 
@@ -8454,6 +8501,9 @@ def run_rolling_walkforward(
                 "max_dd": 0.0,
                 "config_used": {},
                 "skipped": True,
+                # AŞAMA 8: 0-trade window reason logging
+                "zero_trade_reason": "no_data",
+                "zero_trade_details": "Veri bulunamadı veya indirilemedi",
             }
             all_window_results.append(window_result)
             continue
@@ -8549,9 +8599,35 @@ def run_rolling_walkforward(
                 "open_positions_count": len(carried_positions),
             }
 
-            log(f"   ✓ PnL=${result['pnl']:.2f}, Trades={result['trades']}, Wins={result['wins']}")
+            # AŞAMA 8: 0-trade window reason logging (sinyal gelmedi case)
+            if result["trades"] == 0:
+                enabled_count = len([c for c in config_map.values() if not c.get("disabled")])
+                window_result["zero_trade_reason"] = "no_signals"
+                window_result["zero_trade_details"] = f"Backtest çalıştı ama sinyal gelmedi. {enabled_count} config aktifti."
+                log(f"   ⚠️ 0 trade: Sinyal gelmedi ({enabled_count} config aktifti)")
+            else:
+                log(f"   ✓ PnL=${result['pnl']:.2f}, Trades={result['trades']}, Wins={result['wins']}")
 
         else:
+            # AŞAMA 8: 0-trade window reason analizi
+            zero_reason = "unknown"
+            zero_details = ""
+            if not config_map:
+                zero_reason = "no_config"
+                zero_details = "Optimizer config bulamadı veya tüm configler disabled"
+            elif not trade_streams:
+                zero_reason = "no_streams"
+                zero_details = "Trade dönemi için yeterli veri yok"
+            else:
+                # Hem config hem stream var ama backtest çalışmadı
+                all_disabled = all(c.get("disabled", False) for c in config_map.values())
+                if all_disabled:
+                    zero_reason = "all_disabled"
+                    zero_details = "Tüm stream configleri disabled olarak işaretli"
+                else:
+                    zero_reason = "backtest_error"
+                    zero_details = "Backtest çalıştırılamadı (bilinmeyen hata)"
+
             window_result = {
                 "window_id": window["window_id"],
                 "trade_start": window["trade_start"].strftime("%Y-%m-%d"),
@@ -8562,8 +8638,11 @@ def run_rolling_walkforward(
                 "max_dd": 0.0,
                 "config_used": {},
                 "skipped": True,
+                # AŞAMA 8: 0-trade window reason logging
+                "zero_trade_reason": zero_reason,
+                "zero_trade_details": zero_details,
             }
-            log(f"   ⚠️ Backtest atlandı (veri/config yetersiz)")
+            log(f"   ⚠️ Backtest atlandı: {zero_reason} - {zero_details}")
 
         all_window_results.append(window_result)
 
