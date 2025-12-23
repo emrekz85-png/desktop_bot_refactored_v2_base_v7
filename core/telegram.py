@@ -16,7 +16,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 from queue import Queue
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .config import CONFIG_FILE, DATA_DIR
 
@@ -258,7 +258,7 @@ class TelegramNotifier:
 
         message = (
             f"{icon} <b>DAILY SUMMARY</b>\n"
-            f"Date: {datetime.utcnow().strftime('%Y-%m-%d')}\n"
+            f"Date: {datetime.now(timezone.utc).replace(tzinfo=None).strftime('%Y-%m-%d')}\n"
             f"Total Trades: {total_trades}\n"
             f"Wins: {wins}\n"
             f"Losses: {losses}\n"

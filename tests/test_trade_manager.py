@@ -6,8 +6,13 @@ Tests trade opening, position sizing, risk management, and trade updates.
 
 import pytest
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
+
+
+def _utcnow():
+    """Helper to get current UTC time as naive datetime."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class TestTradeManagerInit:
@@ -108,7 +113,7 @@ class TestOpenTrade:
         trade_manager.open_trade(sample_long_trade)
 
         # Set cooldown for this symbol/timeframe
-        trade_manager.cooldowns[("BTCUSDT", "5m")] = datetime.utcnow() + timedelta(hours=1)
+        trade_manager.cooldowns[("BTCUSDT", "5m")] = _utcnow() + timedelta(hours=1)
 
         # Try to open another trade
         trade2 = sample_long_trade.copy()
@@ -142,7 +147,7 @@ class TestCooldown:
 
     def test_check_cooldown_returns_true_during_cooldown(self, trade_manager):
         """Should return True during active cooldown."""
-        future_time = datetime.utcnow() + timedelta(hours=1)
+        future_time = _utcnow() + timedelta(hours=1)
         trade_manager.cooldowns[("BTCUSDT", "5m")] = future_time
 
         result = trade_manager.check_cooldown("BTCUSDT", "5m")
@@ -150,7 +155,7 @@ class TestCooldown:
 
     def test_check_cooldown_clears_expired_cooldown(self, trade_manager):
         """Should clear and return False for expired cooldown."""
-        past_time = datetime.utcnow() - timedelta(hours=1)
+        past_time = _utcnow() - timedelta(hours=1)
         trade_manager.cooldowns[("BTCUSDT", "5m")] = past_time
 
         result = trade_manager.check_cooldown("BTCUSDT", "5m")
@@ -161,7 +166,7 @@ class TestCooldown:
         """Should handle pandas Timestamp for now_utc parameter."""
         import pandas as pd
 
-        future_time = datetime.utcnow() + timedelta(hours=1)
+        future_time = _utcnow() + timedelta(hours=1)
         trade_manager.cooldowns[("BTCUSDT", "5m")] = future_time
 
         now = pd.Timestamp.utcnow()
@@ -237,15 +242,15 @@ class TestStrategyWallets:
 
     def test_strategy_portfolio_risk_calculated_per_strategy(self, trade_manager, sample_long_trade, mock_best_config_cache):
         """Portfolio risk should be calculated per strategy."""
-        # Open a keltner_bounce trade
+        # Open a trade (defaults to ssl_flow as keltner_bounce is disabled)
         trade_manager.open_trade(sample_long_trade)
 
         kb_risk = trade_manager._calculate_strategy_portfolio_risk("keltner_bounce")
         sf_risk = trade_manager._calculate_strategy_portfolio_risk("ssl_flow")
 
-        # keltner_bounce should have risk, ssl_flow should not
-        assert kb_risk > 0
-        assert sf_risk == 0
+        # ssl_flow should have risk (active strategy), keltner_bounce should not
+        assert sf_risk > 0
+        assert kb_risk == 0
 
 
 class TestTradeFields:

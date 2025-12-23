@@ -6,8 +6,13 @@ Centralized settings management for all modules.
 import os
 import sys
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
+
+
+def _utcnow():
+    """Helper to get current UTC time as naive datetime (replaces deprecated _utcnow())."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 # ==========================================
 # GOOGLE COLAB / HEADLESS MODE SUPPORT
@@ -230,7 +235,7 @@ def save_dynamic_blacklist(blacklist: dict, summary_info: dict = None):
 
         data = {
             "blacklist": serializable,
-            "updated_at": datetime.utcnow().isoformat() + "Z",
+            "updated_at": _utcnow().isoformat() + "Z",
             "config": DYNAMIC_BLACKLIST_CONFIG,
         }
         if summary_info:
@@ -278,7 +283,7 @@ def update_dynamic_blacklist(summary_rows: list) -> dict:
                 "pnl": pnl,
                 "trades": trades,
                 "win_rate": win_rate,
-                "blacklisted_at": datetime.utcnow().isoformat() + "Z",
+                "blacklisted_at": _utcnow().isoformat() + "Z",
             }
         elif pnl > pos_thresh:
             if key in current_blacklist:

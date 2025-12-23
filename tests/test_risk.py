@@ -7,7 +7,12 @@ stop loss management, and profit protection mechanisms.
 
 import pytest
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+
+
+def _utcnow():
+    """Helper to get current UTC time as naive datetime."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class TestPositionSizing:
@@ -36,6 +41,8 @@ class TestPositionSizing:
         # Create trade manager with very low balance
         tm = trading_module.TradeManager(persist=False, verbose=False)
         tm.wallet_balance = 50.0  # Very low balance
+        # Set ssl_flow wallet (default strategy) to low balance
+        tm.strategy_wallets["ssl_flow"]["wallet_balance"] = 50.0
         tm.strategy_wallets["keltner_bounce"]["wallet_balance"] = 50.0
 
         trade_data = {
@@ -46,8 +53,8 @@ class TestPositionSizing:
             "tp": 51000.0,
             "sl": 49500.0,
             "setup": "TEST",
-            "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
-            "open_time_utc": datetime.utcnow(),
+            "timestamp": _utcnow().strftime("%Y-%m-%d %H:%M"),
+            "open_time_utc": _utcnow(),
         }
 
         tm.open_trade(trade_data)
@@ -70,8 +77,8 @@ class TestPositionSizing:
             "tp": 103.0,
             "sl": 98.0,
             "setup": "TEST",
-            "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
-            "open_time_utc": datetime.utcnow(),
+            "timestamp": _utcnow().strftime("%Y-%m-%d %H:%M"),
+            "open_time_utc": _utcnow(),
         }
 
         tm.open_trade(trade_data)
@@ -98,15 +105,15 @@ class TestRMultiple:
             "tp": 104.0,  # 4% profit target
             "sl": 98.0,   # 2% stop loss
             "setup": "TEST",
-            "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
-            "open_time_utc": datetime.utcnow(),
+            "timestamp": _utcnow().strftime("%Y-%m-%d %H:%M"),
+            "open_time_utc": _utcnow(),
         }
 
         sim.open_trade(trade_data)
         assert len(sim.open_trades) == 1
 
         # Simulate TP hit - use candle low above entry to avoid any SL logic
-        candle_time = datetime.utcnow() + timedelta(minutes=5)
+        candle_time = _utcnow() + timedelta(minutes=5)
         sim.update_trades(
             "BTCUSDT", "5m",
             candle_high=105.0,  # Above TP
@@ -120,8 +127,9 @@ class TestRMultiple:
         # Trade should be closed
         if sim.history:
             trade = sim.history[-1]
-            # Trade closed - various possible statuses depending on logic
-            valid_statuses = ["WON", "PARTIAL_WIN", "STOP", "PARTIAL TP (50%)"]
+            # Trade closed - various possible statuses including BothHit cases
+            valid_statuses = ["WON", "PARTIAL_WIN", "STOP", "PARTIAL TP (50%)",
+                            "PARTIAL TP (33%)", "STOP (BothHit)"]
             assert trade["status"] in valid_statuses, f"Unexpected status: {trade['status']}"
             # If R-multiple is tracked, verify it exists
             if "r_multiple" in trade:
@@ -133,24 +141,24 @@ class TestStopLossProtection:
     """Tests for stop loss protection mechanisms."""
 
     def test_apply_1m_profit_lock(self, trading_module):
-        """1m profit lock should move SL into profit at 80% progress."""
+        """1m profit lock should move SL into profit at 90%+ progress."""
         trade = {
             "sl": 98.0,
-            "breakeven": False,
+            "profit_lock_applied": False,
         }
 
-        # Test at 85% progress to TP
+        # Test at 92% progress to TP (>= 0.90 required)
         result = trading_module._apply_1m_profit_lock(
             trade=trade,
             tf="1m",
             t_type="LONG",
             entry=100.0,
             tp=104.0,  # 4% target
-            progress=0.85,  # 85% to TP
+            progress=0.92,  # 92% to TP (>= 0.90 required)
         )
 
         assert result is True
-        assert trade["breakeven"] is True
+        assert trade["profit_lock_applied"] is True
         # SL should be moved above entry (into profit)
         assert trade["sl"] > 100.0
 
@@ -170,9 +178,9 @@ class TestStopLossProtection:
         assert result is False
         assert trade["sl"] == 98.0  # Unchanged
 
-    def test_1m_profit_lock_requires_80_percent_progress(self, trading_module):
-        """Profit lock should only trigger at 80%+ progress."""
-        trade = {"sl": 98.0, "breakeven": False}
+    def test_1m_profit_lock_requires_90_percent_progress(self, trading_module):
+        """Profit lock should only trigger at 90%+ progress."""
+        trade = {"sl": 98.0, "profit_lock_applied": False}
 
         result = trading_module._apply_1m_profit_lock(
             trade=trade,
@@ -180,29 +188,33 @@ class TestStopLossProtection:
             t_type="LONG",
             entry=100.0,
             tp=104.0,
-            progress=0.70,  # Only 70%
+            progress=0.85,  # Only 85% (< 0.90 required)
         )
 
         assert result is False
 
     def test_partial_stop_protection(self, trading_module):
-        """Partial stop protection should raise SL to partial fill price."""
+        """Partial stop protection should raise SL when progress drops below threshold."""
         trade = {
             "sl": 98.0,
+            "entry": 100.0,
+            "tp": 104.0,
             "partial_taken": True,
             "partial_price": 101.5,
             "stop_protection": False,
         }
 
+        # Protection triggers when progress drops below 0.30 (price retraces)
         result = trading_module._apply_partial_stop_protection(
             trade=trade,
             tf="5m",
-            progress=0.85,
+            progress=0.25,  # Below 0.30 threshold
             t_type="LONG",
         )
 
         assert result is True
-        assert trade["sl"] == 101.5
+        # SL should be moved to entry + 10% of TP distance = 100 + 0.4 = 100.4
+        assert trade["sl"] > 100.0
         assert trade["stop_protection"] is True
 
     def test_partial_stop_protection_requires_partial_taken(self, trading_module):

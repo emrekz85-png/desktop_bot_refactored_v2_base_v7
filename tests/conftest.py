@@ -10,7 +10,7 @@ import sys
 import os
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
 
 # Add parent directory to path to import main module
@@ -207,8 +207,8 @@ def sample_long_trade():
         "tp": 103.0,
         "sl": 98.0,
         "setup": "TEST_SETUP",
-        "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
-        "open_time_utc": datetime.utcnow(),
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+        "open_time_utc": datetime.now(timezone.utc).replace(tzinfo=None),
     }
 
 
@@ -223,8 +223,8 @@ def sample_short_trade():
         "tp": 97.0,
         "sl": 102.0,
         "setup": "TEST_SETUP",
-        "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
-        "open_time_utc": datetime.utcnow(),
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M"),
+        "open_time_utc": datetime.now(timezone.utc).replace(tzinfo=None),
     }
 
 

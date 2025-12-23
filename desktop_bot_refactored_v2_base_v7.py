@@ -35,6 +35,7 @@ import threading
 # Fallback kodlar kaldırıldı - tek kaynak core paketi.
 from core import (
     # Utils
+    utcnow,  # Replacement for deprecated utcnow()
     normalize_datetime,
     tf_to_timedelta,
     calculate_funding_cost,
@@ -474,7 +475,7 @@ def _audit_trade_logic_parity() -> dict:
     try:
         symbol = "TESTCOIN"
         tf = "5m"
-        seed_ts = datetime.utcnow()
+        seed_ts = utcnow()
         trade_data = {
             "symbol": symbol,
             "timeframe": tf,
@@ -1538,7 +1539,7 @@ def save_best_configs(best_configs: dict):
 
     cleaned["_meta"] = {
         "strategy_signature": _strategy_signature(),
-        "saved_at": datetime.utcnow().isoformat() + "Z",
+        "saved_at": utcnow().isoformat() + "Z",
     }
 
     # JSON serileştirme için numpy/pandas tiplerini Python native tiplerine dönüştür
@@ -1682,7 +1683,7 @@ class TradeManager:
         k = (symbol, timeframe)
 
         if now_utc is None:
-            now_utc = datetime.utcnow()
+            now_utc = utcnow()
 
         # now_utc'yi normalize et
         if isinstance(now_utc, pd.Timestamp):
@@ -1775,7 +1776,7 @@ class TradeManager:
     def _check_and_reset_week(self, trade_time: datetime = None):
         """Check if we've entered a new week and reset weekly PnL if so."""
         if trade_time is None:
-            trade_time = datetime.utcnow()
+            trade_time = utcnow()
 
         # Normalize to naive datetime
         if hasattr(trade_time, 'tzinfo') and trade_time.tzinfo is not None:
@@ -1960,7 +1961,7 @@ class TradeManager:
                 print(f"🛑 [{sym}-{tf}] Circuit breaker aktif - trade açılmadı")
                 return
 
-            cooldown_ref_time = signal_data.get("open_time_utc") or datetime.utcnow()
+            cooldown_ref_time = signal_data.get("open_time_utc") or utcnow()
             if self.check_cooldown(sym, tf, cooldown_ref_time):
                 return
 
@@ -2055,7 +2056,7 @@ class TradeManager:
                 )
 
             # open_time_utc'yi datetime string'e çevir (numpy.datetime64, pd.Timestamp veya datetime olabilir)
-            _otv = signal_data.get("open_time_utc") or datetime.utcnow()
+            _otv = signal_data.get("open_time_utc") or utcnow()
             if isinstance(_otv, np.datetime64):
                 _otv = pd.Timestamp(_otv).to_pydatetime()
             elif isinstance(_otv, pd.Timestamp):
@@ -2119,7 +2120,7 @@ class TradeManager:
         """
         with self.lock:
             if candle_time_utc is None:
-                candle_time_utc = datetime.utcnow()
+                candle_time_utc = utcnow()
 
             closed_indices = []
             trades_updated = False
@@ -2524,7 +2525,7 @@ class TradeManager:
                 # Funding cost - merkezi fonksiyon kullan (v40.4)
                 funding_cost = calculate_funding_cost(
                     open_time=trade.get("open_time_utc", ""),
-                    close_time=datetime.utcnow(),
+                    close_time=utcnow(),
                     notional_value=abs(size) * entry
                 )
 
@@ -2543,7 +2544,7 @@ class TradeManager:
 
                 # Cooldown ayarla
                 wait_minutes = 10 if tf == "1m" else (30 if tf == "5m" else 60)
-                self.cooldowns[(symbol, tf)] = datetime.utcnow() + pd.Timedelta(minutes=wait_minutes)
+                self.cooldowns[(symbol, tf)] = utcnow() + pd.Timedelta(minutes=wait_minutes)
 
                 # BE statüsünü ayır
                 reason = "STOP [RT]"  # RT = Real-Time kapatma
@@ -2552,7 +2553,7 @@ class TradeManager:
 
                 trade["status"] = reason
                 trade["pnl"] = final_net_pnl
-                trade["close_time"] = (datetime.utcnow() + pd.Timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
+                trade["close_time"] = (utcnow() + pd.Timedelta(hours=3)).strftime("%Y-%m-%d %H:%M")
                 trade["close_price"] = float(exit_fill)
 
                 serialized_trade = trade.copy()
@@ -2792,7 +2793,7 @@ class TradeManager:
                     trade["status"] = reason
                     trade["pnl"] = net_pnl
                     trade["close_price"] = exit_fill
-                    trade["close_time"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+                    trade["close_time"] = utcnow().strftime("%Y-%m-%d %H:%M")
 
                     self.history.append(trade)
                     closed_indices.append(i)
@@ -5218,7 +5219,7 @@ class MainWindow(QMainWindow):
             saved_at = datetime.fromisoformat(saved_at_str.replace("Z", "+00:00"))
             # Her iki datetime'ı da naive UTC olarak karşılaştır
             saved_at_naive = saved_at.replace(tzinfo=None)
-            now_naive = datetime.utcnow()
+            now_naive = utcnow()
             age = now_naive - saved_at_naive
             age_days = age.days
             age_hours = age.seconds // 3600
@@ -5432,7 +5433,7 @@ class MainWindow(QMainWindow):
                 try:
                     saved_at = datetime.fromisoformat(saved_at_str.replace("Z", "+00:00"))
                     saved_at_naive = saved_at.replace(tzinfo=None)
-                    now_naive = datetime.utcnow()
+                    now_naive = utcnow()
                     age = now_naive - saved_at_naive
                     age_days = age.days
                     age_hours = age.seconds // 3600
@@ -5680,7 +5681,7 @@ class MainWindow(QMainWindow):
         summary_rows = result.get("summary", []) if isinstance(result, dict) else []
 
         if summary_rows:
-            finished_at = datetime.utcnow().isoformat() + "Z"
+            finished_at = utcnow().isoformat() + "Z"
             meta = {
                 "finished_at": finished_at,
                 "summary": summary_rows,

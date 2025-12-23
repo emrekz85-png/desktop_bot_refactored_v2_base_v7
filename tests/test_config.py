@@ -28,7 +28,7 @@ class TestSymbolParams:
 
     def test_symbol_params_have_required_fields(self, trading_module):
         """Symbol params should have required fields."""
-        required_fields = ["rr", "rsi", "slope", "at_active", "use_trailing"]
+        required_fields = ["rr", "rsi", "at_active", "strategy_mode"]
 
         for symbol, timeframes in trading_module.SYMBOL_PARAMS.items():
             for tf, params in timeframes.items():
@@ -56,11 +56,13 @@ class TestDefaultStrategyConfig:
     def test_has_required_fields(self, trading_module):
         """Default config should have all required fields."""
         required = [
-            "rr", "rsi", "slope", "at_active", "use_trailing",
-            "use_dynamic_pbema_tp", "hold_n", "min_hold_frac",
-            "pb_touch_tolerance", "body_tolerance", "cloud_keltner_gap_min",
+            "rr", "rsi", "at_active", "use_trailing",
+            "use_dynamic_pbema_tp",
             "tp_min_dist_ratio", "tp_max_dist_ratio", "adx_min",
             "strategy_mode",
+            # SSL Flow specific
+            "ssl_touch_tolerance", "ssl_body_tolerance", "min_pbema_distance",
+            "lookback_candles",
         ]
 
         for field in required:

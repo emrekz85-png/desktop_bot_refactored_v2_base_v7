@@ -22,6 +22,7 @@ from core import (
     TradingEngine,
     SYMBOL_PARAMS,
     TRADING_CONFIG,
+    utcnow,  # Replacement for deprecated utcnow()
 )
 
 # Import workers
@@ -1188,7 +1189,7 @@ class MainWindow(QMainWindow):
         summary_rows = result.get("summary", []) if isinstance(result, dict) else []
 
         if summary_rows:
-            finished_at = datetime.utcnow().isoformat() + "Z"
+            finished_at = utcnow().isoformat() + "Z"
             meta = {
                 "finished_at": finished_at,
                 "summary": summary_rows,
@@ -1318,7 +1319,7 @@ class MainWindow(QMainWindow):
 
             saved_at = datetime.fromisoformat(saved_at_str.replace("Z", "+00:00"))
             saved_at_naive = saved_at.replace(tzinfo=None)
-            now_naive = datetime.utcnow()
+            now_naive = utcnow()
             age = now_naive - saved_at_naive
             age_days = age.days
             age_hours = age.seconds // 3600
@@ -1448,7 +1449,7 @@ class MainWindow(QMainWindow):
                 try:
                     saved_at = datetime.fromisoformat(saved_at_str.replace("Z", "+00:00"))
                     saved_at_naive = saved_at.replace(tzinfo=None)
-                    now_naive = datetime.utcnow()
+                    now_naive = utcnow()
                     age = now_naive - saved_at_naive
                     age_days = age.days
                     age_hours = age.seconds // 3600

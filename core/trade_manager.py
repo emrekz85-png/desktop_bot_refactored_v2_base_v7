@@ -22,6 +22,7 @@ from .config import (
     CIRCUIT_BREAKER_CONFIG, ROLLING_ER_CONFIG,
 )
 from .utils import (
+    utcnow,  # Replacement for deprecated utcnow()
     normalize_datetime, format_time_utc, format_time_local,
     calculate_funding_cost, append_trade_event,
     apply_1m_profit_lock, apply_partial_stop_protection,
@@ -102,12 +103,12 @@ class BaseTradeManager(ABC):
         key = (symbol, timeframe)
 
         if now_utc is None:
-            now_utc = datetime.utcnow()
+            now_utc = utcnow()
 
         # Normalize times
         now_naive = normalize_datetime(now_utc)
         if now_naive is None:
-            now_naive = datetime.utcnow()
+            now_naive = utcnow()
 
         if key not in self.cooldowns:
             return False
@@ -628,7 +629,7 @@ class BaseTradeManager(ABC):
         # Set cooldown on stops
         if "STOP" in reason:
             wait_minutes = 10 if tf == "1m" else (30 if tf == "5m" else 60)
-            cooldown_base = normalize_datetime(candle_time_utc) or datetime.utcnow()
+            cooldown_base = normalize_datetime(candle_time_utc) or utcnow()
             self.cooldowns[(trade["symbol"], tf)] = cooldown_base + pd.Timedelta(minutes=wait_minutes)
 
         # Check for breakeven stop
@@ -673,7 +674,7 @@ class BaseTradeManager(ABC):
             trade_time: The time of the trade (for backtest). None = use current time.
         """
         if trade_time is None:
-            trade_time = datetime.utcnow()
+            trade_time = utcnow()
 
         # Normalize to naive datetime
         if hasattr(trade_time, 'tzinfo') and trade_time.tzinfo is not None:
@@ -929,7 +930,7 @@ class SimTradeManager(BaseTradeManager):
         if self.is_stream_killed(sym, tf):
             return False
 
-        cooldown_ref_time = trade_data.get("open_time_utc") or datetime.utcnow()
+        cooldown_ref_time = trade_data.get("open_time_utc") or utcnow()
         if self.check_cooldown(sym, tf, cooldown_ref_time):
             return False
 
@@ -995,13 +996,13 @@ class SimTradeManager(BaseTradeManager):
             return False
 
         # Format open time
-        open_time_val = trade_data.get("open_time_utc") or datetime.utcnow()
+        open_time_val = trade_data.get("open_time_utc") or utcnow()
         open_time_str = format_time_utc(normalize_datetime(open_time_val))
 
         new_trade = {
             "id": self._next_id(),
             "symbol": sym,
-            "timestamp": trade_data.get("timestamp", datetime.utcnow().strftime("%Y-%m-%d %H:%M")),
+            "timestamp": trade_data.get("timestamp", utcnow().strftime("%Y-%m-%d %H:%M")),
             "open_time_utc": open_time_str,
             "timeframe": tf,
             "type": trade_type,
@@ -1064,7 +1065,7 @@ class SimTradeManager(BaseTradeManager):
     ) -> List[Dict]:
         """Update trades for backtesting."""
         if candle_time_utc is None:
-            candle_time_utc = datetime.utcnow()
+            candle_time_utc = utcnow()
 
         closed_indices = []
         just_closed_trades = []

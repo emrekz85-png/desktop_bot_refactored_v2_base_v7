@@ -39,6 +39,7 @@ from .config import (
 )
 
 from .utils import (
+    utcnow,  # Replacement for deprecated datetime.utcnow()
     normalize_datetime, tf_to_timedelta, tf_to_minutes,
     calculate_funding_cost, format_time_utc, format_time_local,
     append_trade_event, calculate_r_multiple, calculate_expected_r,

@@ -5,10 +5,24 @@ Includes time conversion, funding calculation, and other helpers.
 
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Union, Optional
 
 from .config import TRADING_CONFIG, MINUTES_PER_CANDLE
+
+
+def utcnow() -> datetime:
+    """
+    Get current UTC time as a naive datetime.
+
+    This replaces datetime.utcnow() which is deprecated in Python 3.12+.
+    Returns a naive datetime (no timezone info) for backward compatibility
+    with existing code that expects naive datetimes.
+
+    Returns:
+        datetime: Current UTC time without timezone info
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def normalize_datetime(dt: Union[datetime, pd.Timestamp, np.datetime64, None]) -> Optional[datetime]:

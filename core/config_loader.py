@@ -7,7 +7,7 @@ Handles loading and saving optimized configurations for each symbol/timeframe pa
 import os
 import json
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Optional
 
 from .config import (
@@ -179,7 +179,7 @@ def save_best_configs(best_configs: dict):
 
     cleaned["_meta"] = {
         "strategy_signature": _strategy_signature(),
-        "saved_at": datetime.utcnow().isoformat() + "Z",
+        "saved_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
     }
 
     # Convert numpy/pandas types to Python native types for JSON serialization
