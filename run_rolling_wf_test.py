@@ -2,21 +2,25 @@
 """
 Rolling Walk-Forward Test Script
 
-Bu script, Rolling Walk-Forward framework'ünü test eder:
-1. Fixed vs Monthly vs Weekly vs Triday karşılaştırması yapar
-2. 2025 yılı için stitched OOS sonuçlarını hesaplar
-3. En iyi modu önerir
+Bu script, Rolling Walk-Forward framework'unu test eder:
+1. Fixed vs Weekly karsilastirmasi yapar
+2. 2025 yili icin stitched OOS sonuclarini hesaplar
+3. En iyi modu onerir
 
 Modlar:
 - Fixed: Sabit config, re-optimization yok
-- Monthly: Aylık re-optimization (60 gün lookback, 30 gün forward)
-- Weekly: Haftalık re-optimization (30 gün lookback, 7 gün forward)
-- Triday: 3 günlük re-optimization (60 gün lookback, 3 gün forward)
+- Weekly: Haftalik re-optimization (30 gun lookback, 7 gun forward)
 
-Kullanım:
-    python run_rolling_wf_test.py                    # Varsayılan test (son 6 ay)
-    python run_rolling_wf_test.py --full-year       # 2025 tam yıl testi
-    python run_rolling_wf_test.py --quick           # Hızlı test (3 ay, az sembol)
+Kullanim:
+    python run_rolling_wf_test.py                    # Varsayilan test (son 6 ay)
+    python run_rolling_wf_test.py --quick-btc        # EN HIZLI: Sadece BTCUSDT (3-5 dk)
+    python run_rolling_wf_test.py --quick            # Hizli test (3 ay, az sembol)
+    python run_rolling_wf_test.py --full-year        # 2025 tam yil testi
+
+Hizli Test Modu (--quick-btc):
+    Degisiklikleri hizlica dogrulamak icin idealdir.
+    Sadece BTCUSDT ve 3 timeframe (5m, 15m, 1h) kullanir.
+    Yaklasik 3-5 dakikada sonuc verir.
 """
 
 import sys
@@ -518,7 +522,7 @@ def write_trade_log(result: dict, output_dir: str = None) -> str:
     Args:
         result: Result dict from run_rolling_walkforward containing:
             - run_id: Test ID
-            - mode: "fixed", "monthly", "weekly", or "triday"
+            - mode: "fixed" or "weekly"
             - config: Test configuration
             - metrics: Overall metrics
             - window_results: Per-window results
@@ -634,9 +638,9 @@ def run_quick_test():
     result = run_rolling_walkforward(
         symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT"],
         timeframes=["15m", "1h"],
-        mode="monthly",
-        lookback_days=60,
-        forward_days=30,
+        mode="weekly",
+        lookback_days=30,
+        forward_days=7,
         start_date="2025-09-01",
         end_date="2025-12-01",
         verbose=True,
@@ -649,56 +653,148 @@ def run_quick_test():
     return result
 
 
-def run_comparison_test(start_date: str = None, end_date: str = None, fast: bool = True, quick: bool = False):
-    """Fixed vs Monthly vs Weekly vs Triday karşılaştırma testi
+def run_comparison_test(start_date: str = None, end_date: str = None, fast: bool = True, quick: bool = False, modes: list = None):
+    """Rolling walk-forward karsilastirma testi
 
     Args:
-        start_date: Başlangıç tarihi YYYY-MM-DD
-        end_date: Bitiş tarihi YYYY-MM-DD
-        fast: Performans optimize edilmiş versiyon kullan (default: True)
-        quick: Hızlı test modu (az sembol/timeframe) (default: False)
+        start_date: Baslangic tarihi YYYY-MM-DD
+        end_date: Bitis tarihi YYYY-MM-DD
+        fast: Performans optimize edilmis versiyon kullan (default: True)
+        quick: Hizli test modu (az sembol/timeframe) (default: False)
+        modes: Test edilecek modlar (default: ["weekly"] - PR-2)
     """
-    from desktop_bot_refactored_v2_base_v7 import (
-        compare_rolling_modes,
-        compare_rolling_modes_fast,
-        BASELINE_CONFIG,
-    )
+    # PR-2: Default to weekly-only
+    if modes is None:
+        modes = ["weekly"]
+
+    # Default: Only BTCUSDT for faster testing and consistent comparison
+    test_symbols = ["BTCUSDT"]
+    test_timeframes = ["5m", "15m", "1h"]  # 30m removed (v1.2+)
 
     print("\n" + "="*70)
-    print("🔬 ROLLING WALK-FORWARD KARŞILAŞTIRMA TESTİ")
+    print("ROLLING WALK-FORWARD KARSILASTIRMA TESTI")
     if fast:
         print("   [OPTIMIZED MODE - Master cache + parallel execution]")
     if quick:
         print("   [QUICK MODE - Reduced scope for faster testing]")
+    print(f"   [MODES: {', '.join([m.upper() for m in modes])}]")
+    print(f"   [SYMBOLS: {', '.join(test_symbols)}]")
+    print(f"   [TIMEFRAMES: {', '.join(test_timeframes)}]")
     print("="*70 + "\n")
 
     # Use optimized version if available
     if fast:
-        result = compare_rolling_modes_fast(
-            symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "LINKUSDT"],
-            timeframes=["15m", "1h", "4h"],
-            start_date=start_date or "2025-06-01",
-            end_date=end_date or "2025-12-18",
-            fixed_config=BASELINE_CONFIG,
-            verbose=True,
-            quick=quick,
-            parallel_modes=True,
+        try:
+            from runners.rolling_wf_optimized import compare_rolling_modes_optimized
+            from core import BASELINE_CONFIG
+
+            result = compare_rolling_modes_optimized(
+                symbols=test_symbols,
+                timeframes=test_timeframes,
+                start_date=start_date or "2025-06-01",
+                end_date=end_date or "2025-12-01",
+                fixed_config=BASELINE_CONFIG,
+                verbose=True,
+                modes=modes,
+            )
+        except ImportError:
+            # Fallback to original if optimized module not available
+            print("   [FALLBACK] Optimized module not available, using original...")
+            fast = False
+
+    if not fast:
+        from desktop_bot_refactored_v2_base_v7 import (
+            compare_rolling_modes,
+            BASELINE_CONFIG,
         )
-    else:
+
         # Use BASELINE_CONFIG for fixed mode
         result = compare_rolling_modes(
-            symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "LINKUSDT"],
-            timeframes=["15m", "1h", "4h"],
+            symbols=test_symbols,
+            timeframes=test_timeframes,
             start_date=start_date or "2025-06-01",
-            end_date=end_date or "2025-12-18",
+            end_date=end_date or "2025-12-01",
             fixed_config=BASELINE_CONFIG,
             verbose=True,
+            modes=modes,
         )
 
     # Write detailed trade logs for each mode
     # Note: compare_rolling_modes returns {"results": {...}, "comparison": {...}}
     mode_results = result.get("results", {})
-    for mode in ["fixed", "monthly", "weekly", "triday"]:
+    for mode in ["fixed", "weekly"]:
+        mode_result = mode_results.get(mode, {})
+        if mode_result.get("trades"):
+            write_trade_log(mode_result)
+
+    return result
+
+
+def run_quick_btc_test(start_date: str = None, end_date: str = None, fast: bool = True):
+    """En hizli test - sadece BTCUSDT (1 sembol, 3 timeframe)
+
+    Bu mod, degisiklikleri hizlica test etmek icin idealdir.
+    Sadece BTCUSDT kullanarak yaklasik 3-5 dakikada sonuc verir.
+
+    Args:
+        start_date: Baslangic tarihi YYYY-MM-DD (default: 2025-01-01)
+        end_date: Bitis tarihi YYYY-MM-DD (default: 2025-12-26)
+        fast: Optimized mode kullan (default: True)
+    """
+    test_symbols = ["BTCUSDT"]
+    test_timeframes = ["5m", "15m", "1h"]
+
+    print("\n" + "="*70)
+    print("QUICK BTC TEST - Sadece BTCUSDT")
+    print("   [EN HIZLI MOD - Degisiklikleri test etmek icin]")
+    if fast:
+        print("   [OPTIMIZED MODE - Master cache + parallel execution]")
+    print(f"   [SYMBOLS: {', '.join(test_symbols)}]")
+    print(f"   [TIMEFRAMES: {', '.join(test_timeframes)}]")
+    print("="*70 + "\n")
+
+    # Default dates: Full year 2025
+    start = start_date or "2025-01-01"
+    end = end_date or "2025-12-26"
+
+    # Use optimized version if available
+    if fast:
+        try:
+            from runners.rolling_wf_optimized import compare_rolling_modes_optimized
+            from core import BASELINE_CONFIG
+
+            result = compare_rolling_modes_optimized(
+                symbols=test_symbols,
+                timeframes=test_timeframes,
+                start_date=start,
+                end_date=end,
+                fixed_config=BASELINE_CONFIG,
+                verbose=True,
+                modes=["weekly"],  # Only weekly for quick test
+            )
+        except ImportError:
+            print("   [FALLBACK] Optimized module not available, using original...")
+            fast = False
+
+    if not fast:
+        from desktop_bot_refactored_v2_base_v7 import (
+            compare_rolling_modes,
+            BASELINE_CONFIG,
+        )
+
+        result = compare_rolling_modes(
+            symbols=test_symbols,
+            timeframes=test_timeframes,
+            start_date=start,
+            end_date=end,
+            fixed_config=BASELINE_CONFIG,
+            verbose=True,
+            modes=["weekly"],
+        )
+
+    # Write detailed trade logs
+    mode_results = result.get("results", {})
+    for mode in ["weekly"]:
         mode_result = mode_results.get(mode, {})
         if mode_result.get("trades"):
             write_trade_log(mode_result)
@@ -723,7 +819,7 @@ def run_full_year_test():
         symbols=SYMBOLS,  # Tüm semboller
         timeframes=TIMEFRAMES,  # Tüm timeframe'ler
         start_date="2025-01-01",
-        end_date="2025-12-18",
+        end_date="2025-12-01",  # Fixed: consistent end date
         fixed_config=BASELINE_CONFIG,
         verbose=True,
     )
@@ -731,7 +827,7 @@ def run_full_year_test():
     # Write detailed trade logs for each mode
     # Note: compare_rolling_modes returns {"results": {...}, "comparison": {...}}
     mode_results = result.get("results", {})
-    for mode in ["fixed", "monthly", "weekly", "triday"]:
+    for mode in ["fixed", "weekly"]:
         mode_result = mode_results.get(mode, {})
         if mode_result.get("trades"):
             write_trade_log(mode_result)
@@ -744,6 +840,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="Rolling Walk-Forward Test Script")
     parser.add_argument('--quick', action='store_true', help='Hızlı test (3 ay, az sembol)')
+    parser.add_argument('--quick-btc', action='store_true', help='En hızlı test - sadece BTCUSDT (1 sembol, 3 timeframe)')
     parser.add_argument('--full-year', action='store_true', help='2025 tam yıl testi')
     parser.add_argument('--start-date', type=str, help='Başlangıç tarihi YYYY-MM-DD')
     parser.add_argument('--end-date', type=str, help='Bitiş tarihi YYYY-MM-DD')
@@ -755,7 +852,9 @@ def main():
 
     use_fast = args.fast and not args.no_fast
 
-    if args.quick:
+    if args.quick_btc:
+        result = run_quick_btc_test(args.start_date, args.end_date, fast=use_fast)
+    elif args.quick:
         result = run_quick_test()
     elif args.full_year:
         result = run_full_year_test()
@@ -770,7 +869,9 @@ def main():
     if "comparison" in result:
         comp = result["comparison"]
         print(f"\n🏆 EN İYİ MOD: {comp['best_mode'].upper()}")
-        print(f"   PnL: Fixed=${comp['pnl']['fixed']:.2f}, Monthly=${comp['pnl']['monthly']:.2f}, Weekly=${comp['pnl']['weekly']:.2f}, Triday=${comp['pnl']['triday']:.2f}")
+        # PR-2: Dynamic PnL printing based on available modes
+        pnl_parts = [f"{mode.capitalize()}=${pnl:.2f}" for mode, pnl in comp['pnl'].items()]
+        print(f"   PnL: {', '.join(pnl_parts)}")
 
 
 if __name__ == "__main__":

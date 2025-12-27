@@ -22,11 +22,140 @@
 # - Don't trade when PBEMA and SSL baseline are too close (no room for profit)
 # - Don't trade when AlphaTrend is flat (at_is_flat = True)
 
-from typing import Tuple, Union
+from typing import Tuple, Union, Dict
 import pandas as pd
 import numpy as np
 
 from .base import SignalResult, SignalResultWithDebug
+
+
+def calculate_signal_score(
+    adx: float,
+    baseline_touch: bool,
+    at_dominant: bool,
+    at_is_flat: bool,
+    pbema_distance: float,
+    wick_ratio: float,
+    no_overlap: bool,
+    body_position_ok: bool,
+    regime_ok: bool,
+) -> Tuple[float, float, Dict[str, float]]:
+    """
+    Calculate composite signal score for SSL Flow strategy.
+
+    Converts binary AND logic to weighted scoring system:
+    - Each filter contributes points based on quality
+    - Total score compared against threshold for signal
+
+    Args:
+        adx: ADX value (trend strength)
+        baseline_touch: Whether baseline was touched/retested
+        at_dominant: AlphaTrend dominance in signal direction
+        at_is_flat: Whether AlphaTrend is flat (no flow)
+        pbema_distance: Distance to PBEMA target (ratio)
+        wick_ratio: Rejection wick size (ratio)
+        no_overlap: SSL-PBEMA bands don't overlap
+        body_position_ok: Candle body on correct side of baseline
+        regime_ok: Regime is trending (not ranging)
+
+    Returns:
+        (score, max_score, breakdown_dict)
+    """
+    score = 0.0
+    max_score = 10.0
+    breakdown = {}
+
+    # 1. ADX Trend Strength (max 2.0)
+    # Strong trends = best entries for trend-following
+    if adx > 30:
+        s = 2.0
+    elif adx > 25:
+        s = 1.5
+    elif adx > 20:
+        s = 1.0
+    elif adx > 15:
+        s = 0.5
+    else:
+        s = 0.0
+    score += s
+    breakdown['adx'] = s
+
+    # 2. Regime Gating (max 1.0)
+    # Bonus if regime is trending (filters choppy markets)
+    if regime_ok:
+        s = 1.0
+    else:
+        s = 0.0
+    score += s
+    breakdown['regime'] = s
+
+    # 3. Baseline Touch (max 2.0)
+    # Critical: ensures we're entering on retest, not chasing
+    if baseline_touch:
+        s = 2.0
+    else:
+        s = 0.0
+    score += s
+    breakdown['baseline_touch'] = s
+
+    # 4. AlphaTrend Confirmation (max 2.0)
+    # Confirms real flow (not fake SSL signals)
+    if at_dominant and not at_is_flat:
+        s = 2.0
+    elif at_dominant:
+        s = 1.5
+    elif not at_is_flat:
+        s = 1.0
+    else:
+        s = 0.0
+    score += s
+    breakdown['alphatrend'] = s
+
+    # 5. PBEMA Distance (max 1.0)
+    # Room for profit - more distance = better
+    if pbema_distance >= 0.006:
+        s = 1.0
+    elif pbema_distance >= 0.004:
+        s = 0.75
+    elif pbema_distance >= 0.003:
+        s = 0.5
+    else:
+        s = 0.25
+    score += s
+    breakdown['pbema_distance'] = s
+
+    # 6. Wick Rejection (max 1.0)
+    # Strong rejection = higher quality setup
+    if wick_ratio >= 0.15:
+        s = 1.0
+    elif wick_ratio >= 0.10:
+        s = 0.75
+    elif wick_ratio >= 0.05:
+        s = 0.5
+    else:
+        s = 0.0
+    score += s
+    breakdown['wick_rejection'] = s
+
+    # 7. Body Position (max 0.5)
+    # Body on correct side confirms support/resistance
+    if body_position_ok:
+        s = 0.5
+    else:
+        s = 0.0
+    score += s
+    breakdown['body_position'] = s
+
+    # 8. No Overlap (max 0.5)
+    # SSL-PBEMA overlap = no room for flow
+    if no_overlap:
+        s = 0.5
+    else:
+        s = 0.0
+    score += s
+    breakdown['no_overlap'] = s
+
+    return score, max_score, breakdown
 
 
 def check_ssl_flow_signal(
@@ -36,13 +165,20 @@ def check_ssl_flow_signal(
         rsi_limit: float = 70.0,
         # use_alphatrend REMOVED - AlphaTrend is now MANDATORY for SSL_Flow strategy
         # This prevents LONG trades when SELLERS are dominant (and vice versa)
-        ssl_touch_tolerance: float = 0.002,
+        ssl_touch_tolerance: float = 0.003,
         ssl_body_tolerance: float = 0.003,
         min_pbema_distance: float = 0.004,
         tp_min_dist_ratio: float = 0.0015,
         tp_max_dist_ratio: float = 0.05,
         adx_min: float = 15.0,
+        adx_max: float = 40.0,
         lookback_candles: int = 5,
+        regime_adx_threshold: float = 20.0,  # v1.7.2: Now configurable for grid search
+        regime_lookback: int = 50,  # v1.7.2: Now configurable
+        skip_overlap_check: bool = False,  # Filter Discovery: skip SSL-PBEMA overlap check
+        skip_wick_rejection: bool = False,  # Filter Discovery: skip wick rejection check
+        use_scoring: bool = False,  # NEW: Enable scoring system (vs AND logic)
+        score_threshold: float = 6.0,  # NEW: Minimum score (out of 10.0) for signal
         return_debug: bool = False,
 ) -> Union[SignalResult, SignalResultWithDebug]:
     """
@@ -57,18 +193,29 @@ def check_ssl_flow_signal(
     - LONG: Price above SSL baseline + AlphaTrend buyers dominant + retest/bounce from baseline
     - SHORT: Price below SSL baseline + AlphaTrend sellers dominant + retest/bounce from baseline
 
+    Mode Selection (use_scoring parameter):
+    - use_scoring=False (default): Binary AND logic - all filters must pass (strict, fewer trades)
+    - use_scoring=True: Weighted scoring - filters contribute points, signal if score >= threshold
+
     Args:
         df: DataFrame with OHLCV + indicators
         index: Candle index for signal check (default: -2, second to last candle)
         min_rr: Minimum risk/reward ratio
         rsi_limit: RSI threshold (LONG: not overbought, SHORT: not oversold)
-        ssl_touch_tolerance: Tolerance for SSL baseline touch detection (0.002 = 0.2%)
+        ssl_touch_tolerance: Tolerance for SSL baseline touch detection (0.003 = 0.3%)
         ssl_body_tolerance: Tolerance for candle body position relative to baseline
         min_pbema_distance: Minimum distance between price and PBEMA for valid TP
         tp_min_dist_ratio: Minimum TP distance ratio
         tp_max_dist_ratio: Maximum TP distance ratio
         adx_min: Minimum ADX value (trend strength filter)
+        adx_max: Maximum ADX value (filters overly strong trends that may reverse)
         lookback_candles: Number of candles to check for baseline interaction
+        regime_adx_threshold: Average ADX threshold for regime detection
+        regime_lookback: Number of candles for regime detection
+        skip_overlap_check: Skip SSL-PBEMA overlap check (filter discovery)
+        skip_wick_rejection: Skip wick rejection check (filter discovery)
+        use_scoring: Enable weighted scoring system (vs binary AND logic)
+        score_threshold: Minimum score required for signal (out of 10.0)
         return_debug: Whether to return debug info
 
     Returns:
@@ -119,6 +266,17 @@ def check_ssl_flow_signal(
     if abs_index < 60:  # Need enough history for HMA60 and other indicators
         return _ret(None, None, None, None, "Not Enough Data")
 
+    # OPTIMIZATION 4: Cache column arrays for vectorized operations
+    _open_arr = df["open"].values
+    _high_arr = df["high"].values
+    _low_arr = df["low"].values
+    _close_arr = df["close"].values
+    _baseline_arr = df["baseline"].values
+    _pb_top_arr = df["pb_ema_top"].values
+    _pb_bot_arr = df["pb_ema_bot"].values
+    _adx_arr = df["adx"].values
+    _rsi_arr = df["rsi"].values
+
     # Extract current values
     open_ = float(curr["open"])
     high = float(curr["high"])
@@ -135,9 +293,31 @@ def check_ssl_flow_signal(
         return _ret(None, None, None, None, "NaN Values")
 
     # ================= ADX FILTER =================
+    # Note: ADX max filter REMOVED in v1.6.2-restored
+    # Reason: ADX max affects optimizer, causes "0 configs found"
+    # SSL Flow is trend-following - strong trends (ADX>40) are BEST opportunities
     debug_info["adx_ok"] = adx_val >= adx_min
     if not debug_info["adx_ok"]:
         return _ret(None, None, None, None, f"ADX Too Low ({adx_val:.1f})")
+
+    # ================= REGIME GATING (v1.7.0, v1.7.2 configurable) =================
+    # Window-level regime detection using ADX average over lookback period
+    # RANGING markets (ADX_avg < threshold) = skip trade entirely
+    # This prevents trades during sideways/choppy markets where SSL Flow struggles
+    # v1.7.2: regime_adx_threshold and regime_lookback are now function parameters
+
+    regime_start = max(0, abs_index - regime_lookback)
+    adx_window = df["adx"].iloc[regime_start:abs_index + 1]
+    adx_avg = float(adx_window.mean()) if len(adx_window) > 0 else adx_val
+
+    regime = "TRENDING" if adx_avg >= regime_adx_threshold else "RANGING"
+    debug_info["adx_avg"] = adx_avg
+    debug_info["regime"] = regime
+    debug_info["regime_lookback"] = regime_lookback
+    debug_info["regime_adx_threshold"] = regime_adx_threshold
+
+    if regime == "RANGING":
+        return _ret(None, None, None, None, f"RANGING Regime (ADX_avg={adx_avg:.1f})")
 
     # ================= SSL BASELINE DIRECTION =================
     # Price position relative to SSL baseline determines flow direction
@@ -155,25 +335,16 @@ def check_ssl_flow_signal(
 
     lookback_start = max(0, abs_index - lookback_candles)
 
+    # OPTIMIZATION 3: Vectorize baseline touch detection with NumPy
     # For LONG: Check if low touched baseline (retest from above)
-    baseline_touch_long = False
-    for i in range(lookback_start, abs_index + 1):
-        row_low = float(df["low"].iloc[i])
-        row_baseline = float(df["baseline"].iloc[i])
-        # Touch: low came within tolerance of baseline
-        if row_low <= row_baseline * (1 + ssl_touch_tolerance):
-            baseline_touch_long = True
-            break
+    lookback_lows = _low_arr[lookback_start:abs_index + 1]
+    lookback_baselines_long = _baseline_arr[lookback_start:abs_index + 1]
+    baseline_touch_long = np.any(lookback_lows <= lookback_baselines_long * (1 + ssl_touch_tolerance))
 
     # For SHORT: Check if high touched baseline (retest from below)
-    baseline_touch_short = False
-    for i in range(lookback_start, abs_index + 1):
-        row_high = float(df["high"].iloc[i])
-        row_baseline = float(df["baseline"].iloc[i])
-        # Touch: high came within tolerance of baseline
-        if row_high >= row_baseline * (1 - ssl_touch_tolerance):
-            baseline_touch_short = True
-            break
+    lookback_highs = _high_arr[lookback_start:abs_index + 1]
+    lookback_baselines_short = _baseline_arr[lookback_start:abs_index + 1]
+    baseline_touch_short = np.any(lookback_highs >= lookback_baselines_short * (1 - ssl_touch_tolerance))
 
     debug_info["baseline_touch_long"] = baseline_touch_long
     debug_info["baseline_touch_short"] = baseline_touch_short
@@ -241,6 +412,31 @@ def check_ssl_flow_signal(
     debug_info["long_pbema_distance"] = long_pbema_distance
     debug_info["short_pbema_distance"] = short_pbema_distance
 
+    # ================= PBEMA-SSL BASELINE OVERLAP CHECK =================
+    # "PBEMA ve SSL Hybrid bantları İÇ İÇE olduğunda işlem ALINMAZ"
+    # LONG için: PBEMA baseline'ın ÜSTÜNDE olmalı (yukarıya gidecek yol var)
+    # SHORT için: PBEMA baseline'ın ALTINDA olmalı (aşağıya gidecek yol var)
+
+    OVERLAP_THRESHOLD = 0.005  # %0.5 eşik değeri
+
+    baseline_pbema_distance = abs(baseline - pbema_mid) / pbema_mid if pbema_mid > 0 else 0
+    is_overlapping = baseline_pbema_distance < OVERLAP_THRESHOLD
+
+    # LONG için: PBEMA hedefi baseline'ın üstünde olmalı
+    pbema_above_baseline = pbema_mid > baseline
+    # SHORT için: PBEMA hedefi baseline'ın altında olmalı
+    pbema_below_baseline = pbema_mid < baseline
+
+    debug_info["baseline_pbema_distance"] = baseline_pbema_distance
+    debug_info["is_overlapping"] = is_overlapping
+    debug_info["pbema_above_baseline"] = pbema_above_baseline
+    debug_info["pbema_below_baseline"] = pbema_below_baseline
+
+    # İç içe durumunda işlem alma - flow yok
+    # Filter Discovery: skip_overlap_check allows disabling this filter
+    if not skip_overlap_check and is_overlapping:
+        return _ret(None, None, None, None, "SSL-PBEMA Overlap (No Flow)")
+
     # ================= WICK REJECTION QUALITY =================
     candle_range = high - low
     if candle_range > 0:
@@ -269,6 +465,7 @@ def check_ssl_flow_signal(
     # 4. Candle body above baseline (support confirmation)
     # 5. PBEMA above price (room for TP)
     # 6. Rejection wick (bounce confirmation)
+    # 7. PBEMA above baseline (target reachable - "yol var")
 
     is_long = (
         price_above_baseline and
@@ -276,7 +473,8 @@ def check_ssl_flow_signal(
         baseline_touch_long and
         body_above_baseline and
         long_pbema_distance >= min_pbema_distance and
-        long_rejection
+        (skip_wick_rejection or long_rejection) and  # Filter Discovery: can skip wick check
+        pbema_above_baseline  # PBEMA hedefine gidecek yol var (baseline üstünde)
     )
 
     # RSI filter for LONG: not overbought
@@ -298,6 +496,7 @@ def check_ssl_flow_signal(
     # 4. Candle body below baseline (resistance confirmation)
     # 5. PBEMA below price (room for TP)
     # 6. Rejection wick (bounce confirmation)
+    # 7. PBEMA below baseline (target reachable - "yol var")
 
     is_short = (
         price_below_baseline and
@@ -305,7 +504,8 @@ def check_ssl_flow_signal(
         baseline_touch_short and
         body_below_baseline and
         short_pbema_distance >= min_pbema_distance and
-        short_rejection
+        (skip_wick_rejection or short_rejection) and  # Filter Discovery: can skip wick check
+        pbema_below_baseline  # PBEMA hedefine gidecek yol var (baseline altında)
     )
 
     # RSI filter for SHORT: not oversold
@@ -320,6 +520,71 @@ def check_ssl_flow_signal(
 
     debug_info["is_short_candidate"] = is_short
 
+    # ================= SCORING MODE (ALTERNATIVE TO AND LOGIC) =================
+    # If use_scoring=True, override AND logic with weighted scoring system
+    if use_scoring:
+        # Calculate scores for LONG and SHORT separately
+        long_score, long_max, long_breakdown = calculate_signal_score(
+            adx=adx_val,
+            baseline_touch=baseline_touch_long,
+            at_dominant=at_buyers_dominant,
+            at_is_flat=at_is_flat,
+            pbema_distance=long_pbema_distance,
+            wick_ratio=lower_wick_ratio,
+            no_overlap=(not is_overlapping or skip_overlap_check),
+            body_position_ok=body_above_baseline,
+            regime_ok=(regime == "TRENDING"),
+        )
+
+        short_score, short_max, short_breakdown = calculate_signal_score(
+            adx=adx_val,
+            baseline_touch=baseline_touch_short,
+            at_dominant=at_sellers_dominant,
+            at_is_flat=at_is_flat,
+            pbema_distance=short_pbema_distance,
+            wick_ratio=upper_wick_ratio,
+            no_overlap=(not is_overlapping or skip_overlap_check),
+            body_position_ok=body_below_baseline,
+            regime_ok=(regime == "TRENDING"),
+        )
+
+        # Store in debug info
+        debug_info["use_scoring"] = True
+        debug_info["score_threshold"] = score_threshold
+        debug_info["long_score"] = long_score
+        debug_info["long_score_breakdown"] = long_breakdown
+        debug_info["short_score"] = short_score
+        debug_info["short_score_breakdown"] = short_breakdown
+
+        # CRITICAL FILTERS (always checked even in scoring mode):
+        # 1. Price position relative to baseline (determines direction)
+        # 2. AlphaTrend direction (confirms buyers vs sellers)
+        # 3. RSI bounds (avoid extreme overbought/oversold)
+
+        # Override is_long/is_short based on score + critical filters
+        is_long_scoring = (
+            price_above_baseline and  # CORE: price direction
+            at_buyers_dominant and  # CORE: AlphaTrend confirms buyers
+            not at_is_flat and  # CORE: flow exists
+            long_rsi_ok and  # CORE: not overbought
+            long_score >= score_threshold  # SCORING: composite quality
+        )
+
+        is_short_scoring = (
+            price_below_baseline and  # CORE: price direction
+            at_sellers_dominant and  # CORE: AlphaTrend confirms sellers
+            not at_is_flat and  # CORE: flow exists
+            short_rsi_ok and  # CORE: not oversold
+            short_score >= score_threshold  # SCORING: composite quality
+        )
+
+        # Override AND logic candidates with scoring results
+        is_long = is_long_scoring
+        is_short = is_short_scoring
+
+        debug_info["is_long_candidate_scoring"] = is_long
+        debug_info["is_short_candidate_scoring"] = is_short
+
     # ================= EXECUTE LONG =================
     if is_long:
         # Entry: current close
@@ -331,7 +596,7 @@ def check_ssl_flow_signal(
         # SL: Below recent swing low or below baseline
         swing_n = 20
         start = max(0, abs_index - swing_n)
-        swing_low = float(df["low"].iloc[start:abs_index].min())
+        swing_low = float(_low_arr[start:abs_index].min())
 
         # SL candidates: swing low or baseline
         sl_swing = swing_low * 0.998
@@ -381,7 +646,7 @@ def check_ssl_flow_signal(
         # SL: Above recent swing high or above baseline
         swing_n = 20
         start = max(0, abs_index - swing_n)
-        swing_high = float(df["high"].iloc[start:abs_index].max())
+        swing_high = float(_high_arr[start:abs_index].max())
 
         # SL candidates: swing high or baseline
         sl_swing = swing_high * 1.002

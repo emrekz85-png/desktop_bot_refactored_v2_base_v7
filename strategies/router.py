@@ -102,5 +102,14 @@ def check_signal(
             tp_max_dist_ratio=config.get("tp_max_dist_ratio", DEFAULT_STRATEGY_CONFIG["tp_max_dist_ratio"]),
             adx_min=config.get("adx_min", DEFAULT_STRATEGY_CONFIG["adx_min"]),
             lookback_candles=config.get("lookback_candles", DEFAULT_STRATEGY_CONFIG.get("lookback_candles", 5)),
+            # v1.7.2: Regime gating parameters for grid search optimization
+            regime_adx_threshold=config.get("regime_adx_avg", 20.0),  # Note: Grid uses "regime_adx_avg" key
+            regime_lookback=config.get("regime_lookback", 50),
+            # Filter Discovery: allow skipping filters
+            skip_overlap_check=config.get("skip_overlap_check", False),
+            skip_wick_rejection=config.get("skip_wick_rejection", False),
+            # NEW: Scoring system parameters
+            use_scoring=config.get("use_scoring", DEFAULT_STRATEGY_CONFIG.get("use_scoring", False)),
+            score_threshold=config.get("score_threshold", DEFAULT_STRATEGY_CONFIG.get("score_threshold", 6.0)),
             return_debug=return_debug,
         )
