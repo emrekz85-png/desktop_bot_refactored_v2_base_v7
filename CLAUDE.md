@@ -1,4 +1,6 @@
-# CLAUDE.md - AI Assistant Guide for Trading Bot Codebase
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
@@ -17,7 +19,82 @@ This is a sophisticated **cryptocurrency futures trading bot** that implements t
 
 ---
 
-## Repository Structure
+## Strateji Mantigi Ozeti (Strategy Logic Summary)
+
+### SSL Flow Stratejisi (Aktif Strateji)
+
+**Temel Konsept:** "SSL HYBRID'den PBEMA bulutuna bir yol vardir!"
+
+SSL Flow, trend takip eden bir stratejidir. Ana mantik:
+1. **SSL HYBRID (HMA60)** trend yonunu belirler (destek/direnc)
+2. **AlphaTrend** alici/satici hakimiyetini onaylar (sahte sinyalleri filtreler)
+3. **PBEMA Cloud (EMA200)** kar hedefi olarak kullanilir
+
+#### Giris Kosullari
+
+**LONG Sinyali:**
+- Fiyat SSL baseline (HMA60) ustunde
+- AlphaTrend BUYERS dominant (mavi cizgi ustte, cizgi yukseliyor)
+- Son 5 mumda baseline'a temas (retest) olmus
+- Mum govdesi baseline ustunde
+- PBEMA fiyatin ustunde (kar hedefine yer var)
+- Alt fitil reddi (bounce confirmation)
+- PBEMA baseline'in USTUNDE (hedef ulasilabilir - "yol var")
+- RSI <= rsi_limit (asiri alimda degil)
+
+**SHORT Sinyali:**
+- Fiyat SSL baseline (HMA60) altinda
+- AlphaTrend SELLERS dominant (kirmizi cizgi ustte, cizgi dusuyor)
+- Son 5 mumda baseline'a temas (retest) olmus
+- Mum govdesi baseline altinda
+- PBEMA fiyatin altinda (kar hedefine yer var)
+- Ust fitil reddi (rejection confirmation)
+- PBEMA baseline'in ALTINDA (hedef ulasilabilir - "yol var")
+- RSI >= 100-rsi_limit (asiri satimda degil)
+
+#### PBEMA-SSL Overlap Kontrolu (Son Eklenen)
+
+**Kritik Kural:** "PBEMA ve SSL Hybrid bantlari IC ICE oldugunda islem ALINMAZ"
+
+```python
+OVERLAP_THRESHOLD = 0.005  # %0.5 esik degeri
+baseline_pbema_distance = abs(baseline - pbema_mid) / pbema_mid
+is_overlapping = baseline_pbema_distance < OVERLAP_THRESHOLD
+```
+
+- LONG icin: PBEMA hedefi baseline'in ustunde olmali
+- SHORT icin: PBEMA hedefi baseline'in altinda olmali
+- Overlap varsa sinyal uretilmez ("SSL-PBEMA Overlap (No Flow)")
+
+#### Gostergeler
+
+| Gosterge | Hesaplama | Kullanim |
+|----------|-----------|----------|
+| SSL Baseline | HMA(close, 60) | Trend yonu, destek/direnc |
+| PBEMA Cloud | EMA(high, 200) & EMA(close, 200) | TP hedefi |
+| AlphaTrend | ATR + MFI/RSI tabanli | Flow onaylama |
+| RSI(14) | Standart RSI | Asiri alim/satim filtresi |
+| ADX(14) | Average Directional Index | Trend gucu filtresi (min 15) |
+| Keltner Channels | baseline +/- EMA(TR)*0.2 | Volatilite bantlari |
+
+#### TP/SL Hesaplama
+
+**Take Profit:**
+- LONG: `pb_ema_bot` (PBEMA cloud alt siniri)
+- SHORT: `pb_ema_top` (PBEMA cloud ust siniri)
+
+**Stop Loss:**
+- LONG: `min(swing_low * 0.998, baseline * 0.998)` - Son 20 mumun en dusugu veya baseline
+- SHORT: `max(swing_high * 1.002, baseline * 1.002)` - Son 20 mumun en yuksegi veya baseline
+
+**Minimum SL Mesafesi (Opsiyonel):**
+- BTC/ETH: %1.0 minimum SL mesafesi
+- Altcoinler: %1.5 minimum SL mesafesi
+- `sl_validation_mode`: "off" (baseline), "reject", veya "widen"
+
+---
+
+## Dosya Yapisi ve Sorumluluklar (File Structure)
 
 ```
 desktop_bot_refactored_v2_base_v7/
@@ -81,97 +158,276 @@ desktop_bot_refactored_v2_base_v7/
 └── CLAUDE.md                              # This file
 ```
 
-### Generated Files (gitignored)
-- `trades.csv` - Live trade history
-- `backtest_trades.csv` - Backtest trade results
-- `backtest_summary.csv` - Backtest summary statistics
-- `best_configs.json` - Optimized strategy configurations
-- `config.json` - User configuration (Telegram, etc.)
-- `*_prices.csv` - Historical price data per symbol/timeframe
-- `error_log.txt` - Error log file
+### Modul Bagimliliklari
+
+| Modul | Bagimliliklar | Sorumluluk |
+|-------|---------------|------------|
+| `core/config.py` | - | Tum sabitler ve konfigurasyonlar |
+| `core/indicators.py` | config, pandas_ta | Teknik gosterge hesaplamalari |
+| `core/trade_manager.py` | config, utils | Trade yonetimi (acma/kapama/guncelleme) |
+| `strategies/ssl_flow.py` | base | SSL Flow sinyal uretimi |
+| `strategies/router.py` | ssl_flow, keltner_bounce | Strateji yonlendirme |
+| `ui/main_window.py` | core/*, strategies/* | PyQt5 GUI |
 
 ---
 
-## Architecture Overview
+## Aktif Gelistirme Alanlari (Active Development)
 
-### Modular Core Package (`core/`)
+### Son Yapilan Degisiklikler
 
-The codebase uses a modular architecture with the `core` package as the single source of truth:
+1. **Optimizer Determinism Fix (v43.x) [CRITICAL]**
+   - **Problem:** Ayni parametreler farkli sonuclar uretiyordu ($191 varyans)
+   - **Cozum:**
+     - Random seed eklendi: `random.seed(42)`, `np.random.seed(42)`
+     - Sonuclar config hash'e gore sirala (deterministic ordering)
+     - Float karsilastirmalarinda epsilon toleransi
+     - Esitlik durumunda config hash ile tie-breaking
+   - **Konum:** `core/optimizer.py` ve `run_rolling_wf_test.py`
 
-| Module | Purpose |
-|--------|---------|
-| `config.py` | Constants, SYMBOLS, TIMEFRAMES, TRADING_CONFIG, blacklist management |
-| `config_loader.py` | Load/save optimized strategy configurations |
-| `indicators.py` | Technical indicator calculations (RSI, ADX, PBEMA, Keltner, AlphaTrend) |
-| `trade_manager.py` | BaseTradeManager (shared logic), SimTradeManager (backtesting) |
-| `trading_engine.py` | TradingEngine class - data fetching, signal detection |
-| `binance_client.py` | Binance API client with retry logic and rate limiting |
-| `telegram.py` | Thread-safe Telegram notifications |
-| `utils.py` | Helper functions (time conversion, funding calculation, R-multiple) |
-| `logging_config.py` | Centralized logging with file rotation |
+2. **Batch Mode Optimization (v43.x)**
+   - Coklu sembol testleri icin paralel islem
+   - Tek run_id ile tum semboller (folder creation bug fix)
+   - ~4x hizlanma (8 sembol: 32 dk -> 8 dk)
+   - Kullanim: `run_rolling_wf_test.py --batch`
 
-### Strategy Package (`strategies/`)
+3. **Weighted Scoring System (v43.x) [EXPERIMENTAL]**
+   - AND logic alternatifi olarak puanlama sistemi
+   - 10-puanlik olcek, konfigurasyonlu esik degeri
+   - **Sonuc:** Test sonrasi etkisiz - 4 core filter mandatory kaldigi icin
+   - Core filters (relaxable degil): `price_above_baseline`, `at_buyers_dominant`, `not at_is_flat`, `rsi_ok`
+   - Scoring sadece secondary filters icin: `baseline_touch`, `wick_rejection`, `pbema_distance`, `body_position`, `overlap`
 
-| Module | Purpose |
-|--------|---------|
-| `base.py` | SignalResult dataclass, STRATEGY_MODES enum |
-| `router.py` | Routes signal checks to appropriate strategy |
-| `ssl_flow.py` | SSL Flow trend following strategy [ACTIVE] |
-| `keltner_bounce.py` | Mean reversion strategy using Keltner bands [DISABLED] |
+4. **PBEMA-SSL Overlap Fix (v42.x)**
+   - SSL baseline ve PBEMA bulutunun ic ice oldugu durumlarda islem engelleme
+   - %0.5 esik degeri ile overlap kontrolu
+   - LONG icin PBEMA > baseline, SHORT icin PBEMA < baseline kontrolu
 
-### UI Package (`ui/`)
+5. **Minimum SL Distance (v42.x)**
+   - Piyasa gurutusu nedeniyle erken stop-out'u onleme
+   - BTC/ETH: %1.0, Altcoinler: %1.5 minimum mesafe
+   - `sl_validation_mode`: "off" (baseline), "reject", "widen"
+   - RR koruma: SL genisletildiginde TP de orantili olarak genisletilir
 
-| Module | Purpose |
-|--------|---------|
-| `main_window.py` | MainWindow - PyQt5 application with all tabs |
-| `workers.py` | QThread workers: LiveBotWorker, OptimizerWorker, BacktestWorker, AutoBacktestWorker |
+6. **Exit Profile System (v42.x)**
+   - CLIP profili: Erken partial (%45), buyuk partial (%50), daha yuksek hit-rate
+   - RUNNER profili: Gec partial (%70), kucuk partial (%33), kazananlari kostur
 
-### Main Application Classes
+7. **Circuit Breaker (v40.2-v42.x)**
+   - Stream-level: Max kayip, drawdown, ardisik full stop kontrolu
+   - Global-level: Gunluk/haftalik kayip limitleri
+   - Rolling E[R] kontrolu ile edge kaybi tespiti
 
-| Class | Location | Purpose |
-|-------|----------|---------|
-| `TradingEngine` | `core/trading_engine.py` | Core trading logic, data fetching, indicators, signals |
-| `BaseTradeManager` | `core/trade_manager.py` | Shared trade management logic |
-| `SimTradeManager` | `core/trade_manager.py` | Simulation trade manager for backtesting |
-| `TradeManager` | `desktop_bot_...py` | Live trade execution (extends BaseTradeManager) |
-| `MainWindow` | `ui/main_window.py` | PyQt5 GUI application |
-| `BinanceClient` | `core/binance_client.py` | Binance API wrapper |
-| `TelegramNotifier` | `core/telegram.py` | Thread-safe notifications |
+### Performans Optimizasyon Firsatlari
+
+1. **Lazy Imports** - `pandas_ta` gibi agir kutuphaneler gerektiginde yuklenir
+2. **NumPy Array Pre-extraction** - Hot loop'larda `df.iloc[i]` yerine array kullanimi
+3. **Parallel Data Fetching** - ThreadPoolExecutor ile max 5 worker
+4. **Config Caching** - `BEST_CONFIG_CACHE` ile disk I/O azaltma
+5. **Master Cache** - Rolling WF testlerinde veri tekrar kullanimi
+
+### Onerilen Semboller (Recommended Symbols)
+
+**Test Donemi:** 2025-01-01 - 2025-12-01 (determinism fix sonrasi guvenilir sonuclar)
+
+| Sembol | Durum | Notlar |
+|--------|-------|--------|
+| BTCUSDT | **ONERILEN** | En iyi performans |
+| ETHUSDT | **ONERILEN** | Tutarli sonuclar |
+| LINKUSDT | **ONERILEN** | Yuksek win rate |
+| DOGEUSDT | Islem Yok | Gecerli config bulunamadi |
+| SUIUSDT | Islem Yok | Gecerli config bulunamadi |
+| FARTCOINUSDT | Islem Yok | Gecerli config bulunamadi |
+| LTCUSDT | Kaybettiren | Tutarsiz |
+| BNBUSDT | Kaybettiren | Dusuk performans |
+| HYPEUSDT | Kaybettiren | Yuksek drawdown |
+| XRPUSDT | Kaybettiren | Cok islem, negatif beklenti |
+| SOLUSDT | Kaybettiren | Bazi donemlerde %0 win rate |
+
+**Onerilen Portfoy:** BTC + ETH + LINK
+- PnL (Haziran-Aralik): $157.10
+- Toplam Islem: 25
+- Win Rate: %81
+- Max Drawdown: ~$140
+
+### Bilinen Sorunlar / TODO'lar
+
+- [ ] AlphaTrend equality case handling (TradingView Pine Script uyumu)
+- [ ] ATR percentile hesaplama optimizasyonu
+- [ ] Regime detection multiplier devre disi (v43 - test edilecek)
+- [ ] PR-2: Carry-forward config sistemi test edilecek
+- [x] Optimizer determinism fix tamamlandi (v43.x)
 
 ---
 
-## Trading Strategies
+## Filter Combination Discovery System
 
-### 1. SSL Flow [ACTIVE - Default]
-**Mode:** `strategy_mode: "ssl_flow"`
+### Overview
 
-Trend following strategy using SSL HYBRID baseline with AlphaTrend confirmation:
-- Entry: Price retests SSL baseline (HMA60) as support/resistance
-- AlphaTrend confirms buyer/seller dominance (filters fake signals)
-- Target: PBEMA cloud (EMA200)
-- Stop Loss: Beyond swing high/low
+The Filter Discovery System finds the optimal combination of AND filters for the SSL Flow strategy to balance signal quality with trade frequency.
 
-**Signal Function:** `strategies.ssl_flow.check_ssl_flow_signal()`
+**Problem:** Currently 6+ filters must ALL pass → only 9 trades/year (over-filtering)
 
-### 2. Keltner Bounce [DISABLED]
-**Mode:** `strategy_mode: "keltner_bounce"`
+**Solution:** Test 2^6 = 64 filter combinations to find the sweet spot
 
-Mean reversion strategy using Keltner bands with PBEMA cloud as target:
-- Entry: Price touches Keltner band and rejects
-- Target: PBEMA cloud (EMA200)
-- Stop Loss: Beyond Keltner band
+### Quick Start
 
-**Signal Function:** `strategies.keltner_bounce.check_keltner_bounce_signal()`
+```bash
+# Phase 1: Pilot on BTCUSDT-15m (recommended first run)
+python run_filter_discovery.py --pilot
 
-**Note:** This strategy is currently disabled. All symbols use SSL Flow by default.
+# Phase 2: Validate top result on holdout data
+python run_filter_discovery.py --validate 0 --results data/filter_discovery_runs/pilot_YYYYMMDD_HHMMSS/results.json
 
-### Technical Indicators Used
-- **RSI(14)** - Relative Strength Index
-- **ADX(14)** - Average Directional Index
-- **PBEMA Cloud** - EMA200(high) and EMA200(close) as TP target
-- **SSL Baseline** - HMA60(close) - main trend indicator
-- **Keltner Bands** - baseline ± EMA60(TrueRange) * 0.2
-- **AlphaTrend** - Dual-line trend filter with flow detection (buyers vs sellers)
+# Phase 3: Full test on all symbols/timeframes (if pilot looks good)
+python run_filter_discovery.py --full
+```
+
+### Toggleable Filters (6 total)
+
+1. **adx_filter**: ADX >= adx_min (trend strength)
+2. **regime_gating**: ADX_avg >= threshold over N bars (window-level regime)
+3. **baseline_touch**: Price touched baseline in lookback (entry timing)
+4. **pbema_distance**: Min distance to PBEMA target (room for profit)
+5. **body_position**: Candle body above/below baseline (confirmation)
+6. **ssl_pbema_overlap**: Check for SSL-PBEMA overlap (flow existence)
+
+**CORE filters (NEVER toggle - always ON):**
+- AlphaTrend dominance (buyers/sellers)
+- Price position vs baseline (LONG/SHORT direction)
+- RR validation (min_rr threshold)
+
+### Key Files
+
+- **`core/filter_discovery.py`** - Main discovery engine (450 lines)
+- **`run_filter_discovery.py`** - CLI runner (550 lines)
+- **`docs/filter_discovery.md`** - Comprehensive documentation
+
+### Expected Output
+
+- `data/filter_discovery_runs/{run_id}/results.json` - Full results for all 64 combinations
+- `data/filter_discovery_runs/{run_id}/top_10.txt` - Human-readable top 10 report
+- `data/filter_discovery_runs/{run_id}/filter_pass_rates.json` - Diagnostic statistics
+
+### Data Split
+
+- **60% Train** - Search period (find best combinations)
+- **20% Walk-Forward** - Validation period (detect overfitting)
+- **20% Holdout** - Final test (never seen during search)
+
+### Scoring Function
+
+```python
+score = (
+    expected_r * 0.40 +      # 40% weight on E[R]
+    freq_bonus * 0.30 +       # 30% weight on trade frequency
+    sharpe * 0.10 +           # 10% weight on consistency
+    wr_factor * 0.20          # 20% weight on win rate
+) * net_pnl
+```
+
+**Success criteria:**
+- E[R] >= 0.08 (same or better than baseline)
+- Trades >= 15-20/year (significant increase from 9)
+- WF E[R] / Train E[R] >= 0.50 (not overfitted)
+- Holdout E[R] >= 0.05 (validates on unseen data)
+
+For detailed documentation, see `docs/filter_discovery.md`.
+
+---
+
+## Test Prosedürleri (Test Procedures)
+
+### Pytest Komutlari
+
+```bash
+# Tum testleri calistir
+pytest
+
+# Belirli test dosyasi
+pytest tests/test_signals.py
+
+# Verbose cikti
+pytest -v
+
+# Ilk hatada dur
+pytest -x
+
+# Yavas testleri atla
+pytest -m "not slow"
+
+# Sadece parity testleri (live/sim)
+pytest -m parity
+
+# Sadece integration testleri
+pytest -m integration
+
+# Coverage raporu
+pytest --cov=core --cov=strategies --cov-report=html
+```
+
+### Backtest Calistirma
+
+```bash
+# Hizli backtest (3 sembol, 2000 mum)
+python run_backtest.py
+
+# CLI backtest with options
+python desktop_bot_refactored_v2_base_v7.py --headless \
+    --symbols BTCUSDT ETHUSDT \
+    --timeframes 5m 15m 1h \
+    --candles 30000 \
+    --no-optimize
+```
+
+### Rolling Walk-Forward Test
+
+```bash
+# Varsayilan test (son 6 ay, weekly mode)
+python run_rolling_wf_test.py
+
+# 2025 tam yil testi
+python run_rolling_wf_test.py --full-year
+
+# Hizli test (3 ay, az sembol)
+python run_rolling_wf_test.py --quick
+
+# Tarih araligii belirtme
+python run_rolling_wf_test.py --start-date 2025-06-01 --end-date 2025-12-01
+
+# Optimized mode (master cache + parallel) - default
+python run_rolling_wf_test.py --fast
+
+# Sequential mode (debug icin)
+python run_rolling_wf_test.py --no-fast
+```
+
+**Rolling WF Modlari:**
+- `fixed`: Sabit config, re-optimization yok
+- `weekly`: Haftalik re-optimization (30 gun lookback, 7 gun forward)
+- `monthly`: Aylik re-optimization
+- `triday`: 3 gunluk re-optimization
+
+### Strateji Dogrulama (stratcheck)
+
+```bash
+# Strateji saglik kontrolu
+python run_strategy_sanity_tests.py
+
+# Optimizer diagnostikleri
+python run_optimizer_diagnostic.py
+
+# Strateji performans analizi
+python run_strategy_autopsy.py
+```
+
+### Backtest Dogrulama Kontrolleri
+
+Backtest sonrasinda kontrol edilecekler:
+1. Trade sayilari makul mu (cok az veya cok fazla degil)
+2. Win rate beklenen aralikta mi (%45-65)
+3. PnL pozitif mi
+4. Console'da hata yok
+5. Circuit breaker dogru calisiyor mu
 
 ---
 
@@ -193,27 +449,16 @@ TRADING_CONFIG = {
 }
 ```
 
-### Symbol-Specific Parameters
-`SYMBOL_PARAMS` dict in `core/config.py`:
-```python
-SYMBOL_PARAMS = {
-    "BTCUSDT": {
-        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "15m": {...},
-        ...
-    },
-    ...
-}
-```
-**Note:** `at_active: True` is MANDATORY for all configs. AlphaTrend is essential for SSL Flow strategy.
-
 ### Strategy Configuration
+
 `DEFAULT_STRATEGY_CONFIG` defines strategy parameters:
 - `rr` - Risk/Reward ratio
 - `rsi` - RSI threshold
-- `at_active` - AlphaTrend filter active (essential for SSL Flow)
+- `at_active` - AlphaTrend filter active (MANDATORY for SSL Flow)
 - `use_trailing` - Trailing stop enabled
 - `strategy_mode` - "ssl_flow" (default) or "keltner_bounce" (disabled)
+- `exit_profile` - "clip" or "runner"
+- `sl_validation_mode` - "off", "reject", or "widen"
 
 ### Environment Variables (Recommended for Telegram)
 ```bash
@@ -236,15 +481,26 @@ Position sizing based on R-multiple (risk units):
 - Max portfolio risk: 5% (configurable)
 - Strategy-isolated wallets (each strategy has separate balance for isolation)
 
-### Gating System
-Multi-layer gating prevents weak-edge configs:
-1. Minimum E[R] threshold (account-size independent)
-2. Minimum optimizer score threshold (varies by timeframe)
-3. Confidence-based risk multiplier
-4. Walk-forward out-of-sample validation
-
 ### Circuit Breaker
-Configured in `CIRCUIT_BREAKER_CONFIG` - disables streams after consecutive losses.
+2-Level kill switch:
+- **Stream-level:** Max loss (-$200), drawdown ($100), consecutive full stops (2)
+- **Global-level:** Daily (-$400), weekly (-$800), max drawdown (20%)
+
+---
+
+## Build and Setup
+
+```bash
+# Install dependencies
+pip install -r requirements.txt
+
+# Activate virtual environment (if using venv)
+source venv/bin/activate  # macOS/Linux
+venv\Scripts\activate     # Windows
+
+# Verify syntax
+python3 -m py_compile desktop_bot_refactored_v2_base_v7.py
+```
 
 ---
 
@@ -259,35 +515,6 @@ Requires PyQt5 and PyQtWebEngine.
 ### Headless/CLI Mode
 ```bash
 python desktop_bot_refactored_v2_base_v7.py --headless
-```
-
-### CLI Backtest with Options
-```bash
-python desktop_bot_refactored_v2_base_v7.py --headless \
-    --symbols BTCUSDT ETHUSDT \
-    --timeframes 5m 15m 1h \
-    --candles 30000 \
-    --no-optimize  # Skip optimization, use cached configs
-```
-
-### Quick Backtest Script
-```bash
-python run_backtest.py
-```
-
-### Fast Startup (Precompiled)
-```bash
-python fast_start.py
-# or on Windows:
-start_fast.bat
-```
-
-### Running Tests
-```bash
-pytest                           # Run all tests
-pytest tests/test_signals.py     # Run specific test file
-pytest -v                        # Verbose output
-pytest -x                        # Stop on first failure
 ```
 
 ### Google Colab
@@ -317,18 +544,6 @@ results = colab_quick_test(symbol='BTCUSDT', timeframe='15m', candles=10000)
 - **Imports:** Standard library, then third-party, then local
 - **Single Source of Truth:** All constants and configs from `core/config.py`
 
-### Performance Considerations
-1. **Lazy imports** - Heavy libraries (pandas_ta, plotly) imported lazily for fast startup
-2. **Hot loops use NumPy arrays** - Pre-extract arrays before loops
-3. **Parallel data fetching** - ThreadPoolExecutor with max 5 workers
-4. **In-place DataFrame operations** - `calculate_indicators()` modifies in-place
-5. **Caching** - Best configs cached in `BEST_CONFIG_CACHE` and `best_configs.json`
-
-### Adding New Symbols
-1. Add to `SYMBOLS` list in `core/config.py`
-2. Add entry in `SYMBOL_PARAMS` with per-timeframe settings
-3. Run optimization to find best parameters
-
 ### Adding New Strategies
 1. Create new module in `strategies/` (see `ssl_flow.py` as template)
 2. Export from `strategies/__init__.py`
@@ -344,136 +559,14 @@ All indicators calculated in `core/indicators.py`:
 
 ---
 
-## Testing
-
-### Syntax Validation
-```bash
-python3 -m py_compile desktop_bot_refactored_v2_base_v7.py
-```
-
-### Run Test Suite
-```bash
-pytest                           # All tests
-pytest tests/test_signals.py     # Signal tests
-pytest tests/test_parity.py      # Live/sim parity tests
-pytest tests/test_risk.py        # Risk management tests
-pytest tests/test_indicators.py  # Indicator tests
-```
-
-### Backtest Validation
-Run backtests and verify:
-- Trade counts are reasonable
-- Win rates are within expected range
-- PnL is positive for enabled configs
-- No errors in console output
-
-### Signal Debugging
-Use diagnostic functions:
-```python
-# Check specific candle conditions
-TradingEngine.debug_base_short(df, -2)
-
-# Plot a backtest trade
-debug_plot_backtest_trade('BTCUSDT', '15m', trade_id=123)
-```
-
----
-
-## Common Tasks for AI Assistants
-
-### 1. Fixing Bugs
-- Read the relevant function first
-- Check if similar logic exists in both `TradeManager` (live) and `SimTradeManager` (backtest)
-- Ensure parity between live and simulation logic
-- Run `pytest tests/test_parity.py` to verify parity
-
-### 2. Optimizing Performance
-- Look for `df.iloc[i]` in loops - replace with pre-extracted NumPy arrays
-- Check for unnecessary `.copy()` calls
-- Consider parallel processing for independent operations
-- Use lazy imports for heavy libraries
-
-### 3. Modifying Strategy Parameters
-- Update `DEFAULT_STRATEGY_CONFIG` in `core/config.py` for global changes
-- Update `SYMBOL_PARAMS` in `core/config.py` for symbol-specific changes
-- Re-run optimization after changes
-
-### 4. Adding Features
-- Prefer editing existing code over creating new files
-- Follow existing patterns (see similar functionality)
-- Add configuration options to `core/config.py`
-- Update CLI arguments if needed
-- Add tests in `tests/` directory
-
-### 5. Debugging Trade Issues
-- Check `trades.csv` for trade history
-- Use `check_signal(..., return_debug=True)` for signal diagnostics
-- Check cooldown logic in `TradeManager.check_cooldown()`
-- Verify config is not disabled in `POST_PORTFOLIO_BLACKLIST`
-
----
-
-## API Integration
-
-### Binance Futures API
-- Client: `core/binance_client.py` (BinanceClient class)
-- Base URL: `https://fapi.binance.com/fapi/v1/`
-- Endpoints used: `/klines`, `/ticker/price`
-- WebSocket: `wss://fstream.binance.com/stream`
-- Rate limiting: Max 5 parallel requests, exponential backoff on 429/5xx
-
-### Telegram API
-- Notifier: `core/telegram.py` (TelegramNotifier class)
-- Thread-safe with connection pooling
-- Configure via environment variables or `config.json`
-- Token and chat_id required
-
----
-
-## Troubleshooting
-
-### Common Issues
-
-| Issue | Solution |
-|-------|----------|
-| "No Data" signals | Check internet connection, API rate limits |
-| GUI not starting | Ensure PyQt5 installed, or use `--headless` |
-| Optimization too slow | Use `quick_mode=True` or reduce candle count |
-| Configs all disabled | Lower thresholds in `MIN_EXPECTANCY_R_MULTIPLE` |
-| WebSocket disconnects | Auto-reconnect built-in, check logs |
-| Import errors | Ensure `core/` package is in path |
-| Slow startup | Use `fast_start.py` or run `precompile.py` first |
-
-### Error Logging
-- Errors logged to `error_log.txt`
-- Console output includes timestamps and context
-- Use `verbose=True` in CLI functions for detailed output
-- Centralized logging via `core/logging_config.py`
-
----
-
-## Version History Notes
-
-- **v40.x**: Modular architecture, core package refactoring, lazy imports
-- **v39.0**: R-Multiple based optimizer gating, walk-forward validation
-- **v37.0**: Dynamic optimizer controls, removed hardcoded disabled states
-- **v30.4**: Initial PROFIT ENGINE release
-
----
-
 ## Quick Reference
-
-### Entry Points
-- GUI: `MainWindow` class in `ui/main_window.py`
-- CLI: `run_cli_backtest()`, `colab_quick_test()`
-- Backtest: `run_portfolio_backtest()`
 
 ### Key Files
 - Main code: `desktop_bot_refactored_v2_base_v7.py`
 - Core config: `core/config.py`
 - Indicators: `core/indicators.py`
 - Trade logic: `core/trade_manager.py`
-- Strategies: `strategies/`
+- SSL Flow strategy: `strategies/ssl_flow.py`
 - Configs: `best_configs.json`, `config.json`
 - Results: `backtest_trades.csv`, `backtest_summary.csv`
 
@@ -486,4 +579,14 @@ from core import (
     send_telegram,
 )
 from strategies import check_signal, STRATEGY_REGISTRY
+```
+
+### Signal Debug
+```python
+# Check specific candle conditions with debug info
+from strategies import check_signal
+signal_type, entry, tp, sl, reason, debug_info = check_signal(
+    df, config, index=-2, return_debug=True
+)
+print(debug_info)
 ```
