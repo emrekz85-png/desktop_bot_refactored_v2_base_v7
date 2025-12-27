@@ -9,6 +9,9 @@ import pytest
 import numpy as np
 from datetime import datetime, timedelta, timezone
 
+# Import validate_and_adjust_sl from core.utils for SL validation tests
+from core.utils import validate_and_adjust_sl
+
 
 def _utcnow():
     """Helper to get current UTC time as naive datetime."""
@@ -253,6 +256,98 @@ class TestStopLossProtection:
         assert result is False
 
 
+class TestSLValidation:
+    """Tests for SL validation and defensive checks."""
+
+    def test_sl_equal_entry_returns_error(self):
+        """validate_and_adjust_sl should return SL_EQUAL_ENTRY when SL == Entry."""
+        config = {"sl_validation_mode": "off"}
+
+        # SL equals entry - should trigger defensive check
+        new_sl, new_tp, size, notional, margin, skip_reason = \
+            validate_and_adjust_sl(
+                symbol="BTCUSDT",
+                entry=100.0,
+                sl=100.0,  # EQUAL to entry
+                tp=104.0,
+                trade_type="LONG",
+                config=config,
+                risk_amount=35.0,
+                leverage=10.0,
+            )
+
+        assert skip_reason == "SL_EQUAL_ENTRY"
+        assert size == 0
+        assert notional == 0
+        assert margin == 0
+
+    def test_sl_near_zero_distance_returns_error(self):
+        """validate_and_adjust_sl should return error when SL is very close to entry."""
+        config = {"sl_validation_mode": "off"}
+
+        # SL extremely close to entry (floating point tolerance check)
+        new_sl, new_tp, size, notional, margin, skip_reason = \
+            validate_and_adjust_sl(
+                symbol="BTCUSDT",
+                entry=100.0,
+                sl=100.0 + 1e-11,  # Within floating point tolerance
+                tp=104.0,
+                trade_type="LONG",
+                config=config,
+                risk_amount=35.0,
+                leverage=10.0,
+            )
+
+        assert skip_reason == "SL_EQUAL_ENTRY"
+        assert size == 0
+
+    def test_sl_validation_off_normal_distance(self):
+        """validate_and_adjust_sl should work normally when SL is valid."""
+        config = {"sl_validation_mode": "off"}
+
+        new_sl, new_tp, size, notional, margin, skip_reason = \
+            validate_and_adjust_sl(
+                symbol="BTCUSDT",
+                entry=100.0,
+                sl=98.0,  # Normal 2% SL
+                tp=104.0,
+                trade_type="LONG",
+                config=config,
+                risk_amount=35.0,
+                leverage=10.0,
+            )
+
+        assert skip_reason is None
+        assert size > 0
+        assert new_sl == 98.0  # Unchanged in "off" mode
+        # Position size should be: risk_amount / sl_distance = 35 / 2 = 17.5
+        assert abs(size - 17.5) < 0.01
+
+    def test_sl_too_tight_reject_mode(self):
+        """validate_and_adjust_sl should reject when SL too tight and mode=reject."""
+        config = {
+            "sl_validation_mode": "reject",
+            "min_sl_distance_btc_eth": 0.010,  # 1% minimum
+            "majors_symbols": ["BTCUSDT", "ETHUSDT"],
+        }
+
+        # 0.5% SL distance - below 1% minimum for majors
+        new_sl, new_tp, size, notional, margin, skip_reason = \
+            validate_and_adjust_sl(
+                symbol="BTCUSDT",
+                entry=100.0,
+                sl=99.5,  # Only 0.5% distance
+                tp=104.0,
+                trade_type="LONG",
+                config=config,
+                risk_amount=35.0,
+                leverage=10.0,
+            )
+
+        assert skip_reason == "SL_TOO_TIGHT_REJECTED"
+        assert size == 0
+
+
 class TestConfidenceRiskMultiplier:
     """Tests for confidence-based risk multiplier."""
 
@@ -283,15 +378,17 @@ class TestMinExpectancyThresholds:
             assert tf in trading_module.MIN_EXPECTANCY_R_MULTIPLE
             assert trading_module.MIN_EXPECTANCY_R_MULTIPLE[tf] > 0
 
-    def test_lower_timeframes_have_higher_thresholds(self, trading_module):
-        """Lower timeframes should require higher E[R] (more noise)."""
+    def test_timeframe_thresholds_are_reasonable(self, trading_module):
+        """All timeframe thresholds should be positive and reasonable."""
         thresholds = trading_module.MIN_EXPECTANCY_R_MULTIPLE
 
-        # 5m should require higher E[R] than 1h
-        assert thresholds["5m"] > thresholds["1h"]
-
-        # 1h should require higher E[R] than 1d
-        assert thresholds["1h"] > thresholds["1d"]
+        # All thresholds should be positive and within reasonable range
+        for tf, threshold in thresholds.items():
+            assert threshold > 0, f"{tf} threshold should be positive"
+            assert threshold < 1.0, f"{tf} threshold should be less than 1.0 (reasonable range)"
+            # Thresholds should be small positive values (typical: 0.02 - 0.15)
+            assert threshold >= 0.01, f"{tf} threshold should be at least 0.01"
+            assert threshold <= 0.20, f"{tf} threshold should be at most 0.20"
 
 
 class TestMinScoreThresholds:

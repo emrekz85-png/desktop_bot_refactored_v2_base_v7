@@ -28,6 +28,10 @@ from .indicators import (
     calculate_alphatrend as core_calculate_alphatrend,
 )
 from .telegram import send_telegram as _core_send_telegram
+from .logging_config import get_logger
+
+# Module logger
+_logger = get_logger(__name__)
 
 # Import strategy signal detection from strategies module
 from strategies import (
@@ -80,7 +84,7 @@ class TradingEngine:
         now = time.time()
         if now < TradingEngine._network_cooldown_until:
             cooldown_left = int(TradingEngine._network_cooldown_until - now)
-            print(f"BAĞLANTI HATASI: Ağ erişimi yok. {cooldown_left}s sonra yeniden denenecek.")
+            _logger.warning("Network cooldown active. Retry in %ds.", cooldown_left)
             return None
 
         delay = 1
@@ -90,7 +94,8 @@ class TradingEngine:
 
                 # Handle rate limits (429) and server errors (5xx)
                 if res.status_code == 429 or res.status_code >= 500:
-                    print(f"API HATA {res.status_code} (Deneme {attempt + 1}/{max_retries}). Bekleniyor...")
+                    _logger.warning("API error %d (Attempt %d/%d). Waiting %ds...",
+                                   res.status_code, attempt + 1, max_retries, delay)
                     time.sleep(delay)
                     delay *= 2  # Exponential backoff
                     continue
@@ -99,10 +104,12 @@ class TradingEngine:
                 return res
             except requests.exceptions.RequestException as e:
                 is_dns_error = isinstance(e, requests.exceptions.ConnectionError) and "NameResolutionError" in str(e)
-                print(f"BAĞLANTI HATASI (Deneme {attempt + 1}/{max_retries}): {e}")
+                _logger.warning("Connection error (Attempt %d/%d): %s",
+                               attempt + 1, max_retries, type(e).__name__)
 
                 # DNS failure: 5 minute cooldown
                 if is_dns_error:
+                    _logger.error("DNS resolution failed. Entering 5-minute cooldown.")
                     TradingEngine._network_cooldown_until = time.time() + 300
                     break
 
@@ -134,14 +141,7 @@ class TradingEngine:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
             return df
         except Exception as e:
-            print(f"VERİ ÇEKME HATASI ({symbol}): {e}")
-            error_log_path = os.path.join(DATA_DIR, "error_log.txt")
-            try:
-                from datetime import datetime
-                with open(error_log_path, "a") as f:
-                    f.write(f"\n[{datetime.now()}] GET_DATA HATA ({symbol}): {str(e)}\n")
-            except Exception:
-                pass
+            _logger.error("Data fetch error (%s): %s", symbol, e, exc_info=True)
             return pd.DataFrame()
 
     @staticmethod
@@ -151,7 +151,8 @@ class TradingEngine:
         try:
             df = TradingEngine.get_data(symbol, tf, limit=500)
             return (symbol, tf, df)
-        except Exception:
+        except Exception as e:
+            _logger.warning("Parallel fetch worker failed for %s-%s: %s", symbol, tf, e, exc_info=True)
             return (symbol, tf, pd.DataFrame())
 
     @staticmethod
@@ -164,11 +165,13 @@ class TradingEngine:
         with ThreadPoolExecutor(max_workers=5) as executor:
             future_to_task = {executor.submit(TradingEngine.fetch_worker, t): t for t in tasks}
             for future in future_to_task:
+                task = future_to_task[future]
                 try:
                     sym, tf, df = future.result()
                     results[(sym, tf)] = df
                 except Exception as e:
-                    print(f"Paralel Veri Hatası: {e}")
+                    _logger.warning("Parallel fetch error for %s-%s: %s",
+                                   task[0], task[1], type(e).__name__)
         return results
 
     @staticmethod
@@ -185,8 +188,8 @@ class TradingEngine:
                 data = res.json()
                 if isinstance(data, dict) and "price" in data:
                     prices[sym] = float(data["price"])
-            except Exception as e:
-                print(f"[PRICE] {sym} fiyatı alınamadı: {e}")
+            except (ValueError, KeyError, TypeError) as e:
+                _logger.debug("Price fetch failed for %s: %s", sym, e, exc_info=True)
 
         return prices
 
@@ -261,7 +264,11 @@ class TradingEngine:
                         break
 
                     time.sleep(0.1)  # Rate limit courtesy
-                except Exception:
+                except Exception as e:
+                    _logger.warning(
+                        "Historical data pagination failed for %s-%s (date range mode): %s",
+                        symbol, interval, e, exc_info=True
+                    )
                     break
         else:
             # Candle count mode (legacy behavior)
@@ -284,7 +291,11 @@ class TradingEngine:
                     all_data = data + all_data
                     end_time = data[0][0] - 1
                     time.sleep(0.1)
-                except Exception:
+                except Exception as e:
+                    _logger.warning(
+                        "Historical data pagination failed for %s-%s (candle count mode): %s",
+                        symbol, interval, e, exc_info=True
+                    )
                     break
 
         if not all_data:
@@ -309,23 +320,27 @@ class TradingEngine:
         return core_calculate_alphatrend(df, coeff=coeff, ap=ap)
 
     @staticmethod
-    def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    def calculate_indicators(df: pd.DataFrame, timeframe: str = None) -> pd.DataFrame:
         """
         Calculate all technical indicators for Base Setup.
 
         - RSI(14)
         - ADX(14)
         - PBEMA cloud: EMA200(high) and EMA200(close)
-        - SSL baseline: HMA60(close)
-        - Keltner bands: baseline +/- EMA60(TrueRange) * 0.2
+        - SSL baseline: HMA(TF-adaptive) - v1.7.1
+        - Keltner bands: baseline +/- EMA(TrueRange) * 0.2
         - AlphaTrend: optional filter
 
         PERFORMANCE NOTE: This function modifies the DataFrame in-place.
         If you need to preserve the original DataFrame, make a copy before calling.
 
         NOTE: Implementation delegated to core.indicators.calculate_indicators for single source of truth.
+
+        Args:
+            df: DataFrame with OHLCV data
+            timeframe: Optional timeframe string for TF-adaptive lookbacks (v1.7.1)
         """
-        return core_calculate_indicators(df)
+        return core_calculate_indicators(df, timeframe=timeframe)
 
     @staticmethod
     def check_signal_diagnostic(

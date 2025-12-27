@@ -667,8 +667,8 @@ def run_comparison_test(start_date: str = None, end_date: str = None, fast: bool
     if modes is None:
         modes = ["weekly"]
 
-    # Default: Only BTCUSDT for faster testing and consistent comparison
-    test_symbols = ["BTCUSDT"]
+    # Default: BTC + ETH + LINK for comprehensive comparison
+    test_symbols = ["BTCUSDT", "ETHUSDT", "LINKUSDT"]
     test_timeframes = ["5m", "15m", "1h"]  # 30m removed (v1.2+)
 
     print("\n" + "="*70)

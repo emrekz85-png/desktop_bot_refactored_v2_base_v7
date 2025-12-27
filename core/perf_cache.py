@@ -30,10 +30,12 @@ except ImportError:
 CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "perf_cache")
 USE_PARQUET = True  # Use parquet for compressed cache (smaller, slower)
 USE_FEATHER = False  # Use feather for fast cache (larger, faster)
+# SECURITY: Pickle is DISABLED - it allows arbitrary code execution during deserialization
+USE_PICKLE = False  # NEVER enable - security vulnerability
 
 # Thread pool settings
 MAX_IO_WORKERS = 10  # For network/disk I/O
-MAX_CPU_WORKERS = None  # None = os.cpu_count()
+MAX_CPU_WORKERS = 7  # For CPU-bound tasks
 
 # Timedelta cache (computed once)
 _TIMEDELTA_CACHE: Dict[str, pd.Timedelta] = {}
@@ -208,7 +210,9 @@ def get_cache_path(cache_key: str) -> str:
     elif USE_FEATHER:
         return os.path.join(CACHE_DIR, f"{cache_key}.feather")
     else:
-        return os.path.join(CACHE_DIR, f"{cache_key}.pkl")
+        # SECURITY: Default to parquet instead of pickle
+        # Pickle is disabled due to arbitrary code execution vulnerability
+        return os.path.join(CACHE_DIR, f"{cache_key}.parquet")
 
 
 def load_from_disk_cache(sym: str, tf: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
@@ -240,7 +244,8 @@ def load_from_disk_cache(sym: str, tf: str, start_date: str, end_date: str) -> O
         elif USE_FEATHER:
             return pd.read_feather(cache_path)
         else:
-            return pd.read_pickle(cache_path)
+            # SECURITY: Pickle is disabled - use parquet as safe default
+            return pd.read_parquet(cache_path)
     except Exception:
         return None
 
@@ -257,7 +262,8 @@ def save_to_disk_cache(df: pd.DataFrame, sym: str, tf: str, start_date: str, end
         elif USE_FEATHER:
             df.to_feather(cache_path)
         else:
-            df.to_pickle(cache_path)
+            # SECURITY: Pickle is disabled - use parquet as safe default
+            df.to_parquet(cache_path, index=False)
     except Exception:
         pass  # Silently fail cache writes
 

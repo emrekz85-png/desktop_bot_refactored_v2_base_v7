@@ -26,8 +26,11 @@ from .utils import (
     normalize_datetime, format_time_utc, format_time_local,
     calculate_funding_cost, append_trade_event,
     apply_1m_profit_lock, apply_partial_stop_protection,
-    calculate_r_multiple,
+    calculate_r_multiple, derive_exit_profile_params, validate_and_adjust_sl,
 )
+from .logging_config import get_logger
+
+_logger = get_logger(__name__)
 
 
 class BaseTradeManager(ABC):
@@ -60,6 +63,7 @@ class BaseTradeManager(ABC):
         self.slippage_pct = TRADING_CONFIG["slippage_rate"]
         self.risk_per_trade_pct = TRADING_CONFIG.get("risk_per_trade_pct", 0.01)
         self.max_portfolio_risk_pct = TRADING_CONFIG.get("max_portfolio_risk_pct", 0.03)
+        self.leverage = TRADING_CONFIG.get("leverage", 10)
 
         # R-Multiple tracking
         self.trade_r_multiples: List[float] = []
@@ -81,6 +85,14 @@ class BaseTradeManager(ABC):
         # Weekly tracking (v40.4)
         self._global_weekly_pnl = 0.0
         self._current_week_start: Optional[datetime] = None
+
+        # ==========================================
+        # THREAD SAFETY (v44.x - Race Condition Fix)
+        # ==========================================
+        # Lock to protect circuit breaker check-and-update operations
+        # Prevents race condition where two threads could both pass is_stream_killed()
+        # and both open trades before _update_circuit_breaker_tracking() is called
+        self._circuit_breaker_lock = threading.Lock()
 
     def _next_id(self) -> int:
         """Generate next trade ID."""
@@ -267,6 +279,7 @@ class BaseTradeManager(ABC):
         candle_time_utc,
         pb_top: float = None,
         pb_bot: float = None,
+        candle_data: dict = None,
     ) -> Optional[Dict]:
         """
         Process update for a single trade.
@@ -286,6 +299,7 @@ class BaseTradeManager(ABC):
             candle_time_utc: Candle time (UTC)
             pb_top: PBEMA cloud top level (optional)
             pb_bot: PBEMA cloud bottom level (optional)
+            candle_data: Dict with additional candle data (AlphaTrend indicators, etc.)
 
         Returns:
             Closed trade dict if trade was closed, None otherwise
@@ -358,6 +372,12 @@ class BaseTradeManager(ABC):
         dynamic_tp_only_after_partial = trade.get("dynamic_tp_only_after_partial", True)
         dynamic_tp_min_distance = float(trade.get("dynamic_tp_min_distance", 0.004))
 
+        # === AŞAMA 5 (v42.x): Profile-dependent clamp mode ===
+        # "tighten_only": Only allow TP to get tighter (closer to entry)
+        # "none": Allow TP to move freely with market
+        dynamic_tp_clamp_mode = trade.get("dynamic_tp_clamp_mode", "tighten_only")
+        current_tp = float(trade.get("tp", initial_tp))
+
         # Dynamic TP hesaplama koşulu
         should_apply_dynamic_tp = use_dynamic_tp and (
             not dynamic_tp_only_after_partial or trade.get("partial_taken", False)
@@ -380,10 +400,32 @@ class BaseTradeManager(ABC):
                     # SHORT için dyn_tp entry'nin altında olmalı
                     dyn_tp = initial_tp
                 else:
-                    # Tüm kontroller geçti, dynamic TP kullan
-                    dyn_tp = candidate_dyn_tp
-                    self.open_trades[trade_idx]["tp"] = dyn_tp
-            except Exception:
+                    # === Clamp mode enforcement ===
+                    if dynamic_tp_clamp_mode == "tighten_only":
+                        # Tighten only: only update if TP gets closer to entry
+                        if t_type == "LONG":
+                            # LONG: tighter = lower TP (closer to entry)
+                            if candidate_dyn_tp < current_tp:
+                                dyn_tp = candidate_dyn_tp
+                                self.open_trades[trade_idx]["tp"] = dyn_tp
+                            else:
+                                dyn_tp = current_tp  # Keep current tighter TP
+                        else:
+                            # SHORT: tighter = higher TP (closer to entry)
+                            if candidate_dyn_tp > current_tp:
+                                dyn_tp = candidate_dyn_tp
+                                self.open_trades[trade_idx]["tp"] = dyn_tp
+                            else:
+                                dyn_tp = current_tp  # Keep current tighter TP
+                    else:
+                        # Clamp mode "none": allow TP to move freely
+                        dyn_tp = candidate_dyn_tp
+                        self.open_trades[trade_idx]["tp"] = dyn_tp
+            except Exception as e:
+                _logger.warning(
+                    "Dynamic TP calculation failed for trade %s: %s. Using initial_tp=%.2f",
+                    trade.get("id", "unknown"), e, initial_tp, exc_info=True
+                )
                 dyn_tp = initial_tp
         else:
             # Dynamic TP kapalı veya partial öncesi, initial_tp kullan
@@ -404,9 +446,167 @@ class BaseTradeManager(ABC):
         current_dist = abs(extreme_price - entry)
         progress = current_dist / total_dist
 
+        # === MOMENTUM TP EXTENSION (v1.5 - EMA15 based) ===
+        # When price reaches high progress with strong momentum, extend TP to let winners run
+        # v1.5: Using EMA15 instead of AlphaTrend - faster response, lower lag (~7.5 candles vs ~14+)
+        use_momentum_tp = trade.get("momentum_tp_extension", False)
+        momentum_threshold = float(trade.get("momentum_extension_threshold", 0.80))
+        momentum_multiplier = float(trade.get("momentum_extension_multiplier", 1.5))
+
+        if (use_momentum_tp and
+            in_profit and
+            progress >= momentum_threshold and
+            not trade.get("tp_extended", False)):
+
+            # v1.5: Check momentum using EMA15 position
+            # For LONG: price > EMA15 = bullish momentum still active
+            # For SHORT: price < EMA15 = bearish momentum still active
+            ema15 = candle_data.get("ema15") if candle_data else None
+
+            if ema15 is not None:
+                if t_type == "LONG":
+                    momentum_strong = close_price > ema15
+                else:
+                    momentum_strong = close_price < ema15
+            else:
+                # Fallback: at 80% progress if we got this far, momentum was strong
+                momentum_strong = True
+
+            if momentum_strong:
+                # Extend TP by multiplier
+                original_tp_dist = abs(initial_tp - entry)
+                extended_dist = original_tp_dist * momentum_multiplier
+
+                if t_type == "LONG":
+                    new_tp = entry + extended_dist
+                else:
+                    new_tp = entry - extended_dist
+
+                self.open_trades[trade_idx]["tp"] = new_tp
+                self.open_trades[trade_idx]["tp_extended"] = True
+                self.open_trades[trade_idx]["original_tp"] = initial_tp
+                dyn_tp = new_tp  # Update dyn_tp for this iteration
+
+                append_trade_event(self.open_trades[trade_idx], "TP_EXTENDED", candle_time_utc, new_tp)
+
         # === AŞAMA 2, 4: Partial TP + Breakeven (düzeltilmiş sıralama ve fraction) ===
-        if in_profit and use_partial:
-            if (not trade.get("partial_taken")) and progress >= effective_partial_trigger:
+        # === Stage 3: Profile-based partial enforcement ===
+        # CLIP profile: FORCED partial (guarantees profit capture)
+        # RUNNER profile: Optional partial (allows runners to full TP)
+        exit_profile = trade.get("exit_profile", "clip")
+
+        # === PROGRESSIVE PARTIAL TP (v1.3) ===
+        use_progressive_partial = trade.get("use_progressive_partial", False)
+        partial_tranches = trade.get("partial_tranches", [])
+        partials_taken_count = int(trade.get("partials_taken_count", 0))
+        progressive_be_after = int(trade.get("progressive_be_after_tranche", 0))
+
+        if use_progressive_partial and partial_tranches and partials_taken_count < len(partial_tranches):
+            # Progressive partial mode - check current tranche
+            current_tranche = partial_tranches[partials_taken_count]
+            tranche_trigger = float(current_tranche.get("trigger", 0.5))
+            tranche_fraction = float(current_tranche.get("fraction", 0.33))
+
+            should_take_partial = (
+                in_profit and
+                progress >= tranche_trigger and
+                (exit_profile == "clip" or use_partial)
+            )
+
+            if should_take_partial:
+                # Calculate size to close for this tranche
+                current_size = float(self.open_trades[trade_idx]["size"])
+                closed_size = current_size * tranche_fraction
+                remaining_size = current_size - closed_size
+
+                # Partial fill with slippage
+                partial_fill = self._apply_slippage(partial_fill_price, t_type, is_entry=False)
+
+                if t_type == "LONG":
+                    partial_pnl_percent = (partial_fill - entry) / entry
+                else:
+                    partial_pnl_percent = (entry - partial_fill) / entry
+
+                # PnL calculation
+                partial_pnl = partial_pnl_percent * (entry * closed_size)
+                partial_notional = abs(closed_size) * abs(partial_fill)
+                commission = partial_notional * TRADING_CONFIG["total_fee"]
+                net_partial_pnl = partial_pnl - commission
+
+                # Margin calculations (proportional to closed size)
+                current_margin = float(self.open_trades[trade_idx].get("margin", initial_margin))
+                margin_release = current_margin * tranche_fraction
+                remaining_margin = current_margin - margin_release
+
+                # R-Multiple for partial
+                trade_risk_amount = float(trade.get("risk_amount", 0))
+                current_risk = float(self.open_trades[trade_idx].get("risk_amount", trade_risk_amount))
+                partial_risk = current_risk * tranche_fraction
+                remaining_risk = current_risk - partial_risk
+                if partial_risk > 0:
+                    partial_r_multiple = net_partial_pnl / partial_risk
+                    self.trade_r_multiples.append(partial_r_multiple)
+                else:
+                    partial_r_multiple = 0.0
+
+                # Update wallet
+                self.wallet_balance += margin_release + net_partial_pnl
+                self.locked_margin -= margin_release
+                self.total_pnl += net_partial_pnl
+
+                # Update trade state
+                self.open_trades[trade_idx]["partials_taken_count"] = partials_taken_count + 1
+                self.open_trades[trade_idx]["partial_taken"] = True  # Backward compat
+                self.open_trades[trade_idx]["partial_price"] = float(partial_fill)
+
+                # Move to BE after specified tranche
+                if partials_taken_count >= progressive_be_after and not trade.get("breakeven"):
+                    be_buffer = 0.002
+                    if t_type == "LONG":
+                        be_sl = entry * (1 + be_buffer)
+                    else:
+                        be_sl = entry * (1 - be_buffer)
+                    self.open_trades[trade_idx]["sl"] = be_sl
+                    self.open_trades[trade_idx]["breakeven"] = True
+                    append_trade_event(self.open_trades[trade_idx], "BE_SET", candle_time_utc, be_sl)
+
+                tranche_num = partials_taken_count + 1
+                append_trade_event(self.open_trades[trade_idx], f"PARTIAL_T{tranche_num}", candle_time_utc, partial_fill)
+
+                # Create partial record
+                partial_record = trade.copy()
+                partial_record["size"] = closed_size
+                partial_record["notional"] = partial_notional
+                partial_record["pnl"] = net_partial_pnl
+                partial_record["r_multiple"] = partial_r_multiple
+                partial_record["status"] = f"PARTIAL T{tranche_num} ({int(tranche_fraction*100)}%)"
+                partial_record["close_time_utc"] = format_time_utc(candle_time_utc)
+                partial_record["close_time_local"] = format_time_local(candle_time_utc, offset_hours=3)
+                partial_record["close_price"] = float(partial_fill)
+                partial_record["pb_ema_top"] = pb_top
+                partial_record["pb_ema_bot"] = pb_bot
+                partial_record["partial_taken"] = True
+                partial_record["events"] = json.dumps(self.open_trades[trade_idx].get("events", []))
+
+                self._on_partial_tp(partial_record)
+                self.history.append(partial_record)
+
+                # Update remaining position
+                self.open_trades[trade_idx]["size"] = remaining_size
+                self.open_trades[trade_idx]["notional"] = remaining_size * entry
+                self.open_trades[trade_idx]["margin"] = remaining_margin
+                self.open_trades[trade_idx]["risk_amount"] = remaining_risk
+
+        else:
+            # Original single partial mode (backward compatibility)
+            should_take_partial = (
+                in_profit and
+                (not trade.get("partial_taken")) and
+                progress >= effective_partial_trigger and
+                (exit_profile == "clip" or use_partial)  # CLIP always, RUNNER respects use_partial
+            )
+
+            if should_take_partial:
                 # === AŞAMA 4: partial_fraction config'den oku ===
                 closed_size = size * partial_fraction
                 remaining_size = size - closed_size
@@ -487,16 +687,17 @@ class BaseTradeManager(ABC):
                 self.open_trades[trade_idx]["margin"] = remaining_margin
                 self.open_trades[trade_idx]["risk_amount"] = remaining_risk
 
-            elif (not trade.get("breakeven")) and progress >= effective_be_trigger:
-                # Breakeven without partial (use effective_be_trigger)
-                be_buffer = 0.002
-                if t_type == "LONG":
-                    be_sl = entry * (1 + be_buffer)
-                else:
-                    be_sl = entry * (1 - be_buffer)
-                self.open_trades[trade_idx]["sl"] = be_sl
-                self.open_trades[trade_idx]["breakeven"] = True
-                append_trade_event(self.open_trades[trade_idx], "BE_SET", candle_time_utc, be_sl)
+        # Breakeven without partial (only if partial not just taken and BE not set)
+        if in_profit and (not trade.get("breakeven")) and progress >= effective_be_trigger:
+            # Breakeven without partial (use effective_be_trigger)
+            be_buffer = 0.002
+            if t_type == "LONG":
+                be_sl = entry * (1 + be_buffer)
+            else:
+                be_sl = entry * (1 - be_buffer)
+            self.open_trades[trade_idx]["sl"] = be_sl
+            self.open_trades[trade_idx]["breakeven"] = True
+            append_trade_event(self.open_trades[trade_idx], "BE_SET", candle_time_utc, be_sl)
 
         # === AŞAMA 7: Trailing BE to Partial koruması ===
         # Move BE from entry to partial price when 90% progress reached
@@ -701,32 +902,43 @@ class BaseTradeManager(ABC):
             r_multiple: Trade R-multiple (optional)
             trade_time: Time of trade close (for backtest weekly tracking)
         """
-        key = (sym, tf)
+        # THREAD SAFETY: Protect circuit breaker state updates
+        with self._circuit_breaker_lock:
+            key = (sym, tf)
 
-        # Initialize tracker if needed
-        if key not in self._stream_pnl_tracker:
-            self._stream_pnl_tracker[key] = {
-                "cumulative_pnl": 0.0,
-                "peak_pnl": 0.0,
-                "trades": 0,
-                "r_multiples": [],
-            }
+            # Initialize tracker if needed
+            if key not in self._stream_pnl_tracker:
+                self._stream_pnl_tracker[key] = {
+                    "cumulative_pnl": 0.0,
+                    "peak_pnl": 0.0,
+                    "trades": 0,
+                    "r_multiples": [],
+                    "consecutive_full_stops": 0,  # v42.x: Track consecutive full stops
+                }
 
-        tracker = self._stream_pnl_tracker[key]
-        tracker["cumulative_pnl"] += pnl
-        tracker["trades"] += 1
-        tracker["peak_pnl"] = max(tracker["peak_pnl"], tracker["cumulative_pnl"])
+            tracker = self._stream_pnl_tracker[key]
+            tracker["cumulative_pnl"] += pnl
+            tracker["trades"] += 1
+            tracker["peak_pnl"] = max(tracker["peak_pnl"], tracker["cumulative_pnl"])
 
-        if r_multiple is not None:
-            tracker["r_multiples"].append(r_multiple)
+            if r_multiple is not None:
+                tracker["r_multiples"].append(r_multiple)
 
-        # Update global tracking
-        self._global_cumulative_pnl += pnl
-        self._global_peak_pnl = max(self._global_peak_pnl, self._global_cumulative_pnl)
+                # === v42.x: Full stop tracking ===
+                # A "full stop" is R <= -0.95 (trade hit SL for nearly full loss)
+                if r_multiple <= -0.95:
+                    tracker["consecutive_full_stops"] = tracker.get("consecutive_full_stops", 0) + 1
+                else:
+                    # Any non-full-stop resets the counter
+                    tracker["consecutive_full_stops"] = 0
 
-        # Update weekly tracking (v40.4)
-        self._check_and_reset_week(trade_time)
-        self._global_weekly_pnl += pnl
+            # Update global tracking
+            self._global_cumulative_pnl += pnl
+            self._global_peak_pnl = max(self._global_peak_pnl, self._global_cumulative_pnl)
+
+            # Update weekly tracking (v40.4)
+            self._check_and_reset_week(trade_time)
+            self._global_weekly_pnl += pnl
 
     def check_stream_circuit_breaker(self, sym: str, tf: str) -> Tuple[bool, Optional[str]]:
         """Check if stream circuit breaker should trigger.
@@ -774,7 +986,16 @@ class BaseTradeManager(ABC):
                 self._kill_stream(key, reason, tracker)
                 return True, reason
 
-        # Check 3: Rolling E[R] check
+        # Check 3: Consecutive full stops (v42.x)
+        # Kill stream after N consecutive full SL hits (R <= -0.95)
+        max_full_stops = CIRCUIT_BREAKER_CONFIG.get("max_full_stops", 2)
+        consecutive_full_stops = tracker.get("consecutive_full_stops", 0)
+        if consecutive_full_stops >= max_full_stops:
+            reason = f"consecutive_full_stops ({consecutive_full_stops} >= {max_full_stops})"
+            self._kill_stream(key, reason, tracker)
+            return True, reason
+
+        # Check 4: Rolling E[R] check
         if ROLLING_ER_CONFIG.get("enabled", True):
             r_multiples = tracker.get("r_multiples", [])
             min_trades_er = ROLLING_ER_CONFIG.get("min_trades_before_check", 10)
@@ -864,6 +1085,87 @@ class BaseTradeManager(ABC):
             "current_week_start": self._current_week_start.isoformat() if self._current_week_start else None,
         }
 
+    def reset_circuit_breaker(self, force: bool = False) -> None:
+        """Reset circuit breaker state.
+
+        For rolling window backtests, each window should start with clean
+        circuit breaker state. However, in live trading, circuit breaker
+        should NOT be reset automatically.
+
+        Args:
+            force: If True, reset even in live mode (USE WITH CAUTION).
+                   Only use this for testing or explicit manual reset.
+
+        Safety:
+            - SimTradeManager (backtest): Always safe to reset
+            - TradeManager (live): Requires force=True to prevent accidental resets
+        """
+        # Safety check: Prevent accidental reset in live mode
+        # SimTradeManager is for backtesting, so reset is safe
+        # For base class or live subclass, require force=True
+        if not force and not isinstance(self, SimTradeManager):
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "Attempted circuit breaker reset in non-simulation mode - BLOCKED. "
+                "Use force=True if this is intentional."
+            )
+            return
+
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info("Resetting circuit breaker state (force=%s)", force)
+
+        self._stream_pnl_tracker.clear()
+        self._circuit_breaker_killed.clear()
+        self._global_cumulative_pnl = 0.0
+        self._global_peak_pnl = 0.0
+        self._global_weekly_pnl = 0.0
+        self._current_week_start = None
+
+    def get_exit_profile_stats(self) -> Dict:
+        """Get exit profile and SL widening statistics (v42.x).
+
+        Returns:
+            Dict with profile breakdown and SL widening counts
+        """
+        all_trades = self.history + self.open_trades
+
+        # Profile breakdown
+        profile_counts = {"clip": 0, "runner": 0, "unknown": 0}
+        profile_pnl = {"clip": 0.0, "runner": 0.0, "unknown": 0.0}
+
+        # SL widening stats
+        sl_widened_count = 0
+        sl_widened_wins = 0
+        sl_widened_losses = 0
+
+        for trade in all_trades:
+            # Profile stats
+            profile = trade.get("exit_profile", "unknown")
+            if profile not in profile_counts:
+                profile = "unknown"
+            profile_counts[profile] += 1
+            profile_pnl[profile] += float(trade.get("pnl", 0))
+
+            # SL widening stats
+            if trade.get("sl_widened"):
+                sl_widened_count += 1
+                pnl = float(trade.get("pnl", 0))
+                if pnl > 0:
+                    sl_widened_wins += 1
+                elif pnl < 0:
+                    sl_widened_losses += 1
+
+        return {
+            "profile_counts": profile_counts,
+            "profile_pnl": profile_pnl,
+            "sl_widened_total": sl_widened_count,
+            "sl_widened_wins": sl_widened_wins,
+            "sl_widened_losses": sl_widened_losses,
+            "total_trades": len(all_trades),
+        }
+
     @abstractmethod
     def open_trade(self, trade_data: dict) -> bool:
         """
@@ -889,6 +1191,7 @@ class BaseTradeManager(ABC):
         candle_time_utc=None,
         pb_top: float = None,
         pb_bot: float = None,
+        candle_data: dict = None,
     ) -> List[Dict]:
         """
         Update all open trades for a symbol/timeframe.
@@ -902,6 +1205,7 @@ class BaseTradeManager(ABC):
             candle_time_utc: Candle time (UTC)
             pb_top: PBEMA cloud top
             pb_bot: PBEMA cloud bottom
+            candle_data: Dict with additional candle data (AlphaTrend indicators, etc.)
 
         Returns:
             List of closed trades
@@ -925,19 +1229,30 @@ class SimTradeManager(BaseTradeManager):
         tf = trade_data["timeframe"]
         sym = trade_data["symbol"]
 
-        # Circuit breaker kontrolü - tek noktadan garanti (defense in depth)
-        # Bu kontrol, sinyal tarafında atlanmış olsa bile trade'in açılmasını engeller
-        if self.is_stream_killed(sym, tf):
-            return False
+        # ==========================================
+        # ATOMIC CIRCUIT BREAKER CHECK (v44.x)
+        # ==========================================
+        # CRITICAL: Lock protects against race condition where two threads
+        # could both pass is_stream_killed() before either marks the stream as active.
+        # This ensures check-and-update is atomic in multi-threaded environments.
+        with self._circuit_breaker_lock:
+            # Circuit breaker check - defense in depth
+            # This guarantees no trade opens even if signal-side check was bypassed
+            if self.is_stream_killed(sym, tf):
+                return False
 
-        cooldown_ref_time = trade_data.get("open_time_utc") or utcnow()
-        if self.check_cooldown(sym, tf, cooldown_ref_time):
-            return False
+            # Early validation checks (inside lock for atomicity)
+            cooldown_ref_time = trade_data.get("open_time_utc") or utcnow()
+            if self.check_cooldown(sym, tf, cooldown_ref_time):
+                return False
 
-        # Check for existing open position
-        if any(t.get("symbol") == sym and t.get("timeframe") == tf
-               for t in self.open_trades):
-            return False
+            # Check for existing open position on this stream
+            if any(t.get("symbol") == sym and t.get("timeframe") == tf
+                   for t in self.open_trades):
+                return False
+
+            # Mark stream as active by proceeding with trade opening
+            # (The actual trade opening continues outside the lock for performance)
 
         setup_type = trade_data.get("setup", "Unknown")
 
@@ -954,23 +1269,48 @@ class SimTradeManager(BaseTradeManager):
         opt_rr = config_snapshot.get("rr", 3.0)
         opt_rsi = config_snapshot.get("rsi", 60)
 
-        # Partial TP parametreleri
-        partial_trigger = config_snapshot.get("partial_trigger", 0.65)
-        partial_fraction = config_snapshot.get("partial_fraction", 0.33)
+        # === EXIT PROFILE SYSTEM ===
+        # Derive effective exit params from exit_profile setting
+        # This replaces individual partial_trigger/partial_fraction extraction
+        trade_rr = opt_rr  # RR from config for profile adjustment
+        exit_params = derive_exit_profile_params(config_snapshot, trade_rr)
+
+        exit_profile = exit_params["exit_profile"]
+        partial_trigger = exit_params["partial_trigger"]
+        partial_fraction = exit_params["partial_fraction"]
         partial_rr_adjustment = config_snapshot.get("partial_rr_adjustment", True)
         partial_rr_high_threshold = config_snapshot.get("partial_rr_high_threshold", 1.8)
-        partial_rr_high_trigger = config_snapshot.get("partial_rr_high_trigger", 0.75)
+        partial_rr_high_trigger = exit_params["rr_high_trigger"]
         partial_rr_low_threshold = config_snapshot.get("partial_rr_low_threshold", 1.2)
-        partial_rr_low_trigger = config_snapshot.get("partial_rr_low_trigger", 0.55)
+        partial_rr_low_trigger = exit_params["rr_low_trigger"]
 
-        # Dynamic TP parametreleri
-        dynamic_tp_only_after_partial = config_snapshot.get("dynamic_tp_only_after_partial", True)
+        # Dynamic TP parametreleri (profile-dependent)
+        dynamic_tp_only_after_partial = exit_params["dynamic_tp_only_after_partial"]
+        dynamic_tp_clamp_mode = exit_params["dynamic_tp_clamp_mode"]
         dynamic_tp_min_distance = config_snapshot.get("dynamic_tp_min_distance", 0.004)
+
+        # === MOMENTUM TP EXTENSION (v1.2) ===
+        momentum_tp_extension = config_snapshot.get("momentum_tp_extension", False)
+        momentum_extension_threshold = config_snapshot.get("momentum_extension_threshold", 0.80)
+        momentum_extension_multiplier = config_snapshot.get("momentum_extension_multiplier", 1.5)
+
+        # === PROGRESSIVE PARTIAL TP (v1.3) ===
+        use_progressive_partial = config_snapshot.get("use_progressive_partial", False)
+        partial_tranches = config_snapshot.get("partial_tranches", [])
+        progressive_be_after_tranche = config_snapshot.get("progressive_be_after_tranche", 0)
 
         # Confidence-based risk multiplier
         # Backward compat: eski JSON'larda _confidence olabilir
         confidence_level = config_snapshot.get("confidence") or config_snapshot.get("_confidence", "high")
         risk_multiplier = CONFIDENCE_RISK_MULTIPLIER.get(confidence_level, 1.0)
+
+        # NOTE: Per-trade regime multiplier disabled (v43)
+        # Testing showed ADX at signal time doesn't correlate with window-level regime losses.
+        # The SSL_Flow strategy naturally fires signals in higher ADX conditions.
+        # Future work: Consider window-level BTC regime filtering instead.
+        # regime_multiplier = float(trade_data.get("regime_multiplier", 1.0))
+        # risk_multiplier *= regime_multiplier
+
         if risk_multiplier <= 0:
             return False
 
@@ -989,11 +1329,72 @@ class SimTradeManager(BaseTradeManager):
             return False
 
         risk_amount = self.wallet_balance * effective_risk_pct
-        position_size, position_notional, required_margin, risk_amount = \
-            self._calculate_position_size(real_entry, sl_price, risk_amount)
+        tp_price = float(trade_data["tp"])
+
+        # === MIN SL DISTANCE VALIDATION ===
+        # Validate SL distance and widen if too tight (noise filter)
+        # This prevents getting stopped out by market noise
+        validated_sl, validated_tp, position_size, position_notional, required_margin, skip_reason = \
+            validate_and_adjust_sl(
+                symbol=sym,
+                entry=real_entry,
+                sl=sl_price,
+                tp=tp_price,
+                trade_type=trade_type,
+                config=config_snapshot,
+                risk_amount=risk_amount,
+                leverage=self.leverage,
+            )
+
+        if skip_reason:
+            # Handle validation failures
+            if skip_reason == "SL_EQUAL_ENTRY":
+                # Critical: SL equals entry - cannot size position
+                # This should never happen if signal generation is correct
+                self.logger.error(
+                    "Trade REJECTED: SL equals Entry! Symbol=%s, TF=%s, Entry=%.8f, SL=%.8f. "
+                    "Signal generation bug detected.",
+                    sym, tf, real_entry, sl_price
+                )
+            elif skip_reason == "SL_TOO_TIGHT_REJECTED":
+                # SL distance below minimum threshold and sl_validation_mode="reject"
+                self.logger.warning(
+                    "Trade REJECTED: SL too tight. Symbol=%s, TF=%s, Entry=%.8f, SL=%.8f",
+                    sym, tf, real_entry, sl_price
+                )
+            return False
 
         if position_size <= 0:
+            # Defensive: should not happen after skip_reason check
+            self.logger.warning(
+                "Trade REJECTED: position_size <= 0. Symbol=%s, TF=%s, size=%.8f",
+                sym, tf, position_size
+            )
             return False
+
+        # === SL WIDENING TRACKING (v42.x) ===
+        original_sl = float(trade_data["sl"])
+        sl_was_widened = abs(validated_sl - original_sl) > 1e-8  # Float comparison tolerance
+
+        # Use validated SL (may have been widened)
+        sl_price = validated_sl
+
+        # === TP/SL DIRECTION VALIDATION ===
+        # Critical: Ensure TP and SL are on correct sides of entry
+        # Without this check, trades can get stuck if TP is unreachable
+        # This mirrors the dynamic TP direction check at lines 385-390
+        if trade_type == "LONG":
+            # LONG: TP must be above entry, SL must be below entry
+            if tp_price <= real_entry:
+                return False
+            if sl_price >= real_entry:
+                return False
+        elif trade_type == "SHORT":
+            # SHORT: TP must be below entry, SL must be above entry
+            if tp_price >= real_entry:
+                return False
+            if sl_price <= real_entry:
+                return False
 
         # Format open time
         open_time_val = trade_data.get("open_time_utc") or utcnow()
@@ -1044,6 +1445,23 @@ class SimTradeManager(BaseTradeManager):
             # Dynamic TP parametreleri (AŞAMA 6)
             "dynamic_tp_only_after_partial": dynamic_tp_only_after_partial,
             "dynamic_tp_min_distance": dynamic_tp_min_distance,
+            # Exit profile system (v42.x)
+            "exit_profile": exit_profile,
+            "dynamic_tp_clamp_mode": dynamic_tp_clamp_mode,
+            # SL widening tracking (v42.x)
+            "sl_widened": sl_was_widened,
+            "original_sl": original_sl if sl_was_widened else None,
+            # === MOMENTUM TP EXTENSION (v1.2) ===
+            "momentum_tp_extension": momentum_tp_extension,
+            "momentum_extension_threshold": momentum_extension_threshold,
+            "momentum_extension_multiplier": momentum_extension_multiplier,
+            # === PROGRESSIVE PARTIAL TP (v1.3) ===
+            "use_progressive_partial": use_progressive_partial,
+            "partial_tranches": partial_tranches,
+            "progressive_be_after_tranche": progressive_be_after_tranche,
+            "partials_taken_count": 0,  # Track number of partials taken
+            # Config snapshot for source tracking (bootstrap, carry_forward, etc.)
+            "config_snapshot": config_snapshot,
         }
 
         self.wallet_balance -= required_margin
@@ -1062,6 +1480,7 @@ class SimTradeManager(BaseTradeManager):
         candle_time_utc=None,
         pb_top: float = None,
         pb_bot: float = None,
+        candle_data: dict = None,
     ) -> List[Dict]:
         """Update trades for backtesting."""
         if candle_time_utc is None:
@@ -1076,7 +1495,7 @@ class SimTradeManager(BaseTradeManager):
 
             closed_trade = self._process_trade_update(
                 i, candle_high, candle_low, candle_close,
-                candle_time_utc, pb_top, pb_bot
+                candle_time_utc, pb_top, pb_bot, candle_data
             )
 
             if closed_trade:

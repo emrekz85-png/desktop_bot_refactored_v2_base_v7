@@ -208,8 +208,9 @@ def run_rolling_walkforward_optimized(
             buffer_days=buffer_days,
         )
 
+        # M3 Performance: 6 IO workers (network-bound, avoid thermal throttling)
         loaded_count = master_cache.load_all(
-            max_workers=max_workers or min(10, os.cpu_count() or 4),
+            max_workers=max_workers or min(6, os.cpu_count() or 4),
             progress_callback=lambda l, t: log(f"   Loading: {l}/{t}") if l % 5 == 0 else None
         )
         log(f"   Loaded {loaded_count} streams")
@@ -223,10 +224,11 @@ def run_rolling_walkforward_optimized(
                     all_streams[(sym, tf)] = df
     else:
         # Fallback: fetch all data once without caching
+        # M3 Performance: 6 IO workers (network-bound, avoid thermal throttling)
         log(f"Fetching all data (no cache)...")
         all_streams = _fetch_all_data(
             symbols, timeframes, fetch_start, end_date,
-            max_workers=max_workers or 10
+            max_workers=max_workers or 6
         )
         log(f"   Loaded {len(all_streams)} streams")
 
@@ -988,7 +990,7 @@ def _fetch_all_data(
     timeframes: List[str],
     start_date: str,
     end_date: str,
-    max_workers: int = 10
+    max_workers: int = 10  # Max parallel workers for data fetching
 ) -> Dict:
     """Fetch all data in parallel (fallback when not using master cache)."""
     streams = {}

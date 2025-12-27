@@ -13,6 +13,11 @@ import pandas as pd
 import numpy as np
 from typing import Optional
 
+from .logging_config import get_logger
+
+# Module logger
+_logger = get_logger(__name__)
+
 # Lazy import for pandas_ta (heavy library ~5-10s import time)
 _ta = None
 
@@ -152,10 +157,27 @@ def calculate_alphatrend(
         equal_mask = df['at_buyers'] == df['at_sellers']
 
         if equal_mask.any():
-            # Use shift(1) vs shift(3) for equal cases (matches TradingView)
-            prev_comparison = df['alphatrend'].shift(1) > df['alphatrend'].shift(3)
-            df.loc[equal_mask, 'at_buyers_dominant'] = prev_comparison[equal_mask].fillna(False)
-            df.loc[equal_mask, 'at_sellers_dominant'] = (~prev_comparison[equal_mask]).fillna(False)
+            _logger.debug("AlphaTrend equality detected on %d bars", equal_mask.sum())
+
+            # DÜZELTME: shift(3) için minimum 4 bar gerekli
+            # İlk 3 bar için equality check'i atla (veri yetersiz)
+            min_required_bars = 4
+            valid_idx = pd.Series(False, index=df.index)
+            if len(df) >= min_required_bars:
+                valid_idx.iloc[min_required_bars - 1:] = True
+
+            equal_and_valid = equal_mask & valid_idx
+
+            if equal_and_valid.any():
+                prev_comparison = df['alphatrend'].shift(1) > df['alphatrend'].shift(3)
+                df.loc[equal_and_valid, 'at_buyers_dominant'] = prev_comparison[equal_and_valid]
+                df.loc[equal_and_valid, 'at_sellers_dominant'] = ~prev_comparison[equal_and_valid]
+
+            # İlk 3 bar için equality durumunda default değer ata (neutral = False, False)
+            early_equal = equal_mask & ~valid_idx
+            if early_equal.any():
+                df.loc[early_equal, 'at_buyers_dominant'] = False
+                df.loc[early_equal, 'at_sellers_dominant'] = False
 
         # Flat/no-flow detection
         # If alphatrend line hasn't moved significantly, market is flat
@@ -174,7 +196,7 @@ def calculate_alphatrend(
 
     except Exception as e:
         # Fallback: set basic columns to prevent errors
-        print(f"AlphaTrend hesaplama hatası: {e}")
+        _logger.error("AlphaTrend calculation error: %s", e)
         df['alphatrend'] = df['close']
         df['alphatrend_2'] = df['close'].shift(2)
         # at_buyers = blue line (alphatrend), at_sellers = red line (alphatrend_2)
@@ -185,14 +207,26 @@ def calculate_alphatrend(
         # Handle equality case in fallback too
         equal_mask = df['at_buyers'] == df['at_sellers']
         if equal_mask.any():
-            prev_comparison = df['alphatrend'].shift(1) > df['alphatrend'].shift(3)
-            df.loc[equal_mask, 'at_buyers_dominant'] = prev_comparison[equal_mask].fillna(False)
-            df.loc[equal_mask, 'at_sellers_dominant'] = (~prev_comparison[equal_mask]).fillna(False)
+            min_required_bars = 4
+            valid_idx = pd.Series(False, index=df.index)
+            if len(df) >= min_required_bars:
+                valid_idx.iloc[min_required_bars - 1:] = True
+
+            equal_and_valid = equal_mask & valid_idx
+            if equal_and_valid.any():
+                prev_comparison = df['alphatrend'].shift(1) > df['alphatrend'].shift(3)
+                df.loc[equal_and_valid, 'at_buyers_dominant'] = prev_comparison[equal_and_valid]
+                df.loc[equal_and_valid, 'at_sellers_dominant'] = ~prev_comparison[equal_and_valid]
+
+            early_equal = equal_mask & ~valid_idx
+            if early_equal.any():
+                df.loc[early_equal, 'at_buyers_dominant'] = False
+                df.loc[early_equal, 'at_sellers_dominant'] = False
         df['at_is_flat'] = False
         return df
 
 
-def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
+def calculate_indicators(df: pd.DataFrame, timeframe: str = None) -> pd.DataFrame:
     """
     Calculate all technical indicators for trading strategies.
 
@@ -202,7 +236,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     - PBEMA Cloud (EMA 200): pb_ema_top, pb_ema_bot (for Keltner Bounce)
     - PBEMA Cloud (EMA 150): pb_ema_top_150, pb_ema_bot_150 (for PBEMA Reaction)
     - Slope: Rate of change for EMA levels
-    - SSL Baseline: HMA(60)
+    - SSL Baseline: HMA(TF-adaptive) - v1.7.1
     - Keltner Channels: baseline +/- EMA(TR) * 0.2
     - AlphaTrend: Optional trend filter
 
@@ -211,6 +245,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
     Args:
         df: DataFrame with OHLCV data (timestamp, open, high, low, close, volume)
+        timeframe: Optional timeframe string (e.g., "5m", "15m", "1h") for TF-adaptive lookbacks
 
     Returns:
         DataFrame with indicator columns added
@@ -227,7 +262,10 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     adx_res = ta.adx(df["high"], df["low"], df["close"], length=14)
     df["adx"] = adx_res["ADX_14"] if adx_res is not None and "ADX_14" in adx_res.columns else 0.0
 
-    # PBEMA Cloud (EMA 200) - for Keltner Bounce strategy
+    # EMA15 - Fast momentum indicator for Momentum TP Extension (v1.5)
+    df["ema15"] = ta.ema(df["close"], length=15)
+
+    # PBEMA Cloud (EMA 200) - for SSL Flow / Keltner Bounce strategy
     df["pb_ema_top"] = ta.ema(df["high"], length=200)
     df["pb_ema_bot"] = ta.ema(df["close"], length=200)
 
@@ -243,12 +281,27 @@ def calculate_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["slope_top_150"] = (df["pb_ema_top_150"].diff(5) / df["pb_ema_top_150"]) * 1000
     df["slope_bot_150"] = (df["pb_ema_bot_150"].diff(5) / df["pb_ema_bot_150"]) * 1000
 
-    # SSL Baseline (HMA 60) and Keltner Channels
-    df["baseline"] = ta.hma(df["close"], length=60)
+    # === TF-ADAPTIVE SSL BASELINE (v1.7.1) ===
+    # Shorter lookback for higher TFs (faster response to larger moves)
+    # Longer lookback for lower TFs (more noise filtering)
+    TF_HMA_LOOKBACK = {
+        "5m": 75,   # More smoothing for noisy 5m
+        "15m": 60,  # Standard (current baseline)
+        "30m": 55,  # Slightly shorter
+        "1h": 45,   # Faster response for 1h
+        "4h": 40,   # Even faster for 4h
+    }
+    hma_length = TF_HMA_LOOKBACK.get(timeframe, 60)  # Default to 60 if unknown
+
+    # SSL Baseline (HMA with TF-adaptive length) and Keltner Channels
+    df["baseline"] = ta.hma(df["close"], length=hma_length)
     tr = ta.true_range(df["high"], df["low"], df["close"])
-    range_ma = ta.ema(tr, length=60)
+    range_ma = ta.ema(tr, length=hma_length)
     df["keltner_upper"] = df["baseline"] + range_ma * 0.2
     df["keltner_lower"] = df["baseline"] - range_ma * 0.2
+
+    # ATR for volatility-based regime detection
+    df["atr"] = ta.sma(tr, length=14)
 
     # AlphaTrend (for optional trend filtering)
     df = calculate_alphatrend(df, coeff=1, ap=14)
@@ -380,3 +433,214 @@ def check_wick_rejection(
         'long_rejection': lower_wick_ratio >= min_wick_ratio,
         'short_rejection': upper_wick_ratio >= min_wick_ratio,
     }
+
+
+# ==========================================
+# MARKET REGIME DETECTION
+# ==========================================
+
+def detect_regime(
+    df: pd.DataFrame,
+    adx_trending_threshold: float = 25.0,
+    adx_ranging_threshold: float = 20.0,
+    atr_volatile_percentile: float = 0.80,
+    atr_lookback: int = 100,
+    index: int = -1
+) -> dict:
+    """
+    Detect market regime based on ADX and ATR.
+
+    3 Regimes:
+    - TRENDING: ADX > 25, clear directional movement
+    - VOLATILE: ATR percentile > 80%, choppy/explosive moves
+    - RANGING: ADX < 20, low volatility consolidation
+
+    Args:
+        df: DataFrame with OHLCV data (must have 'adx' column or will calculate)
+        adx_trending_threshold: ADX above this = trending (default: 25)
+        adx_ranging_threshold: ADX below this = ranging (default: 20)
+        atr_volatile_percentile: ATR percentile above this = volatile (default: 0.80)
+        atr_lookback: Lookback period for ATR percentile (default: 100)
+        index: Row index to check (default: -1 = last row)
+
+    Returns:
+        Dict with:
+        - regime: "TRENDING", "VOLATILE", or "RANGING"
+        - adx: Current ADX value
+        - atr_percentile: Current ATR percentile (0-1)
+        - details: Human-readable description
+    """
+    if df is None or len(df) < atr_lookback:
+        return {
+            "regime": "UNKNOWN",
+            "adx": None,
+            "atr_percentile": None,
+            "details": "Insufficient data"
+        }
+
+    ta = _get_ta()
+
+    # Get or calculate ADX
+    if "adx" in df.columns:
+        adx_value = df["adx"].iloc[index]
+    else:
+        adx_res = ta.adx(df["high"], df["low"], df["close"], length=14)
+        if adx_res is not None and "ADX_14" in adx_res.columns:
+            adx_value = adx_res["ADX_14"].iloc[index]
+        else:
+            adx_value = 0.0
+
+    # Calculate ATR and its percentile
+    tr = ta.true_range(df["high"], df["low"], df["close"])
+    atr = ta.sma(tr, length=14)
+
+    # ATR percentile over lookback period
+    atr_pct_series = atr.rolling(atr_lookback).apply(
+        lambda x: (x.iloc[-1] - x.min()) / (x.max() - x.min()) if x.max() > x.min() else 0.5,
+        raw=False
+    )
+    atr_percentile = atr_pct_series.iloc[index] if not pd.isna(atr_pct_series.iloc[index]) else 0.5
+
+    # Classify regime
+    if adx_value > adx_trending_threshold:
+        regime = "TRENDING"
+        details = f"Strong trend (ADX={adx_value:.1f})"
+    elif atr_percentile > atr_volatile_percentile:
+        regime = "VOLATILE"
+        details = f"High volatility (ATR pct={atr_percentile:.2f})"
+    elif adx_value < adx_ranging_threshold:
+        regime = "RANGING"
+        details = f"Consolidation (ADX={adx_value:.1f})"
+    else:
+        regime = "TRANSITIONAL"
+        details = f"Between regimes (ADX={adx_value:.1f}, ATR pct={atr_percentile:.2f})"
+
+    return {
+        "regime": regime,
+        "adx": float(adx_value) if not pd.isna(adx_value) else None,
+        "atr_percentile": float(atr_percentile) if not pd.isna(atr_percentile) else None,
+        "details": details
+    }
+
+
+def add_regime_column(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add regime classification column to DataFrame.
+
+    Adds 'regime' column with values: TRENDING, VOLATILE, RANGING, TRANSITIONAL
+
+    Args:
+        df: DataFrame with OHLCV and indicator data
+
+    Returns:
+        DataFrame with 'regime' column added
+    """
+    if df is None or df.empty:
+        return df
+
+    ta = _get_ta()
+
+    # Ensure ADX exists
+    if "adx" not in df.columns:
+        adx_res = ta.adx(df["high"], df["low"], df["close"], length=14)
+        df["adx"] = adx_res["ADX_14"] if adx_res is not None and "ADX_14" in adx_res.columns else 0.0
+
+    # Calculate ATR
+    tr = ta.true_range(df["high"], df["low"], df["close"])
+    atr = ta.sma(tr, length=14)
+
+    # ATR percentile (rolling rank)
+    atr_percentile = atr.rolling(100, min_periods=20).apply(
+        lambda x: (x.iloc[-1] - x.min()) / (x.max() - x.min()) if x.max() > x.min() else 0.5,
+        raw=False
+    )
+
+    # Vectorized regime classification
+    conditions = [
+        df["adx"] > 25,  # TRENDING
+        atr_percentile > 0.80,  # VOLATILE
+        df["adx"] < 20,  # RANGING
+    ]
+    choices = ["TRENDING", "VOLATILE", "RANGING"]
+
+    df["regime"] = np.select(conditions, choices, default="TRANSITIONAL")
+
+    return df
+
+
+def get_regime_multiplier(
+    df: pd.DataFrame,
+    adx_trending_threshold: float = 20.0,  # v43: Lowered to avoid TRANSITIONAL zone
+    adx_ranging_threshold: float = 20.0,   # v43: Same as trending (no TRANSITIONAL)
+    atr_extreme_ratio: float = 2.0,
+    atr_high_ratio: float = 1.5,
+    atr_lookback: int = 100,
+    index: int = -1
+) -> float:
+    """
+    Get risk multiplier based on market regime (ADX + ATR).
+
+    This implements a dual-filter approach:
+    - ADX determines trend strength (TRENDING vs RANGING)
+    - ATR ratio detects volatility spikes
+
+    Decision Matrix:
+    | Regime       | ADX   | ATR Ratio | Multiplier |
+    |--------------|-------|-----------|------------|
+    | TRENDING     | >25   | Normal    | 1.0        |
+    | TRENDING     | >25   | >2.0      | 0.5        |
+    | RANGING      | <20   | Any       | 0.0        |
+    | TRANSITIONAL | 20-25 | Normal    | 0.5        |
+    | TRANSITIONAL | 20-25 | >1.5      | 0.25       |
+
+    Args:
+        df: DataFrame with 'adx' and 'atr' columns
+        adx_trending_threshold: ADX above this = trending (default: 25)
+        adx_ranging_threshold: ADX below this = ranging (default: 20)
+        atr_extreme_ratio: ATR ratio above this = extreme volatility (default: 2.0)
+        atr_high_ratio: ATR ratio above this = high volatility (default: 1.5)
+        atr_lookback: Lookback period for ATR average (default: 100)
+        index: Row index to check (default: -1 = last row)
+
+    Returns:
+        Risk multiplier (0.0 to 1.0)
+    """
+    if df is None or len(df) < atr_lookback:
+        return 1.0  # Default to full risk if insufficient data
+
+    # Get ADX value
+    if "adx" not in df.columns:
+        return 1.0  # No ADX = assume full risk
+
+    adx = df["adx"].iloc[index]
+    if pd.isna(adx):
+        return 1.0
+
+    # Calculate ATR ratio (current vs average)
+    if "atr" not in df.columns:
+        atr_ratio = 1.0
+    else:
+        atr_current = df["atr"].iloc[index]
+        atr_avg = df["atr"].rolling(atr_lookback, min_periods=20).mean().iloc[index]
+
+        if pd.isna(atr_current) or pd.isna(atr_avg) or atr_avg <= 0:
+            atr_ratio = 1.0
+        else:
+            atr_ratio = atr_current / atr_avg
+
+    # Decision matrix
+    if adx > adx_trending_threshold:
+        # TRENDING - full risk (unless extreme volatility)
+        if atr_ratio > atr_extreme_ratio:
+            return 0.5  # Extreme vol in trend = reduce
+        return 1.0
+
+    elif adx < adx_ranging_threshold:
+        # RANGING - skip trades (our weakness based on backtest!)
+        return 0.0
+
+    else:
+        # TRANSITIONAL (between thresholds) - half risk
+        if atr_ratio > atr_high_ratio:
+            return 0.25  # High vol + weak trend = minimal
+        return 0.5

@@ -680,7 +680,11 @@ def _optimize_backtest_configs(
     completed = 0
     next_progress = 5
 
-    max_workers = max(1, (os.cpu_count() or 1) - 1)
+    # M3 Performance: Use 3 workers (P-cores only, avoid E-cores for CPU-bound work)
+    # M3 has 4 Performance + 4 Efficiency cores
+    # Use all available cores minus one for the main thread
+    cpu_count = os.cpu_count() or 4
+    max_workers = max(1, cpu_count - 1)
     wf_status = "Açık" if walk_forward_enabled else "Kapalı"
     quick_icon = "⚡" if quick_mode else ""
 

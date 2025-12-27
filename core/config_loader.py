@@ -15,7 +15,13 @@ from .config import (
     DATA_DIR, TRADING_CONFIG,
     # Strategy configs from central location (single source of truth)
     DEFAULT_STRATEGY_CONFIG, SYMBOL_PARAMS,
+    # Thread safety lock for config cache
+    _BEST_CONFIG_LOCK,
 )
+from .logging_config import get_logger
+
+# Module logger
+_logger = get_logger(__name__)
 
 
 def _strategy_signature() -> str:
@@ -63,15 +69,15 @@ def _is_best_config_signature_valid(best_cfgs: dict) -> bool:
         # Only warn if there are actual configs but no signature (old format)
         has_any_config = any(k != "_meta" for k in best_cfgs.keys())
         if has_any_config and not BEST_CONFIG_WARNING_FLAGS.get("missing_signature", False):
-            print("[CFG] Warning: No saved backtest signature found. Best configs will be ignored.")
+            _logger.warning("No saved backtest signature found. Best configs will be ignored.")
             BEST_CONFIG_WARNING_FLAGS["missing_signature"] = True
         return False
 
     current_sig = _strategy_signature()
     if stored_sig != current_sig:
         if not BEST_CONFIG_WARNING_FLAGS.get("signature_mismatch", False):
-            print(
-                "[CFG] Warning: Backtest config signature doesn't match current strategy. "
+            _logger.warning(
+                "Backtest config signature doesn't match current strategy. "
                 "Using default configs; please re-run backtest."
             )
             BEST_CONFIG_WARNING_FLAGS["signature_mismatch"] = True
@@ -81,33 +87,38 @@ def _is_best_config_signature_valid(best_cfgs: dict) -> bool:
 
 
 def _load_best_configs() -> dict:
-    """Load best configs from file, using cache if available."""
+    """Load best configs from file, using cache if available.
+
+    Thread-safe: Uses lock to prevent race conditions during cache access.
+    """
     global BEST_CONFIG_CACHE, BEST_CONFIG_WARNING_FLAGS
 
-    if BEST_CONFIG_CACHE:
-        return BEST_CONFIG_CACHE
+    with _BEST_CONFIG_LOCK:
+        # Check cache first (inside lock to prevent TOCTOU)
+        if BEST_CONFIG_CACHE:
+            return BEST_CONFIG_CACHE.copy()
 
-    if os.path.exists(BEST_CONFIGS_FILE):
-        try:
-            with open(BEST_CONFIGS_FILE, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-            if isinstance(raw, dict):
-                BEST_CONFIG_CACHE.clear()
-                BEST_CONFIG_CACHE.update(raw)
-                # Başarılı yükleme - hata flag'lerini sıfırla
-                BEST_CONFIG_WARNING_FLAGS["json_error"] = False
-                BEST_CONFIG_WARNING_FLAGS["load_error"] = False
-        except json.JSONDecodeError as e:
-            if not BEST_CONFIG_WARNING_FLAGS.get("json_error", False):
-                print(f"[CFG] ⚠️ Config file corrupted (JSON error): {e}")
-                print(f"[CFG] ℹ️ Delete corrupted file and re-run backtest: {BEST_CONFIGS_FILE}")
-                BEST_CONFIG_WARNING_FLAGS["json_error"] = True
-        except Exception as e:
-            if not BEST_CONFIG_WARNING_FLAGS.get("load_error", False):
-                print(f"[CFG] ⚠️ Config load error: {e}")
-                BEST_CONFIG_WARNING_FLAGS["load_error"] = True
+        if os.path.exists(BEST_CONFIGS_FILE):
+            try:
+                with open(BEST_CONFIGS_FILE, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                if isinstance(raw, dict):
+                    BEST_CONFIG_CACHE.clear()
+                    BEST_CONFIG_CACHE.update(raw)
+                    # Başarılı yükleme - hata flag'lerini sıfırla
+                    BEST_CONFIG_WARNING_FLAGS["json_error"] = False
+                    BEST_CONFIG_WARNING_FLAGS["load_error"] = False
+            except json.JSONDecodeError as e:
+                if not BEST_CONFIG_WARNING_FLAGS.get("json_error", False):
+                    _logger.error("Config file corrupted (JSON error): %s", e)
+                    _logger.info("Delete corrupted file and re-run backtest: %s", BEST_CONFIGS_FILE)
+                    BEST_CONFIG_WARNING_FLAGS["json_error"] = True
+            except Exception as e:
+                if not BEST_CONFIG_WARNING_FLAGS.get("load_error", False):
+                    _logger.error("Config load error: %s", e)
+                    BEST_CONFIG_WARNING_FLAGS["load_error"] = True
 
-    return BEST_CONFIG_CACHE
+        return BEST_CONFIG_CACHE.copy()
 
 
 def load_optimized_config(symbol: str, timeframe: str) -> dict:
@@ -153,6 +164,8 @@ def load_optimized_config(symbol: str, timeframe: str) -> dict:
 def save_best_configs(best_configs: dict):
     """
     Persist best backtest configs to disk and cache.
+
+    Thread-safe: Uses lock to prevent race conditions during cache updates.
 
     Args:
         best_configs: Dictionary of {(symbol, timeframe): config} or nested format
@@ -207,23 +220,28 @@ def save_best_configs(best_configs: dict):
 
     cleaned = _convert_to_native(cleaned)
 
-    BEST_CONFIG_CACHE.clear()
-    BEST_CONFIG_CACHE.update(cleaned)
-    # Reset all flags in-place instead of reassigning
-    BEST_CONFIG_WARNING_FLAGS["missing_signature"] = False
-    BEST_CONFIG_WARNING_FLAGS["signature_mismatch"] = False
-    BEST_CONFIG_WARNING_FLAGS["json_error"] = False
-    BEST_CONFIG_WARNING_FLAGS["load_error"] = False
+    with _BEST_CONFIG_LOCK:
+        BEST_CONFIG_CACHE.clear()
+        BEST_CONFIG_CACHE.update(cleaned)
+        # Reset all flags in-place instead of reassigning
+        BEST_CONFIG_WARNING_FLAGS["missing_signature"] = False
+        BEST_CONFIG_WARNING_FLAGS["signature_mismatch"] = False
+        BEST_CONFIG_WARNING_FLAGS["json_error"] = False
+        BEST_CONFIG_WARNING_FLAGS["load_error"] = False
 
-    try:
-        with open(BEST_CONFIGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(cleaned, f, ensure_ascii=False, indent=2)
-        print(f"[CFG] ✓ Best configs saved: {BEST_CONFIGS_FILE}")
-    except Exception as e:
-        print(f"[CFG] ⚠️ Config save error: {e}")
+        try:
+            with open(BEST_CONFIGS_FILE, "w", encoding="utf-8") as f:
+                json.dump(cleaned, f, ensure_ascii=False, indent=2)
+            _logger.info("Best configs saved: %s", BEST_CONFIGS_FILE)
+        except Exception as e:
+            _logger.error("Config save error: %s", e)
 
 
 def invalidate_config_cache():
-    """Clear the config cache to force reload from file."""
+    """Clear the config cache to force reload from file.
+
+    Thread-safe: Uses lock to prevent race conditions during cache clear.
+    """
     global BEST_CONFIG_CACHE
-    BEST_CONFIG_CACHE.clear()
+    with _BEST_CONFIG_LOCK:
+        BEST_CONFIG_CACHE.clear()
