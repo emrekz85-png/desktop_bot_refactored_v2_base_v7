@@ -147,98 +147,6 @@ def set_log_level(level: int, console: bool = True, file: bool = True):
             handler.setLevel(level)
 
 
-def log_trade_event(
-    event_type: str,
-    symbol: str,
-    timeframe: str,
-    details: dict = None,
-    level: int = logging.INFO
-):
-    """
-    Log a structured trade event.
-
-    Args:
-        event_type: Type of event (OPEN, CLOSE, SL_HIT, TP_HIT, etc.)
-        symbol: Trading symbol
-        timeframe: Timeframe
-        details: Additional details dict
-        level: Log level
-    """
-    logger = get_logger("trade_events")
-
-    msg_parts = [f"[{event_type}] {symbol}-{timeframe}"]
-
-    if details:
-        for key, value in details.items():
-            if isinstance(value, float):
-                msg_parts.append(f"{key}={value:.6f}")
-            else:
-                msg_parts.append(f"{key}={value}")
-
-    logger.log(level, " | ".join(msg_parts))
-
-
-def log_signal(
-    signal_type: str,
-    symbol: str,
-    timeframe: str,
-    entry: float,
-    tp: float,
-    sl: float,
-    reason: str = None
-):
-    """
-    Log a trading signal.
-
-    Args:
-        signal_type: LONG or SHORT
-        symbol: Trading symbol
-        timeframe: Timeframe
-        entry: Entry price
-        tp: Take profit price
-        sl: Stop loss price
-        reason: Signal generation reason
-    """
-    logger = get_logger("signals")
-
-    rr = abs(tp - entry) / abs(entry - sl) if entry != sl else 0
-
-    msg = f"[SIGNAL] {signal_type} {symbol}-{timeframe} | entry={entry:.6f} tp={tp:.6f} sl={sl:.6f} RR={rr:.2f}"
-    if reason:
-        msg += f" | reason={reason}"
-
-    logger.info(msg)
-
-
-def log_api_call(
-    endpoint: str,
-    success: bool,
-    response_time_ms: float = None,
-    error: str = None
-):
-    """
-    Log API calls for debugging and monitoring.
-
-    Args:
-        endpoint: API endpoint
-        success: Whether the call succeeded
-        response_time_ms: Response time in milliseconds
-        error: Error message if failed
-    """
-    logger = get_logger("api")
-
-    if success:
-        msg = f"[API] {endpoint} | OK"
-        if response_time_ms:
-            msg += f" | {response_time_ms:.0f}ms"
-        logger.debug(msg)
-    else:
-        msg = f"[API] {endpoint} | FAILED"
-        if error:
-            msg += f" | {error}"
-        logger.warning(msg)
-
-
 # ==========================================
 # PRINT REPLACEMENT HELPERS
 # ==========================================
@@ -261,10 +169,3 @@ def print_to_log(msg: str, level: str = "INFO"):
     }
     log_level = level_map.get(level.upper(), logging.INFO)
     logger.log(log_level, msg)
-
-
-# Convenience shorthand
-info = lambda msg: get_logger("main").info(msg)
-debug = lambda msg: get_logger("main").debug(msg)
-warning = lambda msg: get_logger("main").warning(msg)
-error = lambda msg: get_logger("main").error(msg)

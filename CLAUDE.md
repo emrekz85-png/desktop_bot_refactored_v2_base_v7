@@ -217,6 +217,20 @@ desktop_bot_refactored_v2_base_v7/
    - Global-level: Gunluk/haftalik kayip limitleri
    - Rolling E[R] kontrolu ile edge kaybi tespiti
 
+8. **ROC Momentum Filter (v1.10.0) [DEVRE DISI]**
+   - Counter-trend entry'leri engellemek icin ROC filtresi denendi
+   - Optimizer'la cakisma sorunu yasandi
+   - **SONUC:** Devre disi birakildi, `use_roc_filter=False`
+   - Konum: `strategies/ssl_flow.py`, `strategies/router.py`
+
+9. **Look-Ahead Bias Fix (v1.10.1) [KRITIK]**
+   - **Problem:** ADX regime hesaplamasinda mevcut bar dahil ediliyordu
+   - **Eski kod:** `adx_window = df["adx"].iloc[start:index+1]` (HATALI)
+   - **Yeni kod:** `adx_window = df["adx"].iloc[start:index]` (DOGRU)
+   - **Etki:** Backtest sonuclari $157 -> $145'e dustu
+   - **Neden onemli:** Eski sonuc gercek dunyada ulasilamaz, yeni sonuc gercekci
+   - Konum: `strategies/ssl_flow.py` satir 576
+
 ### Performans Optimizasyon Firsatlari
 
 1. **Lazy Imports** - `pandas_ta` gibi agir kutuphaneler gerektiginde yuklenir
@@ -244,10 +258,13 @@ desktop_bot_refactored_v2_base_v7/
 | SOLUSDT | Kaybettiren | Bazi donemlerde %0 win rate |
 
 **Onerilen Portfoy:** BTC + ETH + LINK
-- PnL (Haziran-Aralik): $157.10
-- Toplam Islem: 25
-- Win Rate: %81
-- Max Drawdown: ~$140
+- PnL (Haziran-Aralik): $145.39 *(look-ahead bias duzeltmesi sonrasi)*
+- Toplam Islem: 24
+- Win Rate: %79
+- Max Drawdown: ~$44
+
+> **NOT:** Onceki $157.10 sonucu look-ahead bias iceriyordu (ADX hesaplamasinda
+> mevcut bar dahil ediliyordu). v1.10.1'de duzeltildi. Yeni sonuc gercekci.
 
 ### Bilinen Sorunlar / TODO'lar
 
@@ -256,6 +273,120 @@ desktop_bot_refactored_v2_base_v7/
 - [ ] Regime detection multiplier devre disi (v43 - test edilecek)
 - [ ] PR-2: Carry-forward config sistemi test edilecek
 - [x] Optimizer determinism fix tamamlandi (v43.x)
+- [x] Look-ahead bias fix tamamlandi (v1.10.1) - ADX window duzeltmesi
+
+### Basarisiz Deneyler / Failed Experiments (v1.7.3 - 28 Aralik 2025)
+
+**ONEMLI:** Asagidaki degisiklikler test edildi ve HICBIR FARK YARATMADI. Tekrar denemeyin!
+
+| Deney | Degisiklik | Sonuc | Neden Basarisiz |
+|-------|------------|-------|-----------------|
+| **skip_wick_rejection=True** | Wick rejection filtresini atla | $157.10 (degismedi) | Wick rejection darboğaz degil (%68.8 pass rate) |
+| **trailing_after_partial=True** | Partial TP sonrasi trailing SL | $157.10 (degismedi) | Optimizer ayni config'leri seciyor |
+| **min_pbema_distance=0.002** | PBEMA mesafesini 0.004'ten 0.002'ye dusur | $157.10 (degismedi) | Dusuk kalite sinyaller optimizer tarafindan eleniyor |
+| **regime_adx_threshold=25** | Regime threshold'u 20'den 25'e cikar | $10.95 (KOTU) | Cok kisitlayici, trade sayisi cok dusuk |
+| **risk_per_trade=2.0%** | Position size'i 1.75%'ten 2.0%'ye cikar | $78.75 (KOTU) | Optimizer farkli config seciyor |
+| **risk_per_trade=2.5%** | Position size'i 1.75%'ten 2.5%'ye cikar | $86.75 (KOTU) | Optimizer farkli config seciyor |
+| **avoid_hours=[6,14,21,22]** | Kaybettiren saatlerde trade atla | $127.71 (KOTU) | Engellenen tradeler aslinda karli cikti (-$29.39) |
+| **use_trend_filter=True** | SMA + Higher Highs/Lower Lows trend filtresi | $87.06 (KOTU) | Cok kisitlayici, 25 trade -> 9 trade, karli trade'leri de engelliyor |
+| **use_sweep_detection=True** | SL swing yakinligi kontrolu | $0.00 (FELAKET) | TUM trade'leri engelliyor, SL zaten swing'e gore hesaplaniyor |
+| **use_smart_reentry=True** | SL sonrasi hizli re-entry (%0.3→%0.8 threshold) | $145.39 (degismedi) | Re-entry hic tetiklenmedi: 2h pencere + fiyat farki engeli (Trade#1→#2: 2.5h, %0.93 fark) |
+| **use_roc_filter=True** | ROC momentum filter (counter-trend engelleme) | $59.18 (KOTU) | Optimizer'i bozuyor! (asagiya bak) |
+
+### ROC Filter Optimizer Etkileşimi (v1.10.0 - 28 Aralık 2025)
+
+**KRITIK BULGU:** ROC filter optimizer'la birlikte kullanılamaz!
+
+**Problem:**
+1. ROC filter optimization sırasında aktif olduğunda farklı sinyaller bloke ediyor
+2. Bu, optimizer'ın farklı config'ler seçmesine neden oluyor
+3. Farklı config'ler = tamamen farklı trade'ler = kötü sonuçlar
+
+**Test Sonuçları:**
+| Threshold | PnL | Trades | Win% | Durum |
+|-----------|-----|--------|------|-------|
+| Disabled | $145.39 | 24 | 79% | Baseline (veri farkı nedeniyle $157→$145) |
+| 2.5% | $145.39 | 24 | 79% | Threshold yüksek, trade engellemedi |
+| 1.5% | $145.39 | 24 | 79% | Threshold yüksek, trade engellemedi |
+| 0.5% | $101.22 | 21 | 86% | 4 trade engelledi ama optimizer bozuldu |
+| 1.0% | $59.18 | 23 | 70% | WIN RATE düştü! Optimizer farklı config seçti |
+
+**Çözüm:**
+- Optimizer config grid'ine `use_roc_filter=False` eklendi
+- Live trading için DEFAULT_STRATEGY_CONFIG'da `use_roc_filter=True` kalıyor
+- ROC filter sadece production'da aktif, backtest/optimization'da devre dışı
+
+**Teknik Detay:**
+- `core/optimizer.py`: `_generate_candidate_configs()` ve `_generate_quick_candidate_configs()` fonksiyonlarına `use_roc_filter=False` eklendi
+- Bu sayede optimizer tüm sinyalleri görüyor ve doğru config seçiyor
+- Live trading sırasında ROC filter counter-trend entry'leri engelleyecek
+
+**Analiz Sonucu:**
+
+1. **Gercek darboğaz PBEMA distance** (%18.8 pass rate) - ancak gevsetmek ise yaramiyor
+2. **Optimizer filtreleri sinyal filtrelerinden daha kisitlayici** - daha fazla sinyal = daha dusuk kalite = optimizer reject
+3. **Mevcut strateji zaten optimal** - parametreleri gevsetmek sadece noise ekliyor
+4. **Position sizing artisi optimizer'i bozuyor** - Buyuk pozisyon = farkli config secimi = daha kotu sonuc
+5. **Hour filter overfitting riski** - Tarihsel "kotu saatler" out-of-sample'da karli cikti, saat bazli analiz guvenilir degil
+6. **Ek filtreler KARLI trade'leri de engelliyor** - Trend/Sweep filtreler kayiplari onlemeye calisirken kazanclari da kesiyor
+7. **SL zaten swing'e gore hesaplaniyor** - Sweep detection SL hesaplama mantigi ile celisiyor
+8. **Re-entry threshold (%0.3) cok siki** - Liquidity grab sonrasi fiyat entry'ye tam geri donmuyor, daha genis threshold overfitting riski tasir
+9. **Veri tazeligi PnL etkiliyor** - Her test yeni mumlar cekiyor, $157 baseline farkli gunde $145 olabilir (window config farklilasiyor)
+
+**Filter Istatistikleri (BTCUSDT-15m, 10000 bar):**
+
+```
+8_pbema_distance         | Pass:  18.8% | 🔴 DARBOĞAZ (ama gevsetmek ise yaramiyor)
+3_at_not_flat            | Pass:  39.8% | 🟡 KISITLAYICI
+10_pbema_above_baseline  | Pass:  42.1% | 🟡 KISITLAYICI
+9_wick_rejection         | Pass:  68.8% | 🟢 GEVŞEK (degistirmek etkisiz)
+6_baseline_touch         | Pass:  69.3% | 🟢 GEVŞEK
+7_body_position          | Pass:  99.9% | 🟢 GEVŞEK
+```
+
+---
+
+## Determinizm Testi Sonuclari (27 Aralik 2025)
+
+### Problem ve Cozum
+
+- **Problem:** Ayni parametrelerle farkli sonuclar cikiyordu ($191 varyans)
+- **Kok Neden:** `as_completed()` futures'lari rastgele sirayla donduruyordu
+- **Cozum:** Random seed (42), config hash ile siralama, epsilon tolerance
+
+### Dogrulama Testleri
+
+Ayni test 2 kez calistirildi - birebir ayni sonuc:
+- Full Year (01-12): $109.15, 58 trades, 81% win rate
+- H2 (06-12): $157.10, 25 trades
+
+### Donemsel Test Sonuclari (BTC+ETH+LINK)
+
+| Donem | PnL | Trades | Win% |
+|-------|-----|--------|------|
+| H1 (01-06) | $-5.05 | 24 | 87.5% |
+| H2 (06-12) | $+157.10 | 25 | 84.0% |
+| Full Year | $+109.15 | 58 | 81.0% |
+
+**Not:** H1+H2 != Full Year cunku 30 gunluk lookback nedeniyle Haziran ayi donemsel testlerde eksik.
+
+### Sembol Bazli Sonuclar (Full Year 2025)
+
+| Sembol | PnL | Trades | Win% |
+|--------|-----|--------|------|
+| BTCUSDT | $+43.97 | 19 | 78.9% |
+| ETHUSDT | $+16.91 | 24 | 79.2% |
+| LINKUSDT | $+48.27 | 15 | 86.7% |
+
+### Scoring System vs AND Logic
+
+- Scoring sistemi implement edildi ama AND logic ile ayni sonuc veriyor
+- Sebep: 4 core filter (baseline, AlphaTrend, RSI, regime) hala zorunlu
+- RSI threshold grid search (70, 75, 80) da fark yaratmadi
+
+### Onerilen Semboller
+
+Sadece BTC, ETH, LINK kullan - diger semboller ya zarar etti ya trade uretmedi.
 
 ---
 

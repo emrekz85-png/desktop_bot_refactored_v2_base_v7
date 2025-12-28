@@ -5,9 +5,7 @@ Quick backtest runner for Keltner-PBEMA strategy analysis
 import sys
 import os
 
-# Add current dir to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
+from test_helpers import get_binance_client  # Ensures project root in path
 from desktop_bot_refactored_v2_base_v7 import run_portfolio_backtest
 
 def main():

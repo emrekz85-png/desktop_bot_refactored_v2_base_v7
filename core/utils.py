@@ -562,3 +562,68 @@ def validate_and_adjust_sl(
         new_tp = tp
 
     return new_sl, new_tp, new_size, new_notional, new_margin, None
+
+
+# ============================================================================
+# RUNNER UTILITY FUNCTIONS (from run_rolling_wf_test.py)
+# ============================================================================
+
+def calculate_duration(entry_time, exit_time) -> str:
+    """Calculate duration between entry and exit times."""
+    try:
+        if isinstance(entry_time, str):
+            # Parse common formats
+            for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S"]:
+                try:
+                    entry_dt = datetime.strptime(entry_time.split("+")[0].split(".")[0], fmt)
+                    break
+                except ValueError:
+                    continue
+            else:
+                return "N/A"
+        else:
+            entry_dt = entry_time
+
+        if isinstance(exit_time, str):
+            for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S"]:
+                try:
+                    exit_dt = datetime.strptime(exit_time.split("+")[0].split(".")[0], fmt)
+                    break
+                except ValueError:
+                    continue
+            else:
+                return "N/A"
+        else:
+            exit_dt = exit_time
+
+        duration = exit_dt - entry_dt
+        total_minutes = int(duration.total_seconds() / 60)
+        hours = total_minutes // 60
+        minutes = total_minutes % 60
+
+        if hours > 24:
+            days = hours // 24
+            hours = hours % 24
+            return f"{days}d {hours}h {minutes}m"
+        elif hours > 0:
+            return f"{hours}h {minutes}m"
+        else:
+            return f"{minutes}m"
+    except Exception:
+        return "N/A"
+
+
+def format_price(value, decimals: int = 4) -> str:
+    """Format price value with appropriate decimals."""
+    if value is None:
+        return "N/A"
+    try:
+        val = float(value)
+        if val >= 1000:
+            return f"{val:,.2f}"
+        elif val >= 1:
+            return f"{val:.4f}"
+        else:
+            return f"{val:.6f}"
+    except (ValueError, TypeError):
+        return "N/A"

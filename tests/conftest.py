@@ -45,24 +45,56 @@ def default_strategy_config(trading_module):
 # OHLCV Data Fixtures
 # ============================================
 
-@pytest.fixture
-def sample_ohlcv_df():
-    """Generate a basic OHLCV DataFrame with 500 candles for testing."""
-    np.random.seed(42)  # Reproducible randomness
-    n = 500
+def _generate_ohlcv(n: int, base_price: float = 100.0, volatility: float = 0.02,
+                    trend: str = 'neutral', seed: int = 42) -> pd.DataFrame:
+    """
+    Generate synthetic OHLCV data for testing.
 
-    # Generate realistic price data with some trend
-    base_price = 100.0
-    returns = np.random.normal(0.0001, 0.01, n)
-    prices = base_price * np.cumprod(1 + returns)
+    Args:
+        n: Number of candles
+        base_price: Starting price
+        volatility: Price volatility factor
+        trend: 'neutral', 'bullish', 'bearish'
+        seed: Random seed for reproducibility
+
+    Returns:
+        DataFrame with open, high, low, close, volume columns
+    """
+    np.random.seed(seed)
+
+    # Generate prices based on trend
+    if trend == 'neutral':
+        # Random walk with slight drift
+        returns = np.random.normal(0.0001, volatility / 2, n)
+        prices = base_price * np.cumprod(1 + returns)
+    elif trend == 'bullish':
+        # Downtrend followed by consolidation (setup for bounce)
+        prices = np.zeros(n)
+        # Use 2/3 for downtrend, 1/3 for consolidation
+        downtrend_len = int(n * 0.67)
+        prices[:downtrend_len] = base_price - np.linspace(0, base_price * 0.15, downtrend_len)
+        prices[downtrend_len:] = prices[downtrend_len - 1] + np.random.normal(0, volatility, n - downtrend_len)
+    elif trend == 'bearish':
+        # Uptrend followed by consolidation (setup for rejection)
+        prices = np.zeros(n)
+        uptrend_len = int(n * 0.67)
+        prices[:uptrend_len] = base_price + np.linspace(0, base_price * 0.15, uptrend_len)
+        prices[uptrend_len:] = prices[uptrend_len - 1] + np.random.normal(0, volatility, n - uptrend_len)
+    else:
+        # Simple random walk
+        prices = base_price + np.cumsum(np.random.normal(0, volatility * 5, n))
 
     # Generate OHLCV data
+    high_noise = np.abs(np.random.normal(0, volatility * 1.5, n))
+    low_noise = np.abs(np.random.normal(0, volatility * 1.5, n))
+    close_noise = np.random.normal(0, volatility * 0.5, n)
+
     data = {
         "timestamp": pd.date_range("2024-01-01", periods=n, freq="5min", tz="UTC"),
         "open": prices,
-        "high": prices * (1 + np.abs(np.random.normal(0, 0.005, n))),
-        "low": prices * (1 - np.abs(np.random.normal(0, 0.005, n))),
-        "close": prices * (1 + np.random.normal(0, 0.002, n)),
+        "high": prices + high_noise,
+        "low": prices - low_noise,
+        "close": prices + close_noise,
         "volume": np.random.uniform(1000, 10000, n),
     }
 
@@ -75,28 +107,15 @@ def sample_ohlcv_df():
 
 
 @pytest.fixture
+def sample_ohlcv_df():
+    """Generate a basic OHLCV DataFrame with 500 candles for testing."""
+    return _generate_ohlcv(n=500, base_price=100.0, volatility=0.02, trend='neutral', seed=42)
+
+
+@pytest.fixture
 def minimal_ohlcv_df():
     """Generate minimal OHLCV DataFrame (50 candles) for quick tests."""
-    np.random.seed(123)
-    n = 50
-
-    base_price = 100.0
-    prices = base_price + np.cumsum(np.random.normal(0, 0.5, n))
-
-    data = {
-        "timestamp": pd.date_range("2024-01-01", periods=n, freq="5min", tz="UTC"),
-        "open": prices,
-        "high": prices + np.abs(np.random.normal(0, 0.3, n)),
-        "low": prices - np.abs(np.random.normal(0, 0.3, n)),
-        "close": prices + np.random.normal(0, 0.1, n),
-        "volume": np.random.uniform(1000, 5000, n),
-    }
-
-    df = pd.DataFrame(data)
-    df["high"] = df[["open", "high", "close"]].max(axis=1)
-    df["low"] = df[["open", "low", "close"]].min(axis=1)
-
-    return df
+    return _generate_ohlcv(n=50, base_price=100.0, volatility=0.01, trend='neutral', seed=123)
 
 
 @pytest.fixture
@@ -109,31 +128,7 @@ def bullish_setup_df():
     - RSI is oversold
     - ADX shows sufficient trend strength
     """
-    np.random.seed(42)
-    n = 300  # Need enough candles for EMA200 warmup
-
-    # Start high, drop down, then set up for bounce
-    base_price = 100.0
-
-    # Create downtrend followed by consolidation near bottom
-    prices = np.zeros(n)
-    prices[:200] = base_price - np.linspace(0, 15, 200)  # Downtrend
-    prices[200:] = 85 + np.random.normal(0, 0.3, 100)    # Consolidation
-
-    data = {
-        "timestamp": pd.date_range("2024-01-01", periods=n, freq="5min", tz="UTC"),
-        "open": prices,
-        "high": prices + np.abs(np.random.normal(0.2, 0.3, n)),
-        "low": prices - np.abs(np.random.normal(0.2, 0.3, n)),
-        "close": prices + np.random.normal(0, 0.15, n),
-        "volume": np.random.uniform(1000, 5000, n),
-    }
-
-    df = pd.DataFrame(data)
-    df["high"] = df[["open", "high", "close"]].max(axis=1)
-    df["low"] = df[["open", "low", "close"]].min(axis=1)
-
-    return df
+    return _generate_ohlcv(n=300, base_price=100.0, volatility=0.015, trend='bullish', seed=42)
 
 
 @pytest.fixture
@@ -146,30 +141,7 @@ def bearish_setup_df():
     - RSI is overbought
     - ADX shows sufficient trend strength
     """
-    np.random.seed(42)
-    n = 300
-
-    # Start low, go up, then set up for rejection
-    base_price = 100.0
-
-    prices = np.zeros(n)
-    prices[:200] = base_price + np.linspace(0, 15, 200)  # Uptrend
-    prices[200:] = 115 + np.random.normal(0, 0.3, 100)   # Consolidation at top
-
-    data = {
-        "timestamp": pd.date_range("2024-01-01", periods=n, freq="5min", tz="UTC"),
-        "open": prices,
-        "high": prices + np.abs(np.random.normal(0.2, 0.3, n)),
-        "low": prices - np.abs(np.random.normal(0.2, 0.3, n)),
-        "close": prices + np.random.normal(0, 0.15, n),
-        "volume": np.random.uniform(1000, 5000, n),
-    }
-
-    df = pd.DataFrame(data)
-    df["high"] = df[["open", "high", "close"]].max(axis=1)
-    df["low"] = df[["open", "low", "close"]].min(axis=1)
-
-    return df
+    return _generate_ohlcv(n=300, base_price=100.0, volatility=0.015, trend='bearish', seed=42)
 
 
 @pytest.fixture

@@ -14,8 +14,12 @@
 # This modular structure eliminates code duplication and improves maintainability.
 
 from .config import (
+    # Version
+    VERSION,
     # Environment detection
     IS_COLAB, IS_HEADLESS, IS_NOTEBOOK, HAS_TQDM, HTF_ONLY_MODE,
+    # M3 Performance settings
+    M3_PERFORMANCE_CONFIG,
     # Symbols and timeframes
     SYMBOLS, TIMEFRAMES, LOWER_TIMEFRAMES, HTF_TIMEFRAMES,
     # Paths
@@ -44,15 +48,21 @@ from .utils import (
     calculate_funding_cost, format_time_utc, format_time_local,
     append_trade_event, calculate_r_multiple, calculate_expected_r,
     apply_1m_profit_lock, apply_partial_stop_protection,
+    derive_exit_profile_params, validate_and_adjust_sl,
 )
 
 from .config import (
     # Strategy configs (single source of truth)
     DEFAULT_STRATEGY_CONFIG, SYMBOL_PARAMS,
+    # PR-1: Baseline config for regression fix
+    BASELINE_CONFIG,
+    # PR-2: Risk management & config continuity
+    PR2_CONFIG,
 )
 
 from .config_loader import (
     load_optimized_config, save_best_configs, invalidate_config_cache,
+    _strategy_signature,  # Export for use in main file
 )
 
 from .trade_manager import (
@@ -72,12 +82,11 @@ from .indicators import (
     calculate_indicators, calculate_alphatrend,
     get_indicator_value, get_candle_data,
     calculate_rr_ratio, check_wick_rejection,
+    detect_regime, add_regime_column, get_regime_multiplier,
 )
 
 from .logging_config import (
-    get_logger, set_log_level,
-    log_trade_event, log_signal, log_api_call,
-    print_to_log, info, debug, warning, error,
+    get_logger, set_log_level, print_to_log,
 )
 
 from .trading_engine import TradingEngine
@@ -89,9 +98,26 @@ from .perf_cache import (
     clear_disk_cache, estimate_candle_count,
 )
 
+# Optimizer functions (v40.5 - modular)
+from .optimizer import (
+    _optimize_backtest_configs,
+    _generate_candidate_configs,
+    _generate_quick_candidate_configs,
+    _get_min_trades_for_timeframe,
+    _split_data_walk_forward,
+    _validate_config_oos,
+    _check_overfit,
+    _compute_optimizer_score,
+    _score_config_for_stream,
+    MIN_EXPECTANCY_PER_TRADE,
+    STRATEGY_BLACKLIST,
+)
+
 __all__ = [
     # Environment
     'IS_COLAB', 'IS_HEADLESS', 'IS_NOTEBOOK', 'HAS_TQDM', 'HTF_ONLY_MODE',
+    # M3 Performance
+    'M3_PERFORMANCE_CONFIG',
     # Symbols and timeframes
     'SYMBOLS', 'TIMEFRAMES', 'LOWER_TIMEFRAMES', 'HTF_TIMEFRAMES',
     # Paths
@@ -117,8 +143,8 @@ __all__ = [
     'append_trade_event', 'calculate_r_multiple', 'calculate_expected_r',
     'apply_1m_profit_lock', 'apply_partial_stop_protection',
     # Config loader
-    'load_optimized_config', 'save_best_configs', 'invalidate_config_cache',
-    'SYMBOL_PARAMS', 'DEFAULT_STRATEGY_CONFIG',
+    'load_optimized_config', 'save_best_configs', 'invalidate_config_cache', '_strategy_signature',
+    'SYMBOL_PARAMS', 'DEFAULT_STRATEGY_CONFIG', 'BASELINE_CONFIG', 'PR2_CONFIG',
     # Trade manager
     'BaseTradeManager', 'SimTradeManager',
     # Telegram
@@ -131,13 +157,23 @@ __all__ = [
     'get_indicator_value', 'get_candle_data',
     'calculate_rr_ratio', 'check_wick_rejection',
     # Logging
-    'get_logger', 'set_log_level',
-    'log_trade_event', 'log_signal', 'log_api_call',
-    'print_to_log', 'info', 'debug', 'warning', 'error',
+    'get_logger', 'set_log_level', 'print_to_log',
     # Trading Engine
     'TradingEngine',
     # Performance optimization
     'MasterDataCache', 'StreamArrays', 'FastEventHeap', 'OpenTradeIndex',
     'get_timedelta', 'get_timedelta_ns', 'datetime_to_ns',
     'clear_disk_cache', 'estimate_candle_count',
+    # Optimizer (v40.5)
+    '_optimize_backtest_configs',
+    '_generate_candidate_configs',
+    '_generate_quick_candidate_configs',
+    '_get_min_trades_for_timeframe',
+    '_split_data_walk_forward',
+    '_validate_config_oos',
+    '_check_overfit',
+    '_compute_optimizer_score',
+    '_score_config_for_stream',
+    'MIN_EXPECTANCY_PER_TRADE',
+    'STRATEGY_BLACKLIST',
 ]

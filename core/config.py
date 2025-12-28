@@ -77,6 +77,29 @@ SYMBOLS = [
 # False = Use all timeframes (5m, 15m, 1h, 4h, 12h, 1d)
 HTF_ONLY_MODE = False
 
+# ==========================================
+# M3 APPLE SILICON PERFORMANCE SETTINGS
+# ==========================================
+# Optimized for M3 MacBook Air (4 P-cores + 4 E-cores, fansiz)
+# P-cores: High performance, CPU-intensive tasks
+# E-cores: ~40% slower, background/IO tasks only
+# Fansiz tasarim: Sureli yuk = thermal throttling riski
+#
+# Worker Settings:
+# - CPU_WORKERS: 3 (P-cores - 1 main thread)
+# - IO_WORKERS: 6 (network-bound, doesnt stress CPU)
+#
+# Memory: UMA (Unified Memory Architecture)
+# - 8GB/16GB paylaşımlı (CPU + GPU)
+# - DataFrame copies minimize edilmeli
+# - PyArrow backend + downcast onerilir
+M3_PERFORMANCE_CONFIG = {
+    "cpu_workers": 3,  # P-cores only (E-cores yavaş)
+    "io_workers": 6,   # Network/disk bound
+    "thermal_burst_seconds": 180,  # 3 dk burst, sonra throttle riski
+    "min_warmup_bars": 250,  # Indicator warmup
+}
+
 _ALL_LOWER_TIMEFRAMES = ["5m", "15m", "30m", "1h"]
 LOWER_TIMEFRAMES = ["1h"] if HTF_ONLY_MODE else _ALL_LOWER_TIMEFRAMES
 HTF_TIMEFRAMES = ["4h", "12h", "1d"]
@@ -166,8 +189,11 @@ TRADING_CONFIG = {
     "initial_balance": 2000.0,
     "leverage": 10,
     "usable_balance_pct": 0.20,  # 20% of balance
-    "risk_per_trade_pct": 0.0175,  # 1.75% risk per trade
-    "max_portfolio_risk_pct": 0.05,  # 5% total portfolio risk
+    # v1.7.3: Position sizing tested - REVERTED
+    # 1.75% → $157.10 | 2.0% → $78.75 | 2.5% → $86.75 (ALL WORSE)
+    # Higher risk changes optimizer config selection → worse configs chosen
+    "risk_per_trade_pct": 0.0175,  # 1.75% risk per trade (OPTIMAL)
+    "max_portfolio_risk_pct": 0.05,  # 5% total portfolio risk (OPTIMAL)
     "slippage_rate": 0.0005,     # 0.05% slippage
     "funding_rate_8h": 0.0001,   # 0.01% funding (8 hour period)
     "maker_fee": 0.0002,         # 0.02% maker fee
@@ -562,6 +588,12 @@ DEFAULT_STRATEGY_CONFIG = {
     # use_scoring=True: Weighted scoring - filters contribute points, signal if score >= threshold
     "use_scoring": False,            # Default: AND logic (backward compatible)
     "score_threshold": 6.0,          # Minimum score out of 10.0 for signal acceptance
+
+    # === Hour Filter (v1.7.4 - Execution Timing Optimization) ===
+    # Skip trading during historically losing hours (UTC)
+    # Based on quant analyst analysis of trade PnL by hour
+    # TEST RESULT: Hour filter FAILED - blocked profitable trades, PnL dropped $29.39
+    "avoid_hours": None,  # DISABLED - did not improve PnL
     # Score breakdown (max 10.0):
     #   ADX strength: 2.0
     #   Regime trending: 1.0
@@ -655,6 +687,22 @@ DEFAULT_STRATEGY_CONFIG = {
 
     # === CIRCUIT BREAKER (DD control) ===
     "circuit_breaker_max_full_stops": 2,     # Max consecutive full STOPs before disable
+
+    # === SMART RE-ENTRY SYSTEM (v1.9.0) ===
+    # Post-SL recovery system for liquidity grab scenarios
+    # NOT a signal filter - it's a trade MANAGEMENT system
+    # When SL is hit, if price recovers near entry within 2 hours and AlphaTrend confirms,
+    # bypass cooldown and allow re-entry to catch post-sweep moves
+    # v1.9.0: Smart re-entry after SL (liquidity grab recovery)
+    "use_smart_reentry": False,              # DISABLED: Re-entry doesn't trigger (2h window + 0.8% threshold too tight)
+
+    # === ROC MOMENTUM FILTER (v1.10.0) ===
+    # Prevents counter-trend entries by checking Rate of Change
+    # When ROC > threshold, don't SHORT (uptrend too strong)
+    # When ROC < -threshold, don't LONG (downtrend too strong)
+    "use_roc_filter": False,                 # DISABLED: Testing baseline recovery
+    "roc_period": 10,                        # Lookback period for ROC calculation
+    "roc_threshold": 2.0,                    # ROC threshold (2.0% = balanced filter - TEST)
 }
 
 # ==========================================
@@ -718,104 +766,17 @@ PR2_CONFIG = {
 # ==========================================
 # Default params per symbol/timeframe - can be overridden by optimizer results
 # All symbols now use ssl_flow strategy by default with at_active=True
+
+# Base configuration for all symbol/timeframe combinations
+_BASE_SYMBOL_TF_CONFIG = {
+    "rr": 2.0,
+    "rsi": 70,
+    "at_active": True,
+    "strategy_mode": "ssl_flow",
+}
+
+# Generate SYMBOL_PARAMS programmatically (reduces 100+ lines to ~10)
 SYMBOL_PARAMS = {
-    "BTCUSDT": {
-        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "15m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "30m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "1h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "4h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "12h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "1d": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"}
-    },
-    "ETHUSDT": {
-        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "15m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "30m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "1h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "4h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "12h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "1d": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"}
-    },
-    "SOLUSDT": {
-        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "15m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "30m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "1h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "4h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "12h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "1d": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"}
-    },
-    "HYPEUSDT": {
-        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "15m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "30m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "1h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "4h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "12h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "1d": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"}
-    },
-    "LINKUSDT": {
-        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "15m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "30m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "1h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "4h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "12h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "1d": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"}
-    },
-    "BNBUSDT": {
-        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "15m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "30m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "1h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "4h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "12h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "1d": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"}
-    },
-    "XRPUSDT": {
-        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "15m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "30m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "1h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "4h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "12h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "1d": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"}
-    },
-    "LTCUSDT": {
-        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "15m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "30m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "1h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "4h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "12h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "1d": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"}
-    },
-    "DOGEUSDT": {
-        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "15m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "30m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "1h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "4h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "12h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "1d": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"}
-    },
-    "SUIUSDT": {
-        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "15m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "30m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "1h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "4h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "12h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "1d": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"}
-    },
-    "FARTCOINUSDT": {
-        "5m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "15m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "30m": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "1h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "4h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "12h": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"},
-        "1d": {"rr": 2.0, "rsi": 70, "at_active": True, "strategy_mode": "ssl_flow"}
-    }
+    symbol: {tf: _BASE_SYMBOL_TF_CONFIG.copy() for tf in TIMEFRAMES}
+    for symbol in SYMBOLS
 }
