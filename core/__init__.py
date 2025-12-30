@@ -89,7 +89,11 @@ from .logging_config import (
     get_logger, set_log_level, print_to_log,
 )
 
-from .trading_engine import TradingEngine
+from .trading_engine import (
+    TradingEngine,
+    set_backtest_mode,
+    is_backtest_mode,
+)
 
 # Performance optimization (v40.x)
 from .perf_cache import (
@@ -160,6 +164,8 @@ __all__ = [
     'get_logger', 'set_log_level', 'print_to_log',
     # Trading Engine
     'TradingEngine',
+    'set_backtest_mode',
+    'is_backtest_mode',
     # Performance optimization
     'MasterDataCache', 'StreamArrays', 'FastEventHeap', 'OpenTradeIndex',
     'get_timedelta', 'get_timedelta_ns', 'datetime_to_ns',

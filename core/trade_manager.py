@@ -218,6 +218,10 @@ class BaseTradeManager(ABC):
             Tuple of (position_size, position_notional, required_margin, risk_amount)
             Risk amount may be adjusted if margin is insufficient.
         """
+        # FIX: Guard against invalid entry price
+        if entry_price <= 0:
+            return 0, 0, 0, 0
+
         sl_distance = abs(entry_price - sl_price)
         if sl_distance <= 0:
             return 0, 0, 0, 0
@@ -311,6 +315,12 @@ class BaseTradeManager(ABC):
         size = float(trade["size"])
         t_type = trade["type"]
         tf = trade["timeframe"]
+
+        # FIX: Guard against invalid trade data (division by zero prevention)
+        if entry <= 0 or size <= 0:
+            _logger.error("Invalid trade data: entry=%.8f, size=%.8f", entry, size)
+            return None
+
         # Fallback: margin yoksa doğru hesapla (size * entry / leverage, size / leverage DEĞİL)
         initial_margin = float(trade.get("margin", abs(size) * entry / TRADING_CONFIG["leverage"]))
 
@@ -1226,8 +1236,54 @@ class SimTradeManager(BaseTradeManager):
 
     def open_trade(self, trade_data: dict) -> bool:
         """Open a new trade for backtesting."""
+        # ==========================================
+        # INPUT VALIDATION (v45.x - Security Fix)
+        # ==========================================
+        # Validate required fields exist and have valid values
+        required_fields = ["symbol", "timeframe", "type", "entry", "tp", "sl"]
+        for field in required_fields:
+            if field not in trade_data:
+                _logger.error("Trade REJECTED: Missing required field '%s'", field)
+                return False
+
         tf = trade_data["timeframe"]
         sym = trade_data["symbol"]
+        trade_type = trade_data.get("type", "")
+
+        # Validate trade type
+        if trade_type not in ("LONG", "SHORT"):
+            _logger.error("Trade REJECTED: Invalid type '%s' (must be LONG or SHORT)", trade_type)
+            return False
+
+        # Validate numeric fields
+        try:
+            entry_val = float(trade_data["entry"])
+            tp_val = float(trade_data["tp"])
+            sl_val = float(trade_data["sl"])
+        except (ValueError, TypeError) as e:
+            _logger.error("Trade REJECTED: Invalid numeric value: %s", e)
+            return False
+
+        # Validate positive entry price
+        if entry_val <= 0:
+            _logger.error("Trade REJECTED: Entry price must be positive (got %.8f)", entry_val)
+            return False
+
+        # Validate TP/SL direction
+        if trade_type == "LONG":
+            if tp_val <= entry_val:
+                _logger.error("Trade REJECTED: LONG TP (%.8f) must be above entry (%.8f)", tp_val, entry_val)
+                return False
+            if sl_val >= entry_val:
+                _logger.error("Trade REJECTED: LONG SL (%.8f) must be below entry (%.8f)", sl_val, entry_val)
+                return False
+        else:  # SHORT
+            if tp_val >= entry_val:
+                _logger.error("Trade REJECTED: SHORT TP (%.8f) must be below entry (%.8f)", tp_val, entry_val)
+                return False
+            if sl_val <= entry_val:
+                _logger.error("Trade REJECTED: SHORT SL (%.8f) must be above entry (%.8f)", sl_val, entry_val)
+                return False
 
         # ==========================================
         # ATOMIC CIRCUIT BREAKER CHECK (v44.x)

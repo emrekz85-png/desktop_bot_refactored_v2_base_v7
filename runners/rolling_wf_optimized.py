@@ -37,7 +37,11 @@ from core import (
     # Performance optimization imports
     MasterDataCache, StreamArrays, FastEventHeap,
     get_timedelta, get_timedelta_ns, datetime_to_ns,
+    set_backtest_mode,  # Enable backtest mode (bypasses rate limiter)
 )
+
+# Enable backtest mode for faster data fetching (no rate limiting)
+set_backtest_mode(True)
 from strategies import check_signal
 
 

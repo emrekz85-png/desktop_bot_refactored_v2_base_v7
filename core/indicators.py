@@ -154,7 +154,9 @@ def calculate_alphatrend(
 
         # Handle equality case (Pine Script: AlphaTrend[1] > AlphaTrend[3])
         # When current and 2-bar-ago are equal, check 1-bar-ago vs 3-bar-ago
-        equal_mask = df['at_buyers'] == df['at_sellers']
+        # FIX: Use np.isclose for floating point comparison to avoid precision issues
+        equal_mask_arr = np.isclose(df['at_buyers'].values, df['at_sellers'].values, rtol=1e-9, atol=1e-12)
+        equal_mask = pd.Series(equal_mask_arr, index=df.index)
 
         if equal_mask.any():
             _logger.debug("AlphaTrend equality detected on %d bars", equal_mask.sum())
@@ -205,7 +207,9 @@ def calculate_alphatrend(
         df['at_buyers_dominant'] = df['at_buyers'] > df['at_sellers']
         df['at_sellers_dominant'] = df['at_sellers'] > df['at_buyers']
         # Handle equality case in fallback too
-        equal_mask = df['at_buyers'] == df['at_sellers']
+        # FIX: Use np.isclose for floating point comparison to avoid precision issues
+        equal_mask_arr = np.isclose(df['at_buyers'].values, df['at_sellers'].values, rtol=1e-9, atol=1e-12)
+        equal_mask = pd.Series(equal_mask_arr, index=df.index)
         if equal_mask.any():
             min_required_bars = 4
             valid_idx = pd.Series(False, index=df.index)
@@ -274,12 +278,29 @@ def calculate_indicators(df: pd.DataFrame, timeframe: str = None) -> pd.DataFram
     df["pb_ema_bot_150"] = ta.ema(df["close"], length=150)
 
     # Slope (rate of change over 5 periods) - EMA 200
-    df["slope_top"] = (df["pb_ema_top"].diff(5) / df["pb_ema_top"]) * 1000
-    df["slope_bot"] = (df["pb_ema_bot"].diff(5) / df["pb_ema_bot"]) * 1000
+    # FIX: Division by zero guard using np.where
+    df["slope_top"] = np.where(
+        df["pb_ema_top"] != 0,
+        (df["pb_ema_top"].diff(5) / df["pb_ema_top"]) * 1000,
+        0.0
+    )
+    df["slope_bot"] = np.where(
+        df["pb_ema_bot"] != 0,
+        (df["pb_ema_bot"].diff(5) / df["pb_ema_bot"]) * 1000,
+        0.0
+    )
 
     # Slope - EMA 150
-    df["slope_top_150"] = (df["pb_ema_top_150"].diff(5) / df["pb_ema_top_150"]) * 1000
-    df["slope_bot_150"] = (df["pb_ema_bot_150"].diff(5) / df["pb_ema_bot_150"]) * 1000
+    df["slope_top_150"] = np.where(
+        df["pb_ema_top_150"] != 0,
+        (df["pb_ema_top_150"].diff(5) / df["pb_ema_top_150"]) * 1000,
+        0.0
+    )
+    df["slope_bot_150"] = np.where(
+        df["pb_ema_bot_150"] != 0,
+        (df["pb_ema_bot_150"].diff(5) / df["pb_ema_bot_150"]) * 1000,
+        0.0
+    )
 
     # === TF-ADAPTIVE SSL BASELINE (v1.7.1) ===
     # Shorter lookback for higher TFs (faster response to larger moves)

@@ -307,7 +307,9 @@ def check_ssl_flow_signal(
     # v1.7.2: regime_adx_threshold and regime_lookback are now function parameters
 
     regime_start = max(0, abs_index - regime_lookback)
-    adx_window = df["adx"].iloc[regime_start:abs_index + 1]
+    # FIX: Look-ahead bias - exclude current bar from regime calculation
+    # At signal time, we don't know the current bar's final ADX yet
+    adx_window = df["adx"].iloc[regime_start:abs_index]
     adx_avg = float(adx_window.mean()) if len(adx_window) > 0 else adx_val
 
     regime = "TRENDING" if adx_avg >= regime_adx_threshold else "RANGING"

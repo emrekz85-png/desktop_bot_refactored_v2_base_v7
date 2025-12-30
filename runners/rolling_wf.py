@@ -19,8 +19,13 @@ from core import (
     WALK_FORWARD_CONFIG,
     _optimize_backtest_configs,
     detect_regime,
+    set_backtest_mode,  # Enable backtest mode (bypasses rate limiter, enables disk cache)
 )
 from strategies import check_signal
+
+
+# Enable backtest mode for faster data fetching (no rate limiting, disk cache enabled)
+set_backtest_mode(True)
 
 
 def run_rolling_walkforward(
@@ -689,6 +694,90 @@ def run_rolling_walkforward(
             for tf in timeframes:
                 global_config_map[(sym, tf)] = fixed_config.copy()
 
+    # ==========================================
+    # 4.5 MASTER DATA CACHE (PERFORMANCE OPTIMIZATION)
+    # ==========================================
+    # Pre-fetch ALL data and calculate indicators ONCE for the entire test period.
+    # This eliminates redundant API calls and indicator calculations for overlapping windows.
+    # Speedup: ~2-3x for typical 1-year rolling WF tests (52 windows with 30-day overlap)
+
+    master_cache = {}  # (sym, tf) -> DataFrame with all indicators pre-calculated
+
+    if windows:
+        # Determine the full date range needed
+        first_window = windows[0]
+        last_window = windows[-1]
+
+        # Start: earliest optimize_start (or trade_start - buffer)
+        if first_window.get("optimize_start"):
+            master_start = first_window["optimize_start"]
+        else:
+            master_start = first_window["trade_start"] - timedelta(days=30)
+
+        # Add extra buffer for indicator warmup (200+ candles)
+        buffer_days = 45  # Extra buffer for indicator calculation warmup
+        master_start = master_start - timedelta(days=buffer_days)
+
+        # End: latest trade_end
+        master_end = last_window["trade_end"]
+
+        log(f"\n📦 Master Cache: Pre-fetching all data...")
+        log(f"   Date range: {master_start.strftime('%Y-%m-%d')} → {master_end.strftime('%Y-%m-%d')}")
+
+        # Fetch all data once with indicators
+        master_cache = fetch_data_for_period(master_start, master_end, symbols, timeframes)
+
+        if master_cache:
+            log(f"   ✓ Master cache created: {len(master_cache)} streams with pre-calculated indicators")
+        else:
+            log(f"   ⚠️ Master cache creation failed - falling back to per-window fetching")
+
+    def get_streams_from_cache(fetch_start, fetch_end, use_master_cache=True):
+        """Get streams for a window from master cache or fetch fresh.
+
+        This function slices the master cache for the requested date range,
+        avoiding redundant API calls and indicator calculations.
+
+        IMPORTANT: Includes 30-day buffer before fetch_start for indicator warmup,
+        matching the behavior of fetch_data_for_period().
+        """
+        if not use_master_cache or not master_cache:
+            # Fallback: fetch fresh data
+            return fetch_data_for_period(fetch_start, fetch_end, symbols, timeframes)
+
+        # Slice from master cache
+        sliced_streams = {}
+
+        # Add buffer for indicator warmup (same as fetch_data_for_period)
+        buffer_days = 30
+        buffered_start = fetch_start - timedelta(days=buffer_days)
+
+        for (sym, tf), df_full in master_cache.items():
+            if df_full.empty:
+                continue
+
+            # Ensure timestamp is datetime
+            if not pd.api.types.is_datetime64_any_dtype(df_full['timestamp']):
+                df_full['timestamp'] = pd.to_datetime(df_full['timestamp'])
+
+            # Make dates timezone-aware if needed
+            if df_full['timestamp'].dt.tz is not None:
+                start_ts = pd.Timestamp(buffered_start).tz_localize('UTC')
+                end_ts = pd.Timestamp(fetch_end).tz_localize('UTC')
+            else:
+                start_ts = pd.Timestamp(buffered_start)
+                end_ts = pd.Timestamp(fetch_end)
+
+            # Filter to requested range (WITH buffer for warmup)
+            mask = (df_full['timestamp'] >= start_ts) & (df_full['timestamp'] <= end_ts)
+            df_sliced = df_full[mask].reset_index(drop=True)
+
+            # Only include if enough data (250 candles minimum for indicator warmup)
+            if len(df_sliced) >= 250:
+                sliced_streams[(sym, tf)] = df_sliced
+
+        return sliced_streams
+
     for window in windows:
         log(f"\n{'─'*50}")
         log(f"📦 Window {window['window_id']}: Trade [{window['trade_start'].strftime('%Y-%m-%d')} → {window['trade_end'].strftime('%Y-%m-%d')}]")
@@ -704,9 +793,11 @@ def run_rolling_walkforward(
 
         fetch_end = window["trade_end"]
 
-        # 4.2 Fetch data
-        log(f"   📥 Veri çekiliyor: {fetch_start.strftime('%Y-%m-%d')} → {fetch_end.strftime('%Y-%m-%d')}")
-        streams = fetch_data_for_period(fetch_start, fetch_end, symbols, timeframes)
+        # 4.2 Get data from master cache (or fetch if cache miss)
+        use_cache = bool(master_cache)
+        cache_status = "cache" if use_cache else "fetch"
+        log(f"   📥 Veri [{cache_status}]: {fetch_start.strftime('%Y-%m-%d')} → {fetch_end.strftime('%Y-%m-%d')}")
+        streams = get_streams_from_cache(fetch_start, fetch_end, use_master_cache=use_cache)
 
         if not streams:
             log(f"   ⚠️ Veri yok, window atlanıyor")

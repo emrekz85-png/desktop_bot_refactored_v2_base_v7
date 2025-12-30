@@ -12,12 +12,87 @@
 import os
 import time
 import itertools
+import threading
 from typing import Tuple
 from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 import numpy as np
 import requests
+
+
+# ==========================================
+# BACKTEST MODE FLAG (bypasses rate limiter)
+# ==========================================
+_backtest_mode = False
+
+
+def set_backtest_mode(enabled: bool):
+    """Enable/disable backtest mode. When enabled, rate limiter is bypassed."""
+    global _backtest_mode
+    _backtest_mode = enabled
+
+
+def is_backtest_mode() -> bool:
+    """Check if backtest mode is enabled."""
+    return _backtest_mode
+
+
+# ==========================================
+# API RATE LIMITER (Thread-safe)
+# ==========================================
+class RateLimiter:
+    """
+    Thread-safe rate limiter using token bucket algorithm.
+
+    Binance API rate limits:
+    - 1200 requests per minute (20 requests/second)
+    - We use conservative limits to avoid 429 errors
+    """
+
+    def __init__(self, max_requests: int = 10, time_window: float = 1.0):
+        """
+        Initialize rate limiter.
+
+        Args:
+            max_requests: Maximum requests allowed per time_window
+            time_window: Time window in seconds
+        """
+        self.max_requests = max_requests
+        self.time_window = time_window
+        self.tokens = max_requests
+        self.last_refill = time.time()
+        self._lock = threading.Lock()
+
+    def acquire(self):
+        """
+        Acquire a request slot, blocking if rate limit exceeded.
+        Returns immediately if tokens available, otherwise waits.
+        """
+        with self._lock:
+            now = time.time()
+            elapsed = now - self.last_refill
+
+            # Refill tokens based on elapsed time
+            tokens_to_add = elapsed * (self.max_requests / self.time_window)
+            self.tokens = min(self.max_requests, self.tokens + tokens_to_add)
+            self.last_refill = now
+
+            if self.tokens >= 1:
+                self.tokens -= 1
+                return
+
+        # No tokens available, wait for refill
+        wait_time = self.time_window / self.max_requests
+        time.sleep(wait_time)
+        with self._lock:
+            self.tokens = max(0, self.tokens - 1)
+
+
+# Global rate limiter instance
+# Binance limit: 1200 req/min = 20 req/sec
+# We use 18 req/sec to stay safe but avoid unnecessary slowdown
+_api_rate_limiter = RateLimiter(max_requests=18, time_window=1.0)
 
 from .config import (
     DATA_DIR,
@@ -78,7 +153,10 @@ class TradingEngine:
 
     @staticmethod
     def http_get_with_retry(url, params, max_retries=3, timeout=10):
-        """Safe HTTP GET with retry logic for handling API failures."""
+        """Safe HTTP GET with retry logic for handling API failures.
+
+        Uses global rate limiter to prevent 429 errors from API rate limits.
+        """
 
         # DNS resolution failure cooldown
         now = time.time()
@@ -90,6 +168,10 @@ class TradingEngine:
         delay = 1
         for attempt in range(max_retries):
             try:
+                # Apply rate limiting only in live mode (not backtest)
+                if not _backtest_mode:
+                    _api_rate_limiter.acquire()
+
                 res = requests.get(url, params=params, timeout=timeout)
 
                 # Handle rate limits (429) and server errors (5xx)
