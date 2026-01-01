@@ -15,6 +15,8 @@ Thread Safety Notes:
 # - Minor: Bug fixes, parameter tweaks, small improvements
 #
 # Changelog:
+# v1.8.1 - P5 High Priority: AT flat threshold, PBEMA distance, optimizer scoring, WF validation fix
+# v1.8.0 - P5 Critical Fixes: ADX filter skip, body position skip, SSL never lost off, realistic slippage
 # v1.7.2 - Grid Search Optimizer: Configurable regime gating params for optimization
 # v1.7.1 - TF-Adaptive SSL Lookback: 5m=HMA75, 15m=HMA60, 1h=HMA45
 # v1.7.1-dyntp - REVERTED: Dynamic Partial TP by Regime slightly hurt H2 (-$0.50)
@@ -29,10 +31,11 @@ Thread Safety Notes:
 # v1.5 - Momentum TP Extension uses EMA15 instead of AlphaTrend (faster, lower lag)
 # v1.4 - Momentum TP Extension fixed (AlphaTrend data now passed to trade updates)
 # v1.3 - Progressive Partial TP (3-tranche system for profit locking)
+# v1.8.2 - P5.2 REVERTED: Aggressive filter relaxation worse than baseline (-$124)
 # v1.2 - Momentum TP Extension (let winners run when momentum strong)
 # v1.1 - Tighter swing SL (20->10 candles) - REVERTED (worse performance)
 # v1.0 - Initial versioning system, baseline strategy
-VERSION = "v1.7.2"
+VERSION = "v1.8.2"
 
 import os
 import sys
@@ -194,7 +197,8 @@ TRADING_CONFIG = {
     # Higher risk changes optimizer config selection → worse configs chosen
     "risk_per_trade_pct": 0.0175,  # 1.75% risk per trade (OPTIMAL)
     "max_portfolio_risk_pct": 0.05,  # 5% total portfolio risk (OPTIMAL)
-    "slippage_rate": 0.0005,     # 0.05% slippage
+    "slippage_rate": 0.0005,     # BASELINE: 0.05% slippage
+    "sl_slippage_multiplier": 1.0, # BASELINE: No extra SL slippage
     "funding_rate_8h": 0.0001,   # 0.01% funding (8 hour period)
     "maker_fee": 0.0002,         # 0.02% maker fee
     "taker_fee": 0.0005,         # 0.05% taker fee
@@ -507,7 +511,8 @@ ALPHATREND_CONFIG = {
     "coeff": 1.0,              # ATR multiplier
     "ap": 14,                  # ATR/MFI period
     "flat_lookback": 5,        # Yatay hareket kontrolü için bakılacak mum sayısı
-    "flat_threshold": 0.001,   # Yatay kabul edilecek değişim oranı (%0.1)
+    "flat_threshold": 0.002,   # FIX: Increased from 0.001 to 0.002 (less restrictive)
+    # Note: at_is_flat = True when change < threshold, so HIGHER threshold = MORE signals
 }
 
 # ==========================================
@@ -580,8 +585,15 @@ DEFAULT_STRATEGY_CONFIG = {
     # === SSL Flow Strategy Parameters ===
     "ssl_touch_tolerance": 0.003,    # 0.3% tolerance for SSL baseline touch detection
     "ssl_body_tolerance": 0.003,     # 0.3% tolerance for candle body position
-    "min_pbema_distance": 0.004,     # 0.4% minimum distance to PBEMA for valid TP
-    "lookback_candles": 5,           # Candles to check for baseline interaction
+    "min_pbema_distance": 0.004,     # Baseline: Min distance to PBEMA target
+    "lookback_candles": 5,           # Baseline: SSL touch lookback
+    "skip_body_position": False,     # Baseline: Check body position
+    "skip_adx_filter": False,        # Baseline: Apply ADX filter
+    "skip_overlap_check": False,     # Baseline: Check SSL-PBEMA overlap
+    "skip_at_flat_filter": False,    # Baseline: Apply AT flat filter
+    "skip_wick_rejection": True,     # FIX: Skip wick rejection filter (proven +$30 in P3 test)
+    "regime_adx_threshold": 20.0,    # Baseline: Standard regime threshold
+    "use_ssl_never_lost_filter": False,  # P5: Disabled (conflicts with baseline_touch)
 
     # === Scoring System (Alternative to AND Logic) ===
     # use_scoring=False (default): Binary AND logic - all filters must pass (strict, fewer trades)
@@ -685,16 +697,40 @@ DEFAULT_STRATEGY_CONFIG = {
     ],
     "progressive_be_after_tranche": 1,       # Move to BE after tranche 1 (0-indexed)
 
+    # === ATR-BASED BREAKEVEN BUFFER (v46.x - BE Fix) ===
+    # Dynamic BE buffer based on ATR instead of fixed 0.2%
+    # This prevents getting stopped out by normal market noise after moving to breakeven
+    # User annotation complaints: "Breakeven too early", "SL moved to breakeven too fast"
+    "be_atr_multiplier": 0.5,                # BE buffer = ATR * multiplier (default: 0.5x ATR)
+    "be_min_buffer_pct": 0.002,              # Minimum BE buffer (0.2% - fallback)
+    "be_max_buffer_pct": 0.01,               # Maximum BE buffer (1.0% - cap to prevent too wide)
+
+    # === SSL NEVER LOST FILTER (v46.x) ===
+    # Skip counter-trend trades if SSL baseline was never broken in lookback
+    # P5: DISABLED - conflicts with baseline_touch filter (Phase 4 finding)
+    "use_ssl_never_lost_filter": False,      # P5: Disabled - conflicts with baseline_touch
+    "ssl_never_lost_lookback": 20,           # Lookback period to check if baseline was ever crossed
+
+    # === TIME-BASED TRADE INVALIDATION (v46.x) ===
+    # Exit stale trades at breakeven if no meaningful movement after X candles
+    "use_time_invalidation": False,          # BASELINE: Disabled
+    "time_invalidation_candles": 8,          # Max candles before checking invalidation (8 = 2h for 15m)
+    "time_invalidation_min_move_pct": 0.003, # Min movement % required (0.3%)
+    "time_invalidation_exit_mode": "breakeven",  # "breakeven" or "market" (exit at BE or current price)
+
     # === CIRCUIT BREAKER (DD control) ===
     "circuit_breaker_max_full_stops": 2,     # Max consecutive full STOPs before disable
 
-    # === SMART RE-ENTRY SYSTEM (v1.9.0) ===
+    # === SMART RE-ENTRY SYSTEM (v1.9.0 / v46.x update) ===
     # Post-SL recovery system for liquidity grab scenarios
     # NOT a signal filter - it's a trade MANAGEMENT system
-    # When SL is hit, if price recovers near entry within 2 hours and AlphaTrend confirms,
+    # When SL is hit, if price recovers near entry and AlphaTrend confirms,
     # bypass cooldown and allow re-entry to catch post-sweep moves
-    # v1.9.0: Smart re-entry after SL (liquidity grab recovery)
-    "use_smart_reentry": False,              # DISABLED: Re-entry doesn't trigger (2h window + 0.8% threshold too tight)
+    # v46.x: Wider parameters to actually trigger (was 2h/0.3%, now 4h/1.0%)
+    "use_smart_reentry": False,              # BASELINE: Disabled
+    "reentry_window_hours": 4.0,             # Time window after SL (4 hours - wider than original 2h)
+    "reentry_price_threshold_pct": 0.01,     # Price must be within 1.0% of entry (wider than 0.3%)
+    "reentry_require_at_confirm": True,      # Require AlphaTrend to confirm same direction
 
     # === ROC MOMENTUM FILTER (v1.10.0) ===
     # Prevents counter-trend entries by checking Rate of Change

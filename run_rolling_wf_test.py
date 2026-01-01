@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 # Import utility functions from core
 from core.utils import calculate_duration, format_price
+from core.version import print_version_banner, get_version_string, VERSION, CHANGES
 
 
 # ============================================================================
@@ -574,13 +575,16 @@ def run_quick_test():
     """Hızlı test - 3 ay, az sembol"""
     from desktop_bot_refactored_v2_base_v7 import run_rolling_walkforward
 
-    print("\n" + "="*70)
-    print("🧪 HIZLI TEST (3 ay, 3 sembol)")
-    print("="*70 + "\n")
+    symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    timeframes = ["15m", "1h"]
+
+    # Print version banner
+    print_version_banner(symbols=symbols, timeframes=timeframes, lookback_days=30)
+    print("🧪 HIZLI TEST (3 ay, 3 sembol)\n")
 
     result = run_rolling_walkforward(
-        symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT"],
-        timeframes=["15m", "1h"],
+        symbols=symbols,
+        timeframes=timeframes,
         mode="weekly",
         lookback_days=30,
         forward_days=7,
@@ -687,13 +691,12 @@ def run_quick_btc_test(start_date: str = None, end_date: str = None, fast: bool 
     test_symbols = ["BTCUSDT"]
     test_timeframes = ["5m", "15m", "1h"]
 
-    print("\n" + "="*70)
-    print("QUICK BTC TEST - Sadece BTCUSDT")
+    # Print version banner
+    print_version_banner(symbols=test_symbols, timeframes=test_timeframes, lookback_days=60)
+    print("🚀 QUICK BTC TEST - Sadece BTCUSDT")
     print("   [EN HIZLI MOD - Degisiklikleri test etmek icin]")
     if fast:
         print("   [OPTIMIZED MODE - Master cache + parallel execution]")
-    print(f"   [SYMBOLS: {', '.join(test_symbols)}]")
-    print(f"   [TIMEFRAMES: {', '.join(test_timeframes)}]")
     print("="*70 + "\n")
 
     # Default dates: Full year 2025
@@ -754,9 +757,9 @@ def run_full_year_test():
         TIMEFRAMES,
     )
 
-    print("\n" + "="*70)
-    print("📊 2025 TAM YIL TESTİ")
-    print("="*70 + "\n")
+    # Print version banner
+    print_version_banner(symbols=SYMBOLS, timeframes=TIMEFRAMES, lookback_days=60)
+    print("📊 2025 TAM YIL TESTİ\n")
 
     result = compare_rolling_modes(
         symbols=SYMBOLS,  # Tüm semboller

@@ -14,6 +14,7 @@ import numpy as np
 from typing import Optional
 
 from .logging_config import get_logger
+from .config import ALPHATREND_CONFIG
 
 # Module logger
 _logger = get_logger(__name__)
@@ -88,10 +89,13 @@ def calculate_alphatrend(
         n = len(df)
 
         # Calculate True Range and ATR
+        # FIX: Use RMA (Wilder's smoothing) instead of SMA to match TradingView
+        # TradingView's ATR uses RMA by default, not SMA
         df['_at_tr'] = ta.true_range(df['high'], df['low'], df['close'])
-        df['_at_atr'] = ta.sma(df['_at_tr'], length=ap)
+        df['_at_atr'] = ta.rma(df['_at_tr'], length=ap)
 
         # Use MFI if volume available, otherwise use RSI
+        # REVERTED: MFI produces more signals and user confirmed manual trading uses MFI
         if 'volume' in df.columns and df['volume'].sum() > 0:
             df['_at_momentum'] = ta.mfi(df['high'], df['low'], df['close'], df['volume'], length=ap)
         else:
@@ -325,7 +329,14 @@ def calculate_indicators(df: pd.DataFrame, timeframe: str = None) -> pd.DataFram
     df["atr"] = ta.sma(tr, length=14)
 
     # AlphaTrend (for optional trend filtering)
-    df = calculate_alphatrend(df, coeff=1, ap=14)
+    # Use ALPHATREND_CONFIG for flat detection thresholds
+    df = calculate_alphatrend(
+        df,
+        coeff=ALPHATREND_CONFIG.get("coeff", 1.0),
+        ap=ALPHATREND_CONFIG.get("ap", 14),
+        flat_lookback=ALPHATREND_CONFIG.get("flat_lookback", 5),
+        flat_threshold=ALPHATREND_CONFIG.get("flat_threshold", 0.001)
+    )
 
     return df
 
