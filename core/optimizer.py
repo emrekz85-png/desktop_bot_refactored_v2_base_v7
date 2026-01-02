@@ -9,7 +9,6 @@
 # - Main optimizer (_optimize_backtest_configs)
 
 import os
-import math
 import itertools
 import random
 import json
@@ -25,6 +24,7 @@ from core.config import (
     WALK_FORWARD_CONFIG, MIN_OOS_TRADES_BY_TF,
     MIN_EXPECTANCY_R_MULTIPLE, MIN_SCORE_THRESHOLD,
     CONFIDENCE_RISK_MULTIPLIER, BASELINE_CONFIG,
+    DEFAULT_STRATEGY_CONFIG,  # P5.2: Import for filter skip settings
 )
 from core.trade_manager import SimTradeManager
 from core.utils import tf_to_timedelta
@@ -136,6 +136,20 @@ def _generate_candidate_configs():
                     {"trigger": 0.70, "fraction": 0.50},
                 ],
                 "progressive_be_after_tranche": 1,
+                # === FILTER SETTINGS (MUST MATCH config.py DEFAULTS) ===
+                # CRITICAL FIX: Defaults must match DEFAULT_STRATEGY_CONFIG exactly
+                # Previous bug: Optimizer tested with True, live ran with False
+                "skip_body_position": DEFAULT_STRATEGY_CONFIG.get("skip_body_position", False),
+                "skip_adx_filter": DEFAULT_STRATEGY_CONFIG.get("skip_adx_filter", False),
+                "skip_overlap_check": DEFAULT_STRATEGY_CONFIG.get("skip_overlap_check", False),
+                "skip_at_flat_filter": DEFAULT_STRATEGY_CONFIG.get("skip_at_flat_filter", False),
+                "regime_adx_threshold": DEFAULT_STRATEGY_CONFIG.get("regime_adx_threshold", 20.0),
+                "use_ssl_never_lost_filter": DEFAULT_STRATEGY_CONFIG.get("use_ssl_never_lost_filter", True),
+                "ssl_never_lost_lookback": DEFAULT_STRATEGY_CONFIG.get("ssl_never_lost_lookback", 20),
+                "use_confirmation_candle": DEFAULT_STRATEGY_CONFIG.get("use_confirmation_candle", True),
+                "confirmation_candle_mode": DEFAULT_STRATEGY_CONFIG.get("confirmation_candle_mode", "close"),
+                "min_pbema_distance": DEFAULT_STRATEGY_CONFIG.get("min_pbema_distance", 0.004),
+                "lookback_candles": DEFAULT_STRATEGY_CONFIG.get("lookback_candles", 5),
             }
         )
 
@@ -204,6 +218,19 @@ def _generate_quick_candidate_configs():
                 {"trigger": 0.70, "fraction": 0.50},
             ],
             "progressive_be_after_tranche": 1,
+            # === FILTER SETTINGS (MUST MATCH config.py DEFAULTS) ===
+            # CRITICAL FIX: Defaults must match DEFAULT_STRATEGY_CONFIG exactly
+            "skip_body_position": DEFAULT_STRATEGY_CONFIG.get("skip_body_position", False),
+            "skip_adx_filter": DEFAULT_STRATEGY_CONFIG.get("skip_adx_filter", False),
+            "skip_overlap_check": DEFAULT_STRATEGY_CONFIG.get("skip_overlap_check", False),
+            "skip_at_flat_filter": DEFAULT_STRATEGY_CONFIG.get("skip_at_flat_filter", False),
+            "regime_adx_threshold": DEFAULT_STRATEGY_CONFIG.get("regime_adx_threshold", 20.0),
+            "use_ssl_never_lost_filter": DEFAULT_STRATEGY_CONFIG.get("use_ssl_never_lost_filter", True),
+            "ssl_never_lost_lookback": DEFAULT_STRATEGY_CONFIG.get("ssl_never_lost_lookback", 20),
+            "use_confirmation_candle": DEFAULT_STRATEGY_CONFIG.get("use_confirmation_candle", True),
+            "confirmation_candle_mode": DEFAULT_STRATEGY_CONFIG.get("confirmation_candle_mode", "close"),
+            "min_pbema_distance": DEFAULT_STRATEGY_CONFIG.get("min_pbema_distance", 0.004),
+            "lookback_candles": DEFAULT_STRATEGY_CONFIG.get("lookback_candles", 5),
         })
 
     # 1 trailing config ekle
@@ -307,7 +334,7 @@ def _validate_config_oos(df_test: pd.DataFrame, sym: str, tf: str, config: dict)
         net_pnl, trades, trade_pnls, trade_r_multiples = _score_config_for_stream(
             df_test, sym, tf, config
         )
-    except Exception:
+    except (ValueError, KeyError, TypeError, IndexError, AttributeError):
         return None
 
     if trades == 0:
@@ -352,7 +379,12 @@ def _check_overfit(train_expected_r: float, oos_result: dict, tf: str) -> tuple:
     oos_trades = oos_result.get('oos_trades', 0)
     oos_expected_r = oos_result.get('oos_expected_r', 0.0)
 
-    # Not enough OOS trades for statistical significance
+    # P5 FIX: Zero OOS trades = treat as OVERFIT (can't validate)
+    # Previously this returned is_overfit=False which let unvalidated configs through
+    if oos_trades == 0:
+        return True, 0.0, "zero_oos_trades_overfit"
+
+    # Not enough OOS trades for statistical significance (but some trades exist)
     if oos_trades < min_test_trades:
         return False, 1.0, f"insufficient_oos_trades ({oos_trades}<{min_test_trades})"
 
@@ -382,16 +414,16 @@ def _compute_optimizer_score(net_pnl: float, trades: int, trade_pnls: list,
                               min_trades: int = 40, hard_min_trades: int = 5,
                               reject_negative_pnl: bool = True, tf: str = "15m",
                               trade_r_multiples: list = None) -> float:
-    """Compute a robust optimizer score that penalizes overfitting.
+    """Compute a robust optimizer score that prioritizes EDGE QUALITY over trade count.
 
-    Uses a modified Sortino-like approach with aggressive anti-overfit measures:
-    - HARD REJECT configs with negative net PnL (no edge = no config)
-    - HARD REJECT configs with fewer than hard_min_trades
-    - HARD REJECT configs with E[R] below MIN_EXPECTANCY_R_MULTIPLE threshold
-    - Penalizes low trade counts (statistical insignificance)
-    - Penalizes high variance in returns (inconsistent edge)
-    - Penalizes extreme drawdowns
-    - Rewards positive expectancy with consistency
+    P5 REWRITE: Changed from trade-count-rewarding to edge-quality-focused scoring.
+    Previous formula: score = net_pnl * trade_confidence (rewarded more trades)
+    New formula: score = expected_r * 100 * trade_factor * consistency * dd_penalty
+
+    Key changes:
+    - E[R] is the main score driver, not raw PnL
+    - Trade count is a PENALTY for low counts, NOT a reward for high counts
+    - This prevents optimizer from gaming the system with many low-quality trades
 
     Args:
         net_pnl: Total net profit/loss
@@ -417,29 +449,30 @@ def _compute_optimizer_score(net_pnl: float, trades: int, trade_pnls: list,
     if trades == 0:
         return -float("inf")
 
-    # HARD REJECT: E[R] too low = barely positive, not a real edge
-    # R-Multiple based threshold (account-size independent)
+    # Calculate E[R] - this is the PRIMARY score driver now
     if trade_r_multiples and len(trade_r_multiples) > 0:
         expected_r = sum(trade_r_multiples) / len(trade_r_multiples)
-        min_expected_r = MIN_EXPECTANCY_R_MULTIPLE.get(tf, 0.08)
-        if expected_r < min_expected_r:
-            return -float("inf")
     else:
-        # Fallback to old $/trade method if R-multiples not provided
-        expectancy = net_pnl / trades
-        min_expectancy = MIN_EXPECTANCY_PER_TRADE.get(tf, 2.0)
-        if expectancy < min_expectancy:
-            return -float("inf")
+        # Fallback: estimate E[R] from PnL (assume average risk of $35)
+        expected_r = (net_pnl / trades) / 35.0 if trades > 0 else 0
 
-    # Trade count confidence factor - MUCH more aggressive penalty for low counts
-    # Uses logarithmic scaling: need ~min_trades to reach 90% confidence
-    # 10 trades = ~50%, 20 trades = ~70%, 40 trades = ~90%, 60+ trades = ~100%
-    if trades >= min_trades:
-        trade_confidence = 1.0
+    # HARD REJECT: E[R] too low = barely positive, not a real edge
+    min_expected_r = MIN_EXPECTANCY_R_MULTIPLE.get(tf, 0.08)
+    if expected_r < min_expected_r:
+        return -float("inf")
+
+    # P5: Trade count PENALTY (not reward!)
+    # Punish < 10 trades heavily, neutral 10-30, slight penalty > 50 (overtrading)
+    if trades < 5:
+        trade_factor = 0.3  # Heavy penalty
+    elif trades < 10:
+        trade_factor = 0.5 + (trades - 5) * 0.1  # 0.5 - 1.0
+    elif trades <= 30:
+        trade_factor = 1.0  # Neutral zone
+    elif trades <= 50:
+        trade_factor = 1.0 - (trades - 30) * 0.005  # Slight penalty 1.0 - 0.9
     else:
-        # Logarithmic penalty: confidence = 0.3 + 0.7 * log(trades) / log(min_trades)
-        log_ratio = math.log(max(trades, 1)) / math.log(max(min_trades, 2))
-        trade_confidence = max(0.2, min(0.95, 0.2 + 0.75 * log_ratio))
+        trade_factor = 0.9 - min(0.2, (trades - 50) * 0.005)  # 0.9 - 0.7
 
     # Average PnL per trade (expectancy)
     avg_pnl = net_pnl / trades
@@ -497,8 +530,9 @@ def _compute_optimizer_score(net_pnl: float, trades: int, trade_pnls: list,
     # Note: Negative PnL configs are already hard-rejected above if reject_negative_pnl=True
     # This branch only executes for positive PnL configs
 
-    # Final score = net_pnl * confidence * consistency * win_rate * dd_penalty
-    score = net_pnl * trade_confidence * consistency_factor * win_rate_factor * dd_penalty
+    # P5: Final score = E[R] * 100 * trade_factor * consistency * win_rate * dd_penalty
+    # Using E[R] * 100 to normalize to comparable scale with old PnL-based scoring
+    score = expected_r * 100 * trade_factor * consistency_factor * win_rate_factor * dd_penalty
 
     return score
 
@@ -544,16 +578,20 @@ def _score_config_for_stream(df: pd.DataFrame, sym: str, tf: str, config: dict) 
     at_buyers_arr = df["at_buyers_dominant"].values if "at_buyers_dominant" in df.columns else None
     at_sellers_arr = df["at_sellers_dominant"].values if "at_sellers_dominant" in df.columns else None
 
+    # v46.x: Extract ATR array for ATR-based BE buffer
+    atr_arr = df["atr"].values if "atr" in df.columns else None
+
     for i in range(warmup, end):
         event_time = pd.Timestamp(timestamps[i]) + tf_to_timedelta(tf)
 
         # Build candle_data dict for this candle
-        candle_data = None
+        candle_data = {}
         if at_buyers_arr is not None and at_sellers_arr is not None:
-            candle_data = {
-                "at_buyers_dominant": bool(at_buyers_arr[i]),
-                "at_sellers_dominant": bool(at_sellers_arr[i]),
-            }
+            candle_data["at_buyers_dominant"] = bool(at_buyers_arr[i])
+            candle_data["at_sellers_dominant"] = bool(at_sellers_arr[i])
+        # v46.x: Add ATR for ATR-based BE buffer
+        if atr_arr is not None:
+            candle_data["atr"] = float(atr_arr[i]) if not np.isnan(atr_arr[i]) else None
 
         tm.update_trades(
             sym,

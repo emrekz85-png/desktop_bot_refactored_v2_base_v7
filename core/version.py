@@ -14,7 +14,7 @@ Kullanım:
     config = get_current_config()
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 # =============================================================================
 # CURRENT VERSION

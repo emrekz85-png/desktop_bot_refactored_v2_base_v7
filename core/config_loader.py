@@ -8,11 +8,10 @@ import os
 import json
 import hashlib
 from datetime import datetime, timezone
-from typing import Dict, Optional
 
 from .config import (
     BEST_CONFIGS_FILE, BEST_CONFIG_CACHE, BEST_CONFIG_WARNING_FLAGS,
-    DATA_DIR, TRADING_CONFIG,
+    TRADING_CONFIG,
     # Strategy configs from central location (single source of truth)
     DEFAULT_STRATEGY_CONFIG, SYMBOL_PARAMS,
     # Thread safety lock for config cache

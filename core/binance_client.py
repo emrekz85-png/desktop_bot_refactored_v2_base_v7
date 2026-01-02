@@ -9,6 +9,7 @@ Provides reliable API access with:
 """
 
 import time
+import logging
 import itertools
 import pandas as pd
 import numpy as np
@@ -16,7 +17,7 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, Dict, List, Tuple
 
-from .config import DATA_DIR
+logger = logging.getLogger(__name__)
 
 
 class BinanceClient:
@@ -195,7 +196,8 @@ class BinanceClient:
                 end_time = data[0][0] - 1
                 time.sleep(0.1)  # Rate limit courtesy
 
-            except Exception:
+            except (requests.RequestException, ValueError, KeyError) as e:
+                logger.debug(f"Klines fetch stopped: {e}")
                 break
 
         if not all_data:
@@ -279,7 +281,8 @@ class BinanceClient:
             try:
                 df = self.get_klines(symbol, tf, limit)
                 return (symbol, tf, df)
-            except Exception:
+            except (requests.RequestException, ValueError, KeyError) as e:
+                logger.debug(f"Fetch {symbol}-{tf} failed: {e}")
                 return (symbol, tf, pd.DataFrame())
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -288,8 +291,8 @@ class BinanceClient:
                 try:
                     sym, tf, df = future.result()
                     results[(sym, tf)] = df
-                except Exception as e:
-                    print(f"Parallel fetch error: {e}")
+                except (TimeoutError, RuntimeError) as e:
+                    logger.warning(f"Parallel fetch error: {e}")
 
         return results
 

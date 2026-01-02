@@ -18,7 +18,7 @@ from typing import Optional
 from queue import Queue
 from datetime import datetime, timezone
 
-from .config import CONFIG_FILE, DATA_DIR
+from .config import CONFIG_FILE
 
 
 class TelegramNotifier:
@@ -119,7 +119,7 @@ class TelegramNotifier:
                 # Wait for message with timeout
                 try:
                     message = self._message_queue.get(timeout=1.0)
-                except Exception:
+                except (TimeoutError, OSError):
                     continue
 
                 if message is None:  # Shutdown signal
@@ -361,7 +361,7 @@ def load_telegram_config() -> tuple:
                 config = json.load(f)
                 token = config.get("telegram_token", "")
                 chat_id = config.get("telegram_chat_id", "")
-        except Exception:
+        except (OSError, IOError, json.JSONDecodeError, KeyError):
             pass
 
     return token, chat_id

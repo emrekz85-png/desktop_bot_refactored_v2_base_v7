@@ -13,7 +13,7 @@ import hashlib
 import threading
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Optional, Any
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 
 try:
@@ -246,7 +246,7 @@ def load_from_disk_cache(sym: str, tf: str, start_date: str, end_date: str) -> O
         else:
             # SECURITY: Pickle is disabled - use parquet as safe default
             return pd.read_parquet(cache_path)
-    except Exception:
+    except (OSError, IOError, ValueError, KeyError):
         return None
 
 
@@ -264,7 +264,7 @@ def save_to_disk_cache(df: pd.DataFrame, sym: str, tf: str, start_date: str, end
         else:
             # SECURITY: Pickle is disabled - use parquet as safe default
             df.to_parquet(cache_path, index=False)
-    except Exception:
+    except (OSError, IOError, PermissionError):
         pass  # Silently fail cache writes
 
 
@@ -282,7 +282,7 @@ def clear_disk_cache(max_age_hours: float = 24):
                 age_hours = (now - mtime) / 3600
                 if age_hours > max_age_hours:
                     os.remove(filepath)
-        except Exception:
+        except (OSError, IOError, PermissionError):
             pass
 
 
@@ -371,7 +371,7 @@ class MasterDataCache:
                         df = df.reset_index(drop=True)
                         # Save to disk cache
                         save_to_disk_cache(df, sym, tf, self.fetch_start, self.end_date)
-                except Exception:
+                except (OSError, IOError, ValueError, KeyError, ConnectionError):
                     return None
 
             if df is not None and not df.empty and len(df) >= 250:

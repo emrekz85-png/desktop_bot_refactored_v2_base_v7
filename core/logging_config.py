@@ -20,7 +20,6 @@ Usage:
 import logging
 import sys
 import os
-from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
