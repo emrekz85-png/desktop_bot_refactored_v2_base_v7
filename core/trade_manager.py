@@ -30,6 +30,14 @@ from .utils import (
 )
 from .logging_config import get_logger
 
+# Correlation Management (Priority 4 - Hedge Fund Recommendation)
+try:
+    from .correlation_manager import CorrelationManager, CorrelationCheckResult
+    HAS_CORRELATION_MANAGER = True
+except ImportError:
+    HAS_CORRELATION_MANAGER = False
+    CorrelationManager = None
+
 _logger = get_logger(__name__)
 
 
@@ -61,6 +69,7 @@ class BaseTradeManager(ABC):
 
         # Config from central settings
         self.slippage_pct = TRADING_CONFIG["slippage_rate"]
+        self.sl_slippage_multiplier = TRADING_CONFIG.get("sl_slippage_multiplier", 1.0)  # P5: SL exits have higher slippage
         self.risk_per_trade_pct = TRADING_CONFIG.get("risk_per_trade_pct", 0.01)
         self.max_portfolio_risk_pct = TRADING_CONFIG.get("max_portfolio_risk_pct", 0.03)
         self.leverage = TRADING_CONFIG.get("leverage", 10)
@@ -93,6 +102,38 @@ class BaseTradeManager(ABC):
         # Prevents race condition where two threads could both pass is_stream_killed()
         # and both open trades before _update_circuit_breaker_tracking() is called
         self._circuit_breaker_lock = threading.Lock()
+
+        # ==========================================
+        # CORRELATION MANAGEMENT (v45.x - Priority 4)
+        # ==========================================
+        # Prevents over-concentration in highly correlated assets
+        # BTC/ETH/LINK correlation = 0.85-0.95, 3 positions = 1.07 effective positions
+        self._use_correlation_management = False  # BASELINE: Disabled
+        self._correlation_manager = None
+        if HAS_CORRELATION_MANAGER:
+            self._correlation_manager = CorrelationManager(
+                max_positions_same_direction=2,
+                max_total_positions=4,
+                high_correlation_threshold=0.80,
+                position_reduction_factor=0.50,
+                enable_size_reduction=True,
+                enable_direction_limit=True,
+            )
+
+        # ==========================================
+        # SMART RE-ENTRY SYSTEM (v46.x)
+        # ==========================================
+        # Post-SL recovery system for liquidity grab scenarios
+        # Stores recent SL trades and allows quick re-entry if price recovers
+        # Key: (symbol, timeframe) -> SL trade info
+        self.last_sl_trades: Dict[Tuple[str, str], Dict] = {}
+        # Statistics
+        self._reentry_stats = {
+            "attempts": 0,
+            "wins": 0,
+            "losses": 0,
+            "total_pnl": 0.0,
+        }
 
     def _next_id(self) -> int:
         """Generate next trade ID."""
@@ -139,6 +180,156 @@ class BaseTradeManager(ABC):
         # Cooldown expired, remove it
         del self.cooldowns[key]
         return False
+
+    # ==========================================
+    # SMART RE-ENTRY METHODS (v46.x)
+    # ==========================================
+
+    def check_quick_reentry(
+        self,
+        symbol: str,
+        timeframe: str,
+        current_price: float,
+        current_time,
+        at_dominant: str,
+        window_hours: float = 4.0,
+        price_threshold_pct: float = 0.01,
+        require_at_confirm: bool = True,
+    ) -> bool:
+        """
+        Check if re-entry conditions are met after a recent SL hit.
+
+        Conditions for re-entry:
+        1. SL trade exists for this stream
+        2. Time since SL <= window_hours (liquidity grabs resolve quickly)
+        3. Price within price_threshold_pct of original entry
+        4. AlphaTrend confirms same direction (optional)
+        5. Re-entry not already used
+
+        Args:
+            symbol: Trading symbol
+            timeframe: Timeframe
+            current_price: Current market price
+            current_time: Current time (datetime)
+            at_dominant: AlphaTrend dominance ("BUYERS" or "SELLERS")
+            window_hours: Time window after SL (default: 4h)
+            price_threshold_pct: Max price distance from entry (default: 1.0%)
+            require_at_confirm: Require AlphaTrend to confirm (default: True)
+
+        Returns:
+            True if re-entry allowed, False otherwise
+        """
+        key = (symbol, timeframe)
+
+        # Check if SL trade exists
+        if key not in self.last_sl_trades:
+            return False
+
+        sl_trade = self.last_sl_trades[key]
+
+        # Check if re-entry already used
+        if sl_trade.get("reentry_used", False):
+            return False
+
+        # Check time window
+        exit_time = sl_trade.get("exit_time")
+        if exit_time is None:
+            return False
+
+        exit_time_norm = normalize_datetime(exit_time)
+        current_time_norm = normalize_datetime(current_time)
+
+        if exit_time_norm is None or current_time_norm is None:
+            return False
+
+        time_since_exit = (current_time_norm - exit_time_norm).total_seconds() / 3600.0
+        if time_since_exit > window_hours:
+            # Expired - clean up
+            del self.last_sl_trades[key]
+            return False
+
+        # Check price proximity
+        original_entry = float(sl_trade.get("entry", 0))
+        if original_entry <= 0:
+            return False
+
+        price_diff_pct = abs(current_price - original_entry) / original_entry
+        if price_diff_pct > price_threshold_pct:
+            return False
+
+        # Check AlphaTrend confirmation (optional)
+        if require_at_confirm:
+            original_side = sl_trade.get("side", "")
+            if original_side == "LONG" and at_dominant != "BUYERS":
+                # Direction changed - clean up and reject
+                del self.last_sl_trades[key]
+                return False
+            if original_side == "SHORT" and at_dominant != "SELLERS":
+                # Direction changed - clean up and reject
+                del self.last_sl_trades[key]
+                return False
+
+        return True
+
+    def mark_reentry_used(self, symbol: str, timeframe: str):
+        """Mark re-entry as used to prevent duplicate re-entries."""
+        key = (symbol, timeframe)
+        if key in self.last_sl_trades:
+            self.last_sl_trades[key]["reentry_used"] = True
+            self._reentry_stats["attempts"] += 1
+
+    def update_reentry_stats(self, trade: Dict):
+        """Update statistics when a re-entry trade closes."""
+        if not trade.get("is_reentry", False):
+            return
+
+        pnl = float(trade.get("pnl", 0))
+        self._reentry_stats["total_pnl"] += pnl
+
+        if pnl > 0:
+            self._reentry_stats["wins"] += 1
+        else:
+            self._reentry_stats["losses"] += 1
+
+    def get_reentry_stats(self) -> Dict:
+        """Get re-entry system statistics."""
+        attempts = self._reentry_stats["attempts"]
+        wins = self._reentry_stats["wins"]
+        losses = self._reentry_stats["losses"]
+        total_pnl = self._reentry_stats["total_pnl"]
+
+        return {
+            "reentry_attempts": attempts,
+            "reentry_wins": wins,
+            "reentry_losses": losses,
+            "reentry_total_pnl": total_pnl,
+            "reentry_win_rate": wins / attempts if attempts > 0 else 0.0,
+            "reentry_avg_pnl": total_pnl / attempts if attempts > 0 else 0.0,
+            "pending_reentry_count": len(self.last_sl_trades),
+        }
+
+    def _store_sl_trade(
+        self,
+        symbol: str,
+        timeframe: str,
+        trade_type: str,
+        entry: float,
+        sl: float,
+        tp: float,
+        exit_time,
+    ):
+        """Store SL trade details for potential re-entry."""
+        key = (symbol, timeframe)
+        self.last_sl_trades[key] = {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "side": trade_type,
+            "entry": entry,
+            "sl": sl,
+            "tp": tp,
+            "exit_time": exit_time,
+            "reentry_used": False,
+        }
 
     def _calculate_equity(self, current_prices: dict = None) -> float:
         """
@@ -249,7 +440,7 @@ class BaseTradeManager(ABC):
 
         return position_size, position_notional, required_margin, risk_amount
 
-    def _apply_slippage(self, price: float, trade_type: str, is_entry: bool = True) -> float:
+    def _apply_slippage(self, price: float, trade_type: str, is_entry: bool = True, is_stop_loss: bool = False) -> float:
         """
         Apply slippage to price.
 
@@ -257,22 +448,28 @@ class BaseTradeManager(ABC):
             price: Raw price
             trade_type: "LONG" or "SHORT"
             is_entry: True for entry, False for exit
+            is_stop_loss: True for stop loss exits (P5: higher slippage due to panic selling)
 
         Returns:
             Price adjusted for slippage
         """
+        # P5: Stop loss exits have higher slippage (panic selling, liquidity gaps)
+        slip = self.slippage_pct
+        if is_stop_loss and not is_entry:
+            slip = self.slippage_pct * self.sl_slippage_multiplier
+
         if is_entry:
             # Entry: LONG pays more, SHORT gets less
             if trade_type == "LONG":
-                return price * (1 + self.slippage_pct)
+                return price * (1 + slip)
             else:
-                return price * (1 - self.slippage_pct)
+                return price * (1 - slip)
         else:
             # Exit: LONG gets less, SHORT pays more
             if trade_type == "LONG":
-                return price * (1 - self.slippage_pct)
+                return price * (1 - slip)
             else:
-                return price * (1 + self.slippage_pct)
+                return price * (1 + slip)
 
     def _process_trade_update(
         self,
@@ -332,7 +529,7 @@ class BaseTradeManager(ABC):
         # === AŞAMA 3: RR bazlı effective_partial_trigger hesaplama ===
         # Config'den partial TP parametrelerini al
         partial_trigger = float(trade.get("partial_trigger", 0.65))
-        partial_fraction = float(trade.get("partial_fraction", 0.33))
+        partial_fraction = float(trade.get("partial_fraction", 0.50))
         partial_rr_adjustment = trade.get("partial_rr_adjustment", True)
 
         # RR değerini al (opt_rr veya entry/tp/sl'den hesapla)
@@ -361,6 +558,28 @@ class BaseTradeManager(ABC):
 
         # === AŞAMA 5: BE trigger = effective_partial_trigger ===
         effective_be_trigger = effective_partial_trigger
+
+        # === ATR-BASED BE BUFFER (v46.x - BE Fix) ===
+        # Use ATR to calculate dynamic BE buffer instead of fixed 0.2%
+        # This prevents getting stopped out by normal market noise
+        be_atr_multiplier = float(trade.get("be_atr_multiplier", 0.5))  # Default: 0.5x ATR
+        be_min_buffer_pct = float(trade.get("be_min_buffer_pct", 0.002))  # Min: 0.2%
+        be_max_buffer_pct = float(trade.get("be_max_buffer_pct", 0.01))  # Max: 1.0%
+
+        # Get ATR from candle_data (passed from trading engine)
+        atr_value = None
+        if candle_data is not None:
+            atr_value = candle_data.get("atr")
+
+        # Calculate BE buffer
+        if atr_value is not None and atr_value > 0 and entry > 0:
+            # ATR-based buffer: atr_value * multiplier / entry (as percentage)
+            atr_buffer_pct = (atr_value * be_atr_multiplier) / entry
+            # Clamp between min and max
+            be_buffer = max(be_min_buffer_pct, min(be_max_buffer_pct, atr_buffer_pct))
+        else:
+            # Fallback to minimum buffer if ATR not available
+            be_buffer = be_min_buffer_pct
 
         # Calculate prices and progress
         if t_type == "LONG":
@@ -553,6 +772,10 @@ class BaseTradeManager(ABC):
                 current_risk = float(self.open_trades[trade_idx].get("risk_amount", trade_risk_amount))
                 partial_risk = current_risk * tranche_fraction
                 remaining_risk = current_risk - partial_risk
+
+                # Store original risk for final R-multiple calculation (BUG FIX v1.8.3)
+                if "original_risk_amount" not in self.open_trades[trade_idx]:
+                    self.open_trades[trade_idx]["original_risk_amount"] = trade_risk_amount
                 if partial_risk > 0:
                     partial_r_multiple = net_partial_pnl / partial_risk
                     self.trade_r_multiples.append(partial_r_multiple)
@@ -569,9 +792,13 @@ class BaseTradeManager(ABC):
                 self.open_trades[trade_idx]["partial_taken"] = True  # Backward compat
                 self.open_trades[trade_idx]["partial_price"] = float(partial_fill)
 
-                # Move to BE after specified tranche
+                # Accumulate partial PnL for final trade record (BUG FIX v1.8.3)
+                current_partial_total = float(self.open_trades[trade_idx].get("partial_pnl_total", 0.0))
+                self.open_trades[trade_idx]["partial_pnl_total"] = current_partial_total + net_partial_pnl
+
+                # Move to BE after specified tranche (using ATR-based buffer)
                 if partials_taken_count >= progressive_be_after and not trade.get("breakeven"):
-                    be_buffer = 0.002
+                    # be_buffer already calculated above using ATR
                     if t_type == "LONG":
                         be_sl = entry * (1 + be_buffer)
                     else:
@@ -643,6 +870,10 @@ class BaseTradeManager(ABC):
                 trade_risk_amount = float(trade.get("risk_amount", 0))
                 partial_risk = trade_risk_amount * partial_fraction
                 remaining_risk = trade_risk_amount - partial_risk
+
+                # Store original risk for final R-multiple calculation (BUG FIX v1.8.3)
+                if "original_risk_amount" not in self.open_trades[trade_idx]:
+                    self.open_trades[trade_idx]["original_risk_amount"] = trade_risk_amount
                 if partial_risk > 0:
                     partial_r_multiple = net_partial_pnl / partial_risk
                     self.trade_r_multiples.append(partial_r_multiple)
@@ -659,9 +890,13 @@ class BaseTradeManager(ABC):
                 self.open_trades[trade_idx]["partial_taken"] = True
                 self.open_trades[trade_idx]["partial_price"] = float(partial_fill)
 
+                # Accumulate partial PnL for final trade record (BUG FIX v1.8.3)
+                current_partial_total = float(self.open_trades[trade_idx].get("partial_pnl_total", 0.0))
+                self.open_trades[trade_idx]["partial_pnl_total"] = current_partial_total + net_partial_pnl
+
                 # 2. ÖNCE eventleri ekle
-                # Move to breakeven
-                be_buffer = 0.002
+                # Move to breakeven (using ATR-based buffer)
+                # be_buffer already calculated above using ATR
                 if t_type == "LONG":
                     be_sl = entry * (1 + be_buffer)
                 else:
@@ -699,8 +934,8 @@ class BaseTradeManager(ABC):
 
         # Breakeven without partial (only if partial not just taken and BE not set)
         if in_profit and (not trade.get("breakeven")) and progress >= effective_be_trigger:
-            # Breakeven without partial (use effective_be_trigger)
-            be_buffer = 0.002
+            # Breakeven without partial (using ATR-based buffer)
+            # be_buffer already calculated above using ATR
             if t_type == "LONG":
                 be_sl = entry * (1 + be_buffer)
             else:
@@ -719,7 +954,7 @@ class BaseTradeManager(ABC):
             partial_price = trade.get("partial_price")
             if partial_price is not None:
                 current_sl = float(self.open_trades[trade_idx]["sl"])
-                be_buffer = 0.002  # Same buffer as BE_SET
+                # be_buffer already calculated above using ATR
 
                 if t_type == "LONG":
                     # New BE at partial price (with buffer above it)
@@ -746,7 +981,7 @@ class BaseTradeManager(ABC):
         # Trailing SL (uses effective_be_trigger for BE activation)
         if in_profit and use_trailing:
             if (not trade.get("breakeven")) and progress >= effective_be_trigger:
-                be_buffer = 0.002
+                # be_buffer already calculated above using ATR
                 if t_type == "LONG":
                     be_sl = entry * (1 + be_buffer)
                 else:
@@ -776,6 +1011,90 @@ class BaseTradeManager(ABC):
             append_trade_event(self.open_trades[trade_idx], "STOP_PROTECTION", candle_time_utc,
                              self.open_trades[trade_idx].get("sl"))
 
+        # === TIME-BASED TRADE INVALIDATION (v46.x) ===
+        # Exit stale trades at breakeven if no meaningful movement after X candles
+        # User complaint: "no movement for a while, should have been exited at entry"
+        use_time_invalidation = trade.get("use_time_invalidation", True)
+        time_invalidation_candles = int(trade.get("time_invalidation_candles", 8))
+        time_invalidation_min_move_pct = float(trade.get("time_invalidation_min_move_pct", 0.003))
+        time_invalidation_exit_mode = trade.get("time_invalidation_exit_mode", "breakeven")
+
+        # Increment candles counter
+        candles_since_entry = int(trade.get("candles_since_entry", 0)) + 1
+        self.open_trades[trade_idx]["candles_since_entry"] = candles_since_entry
+
+        # Track max favorable move (for LONG: max high above entry, for SHORT: max low below entry)
+        max_favorable_move_pct = float(trade.get("max_favorable_move_pct", 0.0))
+        if t_type == "LONG":
+            current_favorable_pct = max(0, (candle_high - entry) / entry)
+        else:
+            current_favorable_pct = max(0, (entry - candle_low) / entry)
+        max_favorable_move_pct = max(max_favorable_move_pct, current_favorable_pct)
+        self.open_trades[trade_idx]["max_favorable_move_pct"] = max_favorable_move_pct
+
+        # Check invalidation conditions
+        time_invalidation_triggered = False
+        if (use_time_invalidation and
+            candles_since_entry >= time_invalidation_candles and
+            not trade.get("partial_taken", False) and  # Don't invalidate if partial already taken
+            not trade.get("breakeven", False) and  # Don't invalidate if already at BE
+            max_favorable_move_pct < time_invalidation_min_move_pct):  # Hasn't moved enough
+
+            time_invalidation_triggered = True
+            append_trade_event(self.open_trades[trade_idx], "TIME_INVALIDATION", candle_time_utc,
+                             f"candles={candles_since_entry}, max_move={max_favorable_move_pct:.4f}")
+
+            # Force exit at breakeven or market
+            if time_invalidation_exit_mode == "breakeven":
+                # Exit at entry price (breakeven)
+                exit_level = entry
+                reason = "INVALIDATED (Time-BE)"
+            else:
+                # Exit at current market price
+                exit_level = candle_close
+                reason = "INVALIDATED (Time-Market)"
+
+            # Close position immediately
+            current_size = float(self.open_trades[trade_idx]["size"])
+            margin_release = float(self.open_trades[trade_idx].get("margin", initial_margin))
+            exit_fill = self._apply_slippage(exit_level, t_type, is_entry=False)
+
+            if t_type == "LONG":
+                gross_pnl = (exit_fill - entry) * current_size
+            else:
+                gross_pnl = (entry - exit_fill) * current_size
+
+            commission_notional = abs(current_size) * abs(exit_fill)
+            commission = commission_notional * TRADING_CONFIG["total_fee"]
+            funding_cost = calculate_funding_cost(
+                open_time=trade.get("open_time_utc", ""),
+                close_time=candle_time_utc,
+                notional_value=abs(current_size) * entry
+            )
+            net_pnl = gross_pnl - commission - funding_cost
+
+            # Add partial PnLs if any
+            partial_total = float(trade.get("partial_pnl_total", 0.0))
+            combined_pnl = net_pnl + partial_total
+
+            self.wallet_balance += margin_release + combined_pnl
+            self.locked_margin -= margin_release
+
+            # Build closed trade record
+            closed_trade = trade.copy()
+            closed_trade.update({
+                "exit": float(exit_fill),
+                "pnl": combined_pnl,
+                "gross_pnl": gross_pnl + partial_total,
+                "net_pnl": net_pnl,
+                "commission": commission,
+                "funding_cost": funding_cost,
+                "status": reason,
+                "close_time_utc": candle_time_utc,
+                "candles_held": candles_since_entry,
+            })
+            return closed_trade
+
         # Check TP/SL hit
         sl = float(self.open_trades[trade_idx]["sl"])
 
@@ -804,7 +1123,9 @@ class BaseTradeManager(ABC):
         current_size = float(self.open_trades[trade_idx]["size"])
         margin_release = float(self.open_trades[trade_idx].get("margin", initial_margin))
 
-        exit_fill = self._apply_slippage(exit_level, t_type, is_entry=False)
+        # P5: Stop loss exits have higher slippage (panic selling, liquidity gaps)
+        is_stop = "STOP" in reason
+        exit_fill = self._apply_slippage(exit_level, t_type, is_entry=False, is_stop_loss=is_stop)
 
         if t_type == "LONG":
             gross_pnl = (exit_fill - entry) * current_size
@@ -823,10 +1144,17 @@ class BaseTradeManager(ABC):
 
         final_net_pnl = gross_pnl - commission - funding_cost
 
-        # R-Multiple
-        trade_risk_amount = float(trade.get("risk_amount", 0))
-        if trade_risk_amount > 0:
-            r_multiple = final_net_pnl / trade_risk_amount
+        # R-Multiple calculation (BUG FIX v1.8.3 - use combined PnL and original risk)
+        partial_pnl_total = float(trade.get("partial_pnl_total", 0.0))
+        combined_pnl_for_r = final_net_pnl + partial_pnl_total
+
+        # Use original risk if partial was taken, otherwise use current risk
+        original_risk = float(trade.get("original_risk_amount", 0))
+        current_risk = float(trade.get("risk_amount", 0))
+        total_risk_for_r = original_risk if original_risk > 0 else current_risk
+
+        if total_risk_for_r > 0:
+            r_multiple = combined_pnl_for_r / total_risk_for_r
             self.trade_r_multiples.append(r_multiple)
             trade["r_multiple"] = r_multiple
         else:
@@ -843,13 +1171,30 @@ class BaseTradeManager(ABC):
             cooldown_base = normalize_datetime(candle_time_utc) or utcnow()
             self.cooldowns[(trade["symbol"], tf)] = cooldown_base + pd.Timedelta(minutes=wait_minutes)
 
+            # Store SL trade for potential re-entry (v46.x Smart Re-Entry)
+            self._store_sl_trade(
+                symbol=trade["symbol"],
+                timeframe=tf,
+                trade_type=t_type,
+                entry=entry,
+                sl=sl,
+                tp=float(trade.get("tp", 0)),
+                exit_time=candle_time_utc,
+            )
+
         # Check for breakeven stop
         if trade.get("breakeven") and abs(final_net_pnl) < 1e-6 and "STOP" in reason:
             reason = "BE"
 
+        # Add partial PnL to final trade record (BUG FIX v1.8.3)
+        partial_pnl_total = float(trade.get("partial_pnl_total", 0.0))
+        combined_pnl = final_net_pnl + partial_pnl_total
+
         # Finalize trade
         trade["status"] = reason
-        trade["pnl"] = final_net_pnl
+        trade["pnl"] = combined_pnl
+        trade["remaining_pnl"] = final_net_pnl  # For debugging
+        trade["partial_pnl_total"] = partial_pnl_total  # For debugging
         trade["close_time_utc"] = format_time_utc(candle_time_utc)
         trade["close_time_local"] = format_time_local(candle_time_utc, offset_hours=3)
         trade["close_price"] = float(exit_fill)
@@ -1124,7 +1469,7 @@ class BaseTradeManager(ABC):
 
         import logging
         logger = logging.getLogger(__name__)
-        logger.info("Resetting circuit breaker state (force=%s)", force)
+        logger.debug("Resetting circuit breaker state (force=%s)", force)
 
         self._stream_pnl_tracker.clear()
         self._circuit_breaker_killed.clear()
@@ -1174,6 +1519,48 @@ class BaseTradeManager(ABC):
             "sl_widened_wins": sl_widened_wins,
             "sl_widened_losses": sl_widened_losses,
             "total_trades": len(all_trades),
+        }
+
+    def get_correlation_stats(self) -> Dict:
+        """Get correlation management statistics (v45.x - Priority 4).
+
+        Returns:
+            Dict with correlation-reduced trade stats and portfolio summary
+        """
+        all_trades = self.history + self.open_trades
+
+        # Correlation reduction stats
+        corr_reduced_count = 0
+        corr_reduced_wins = 0
+        corr_reduced_losses = 0
+        corr_reduced_pnl = 0.0
+        normal_pnl = 0.0
+
+        for trade in all_trades:
+            pnl = float(trade.get("pnl", 0))
+            if trade.get("correlation_reduced"):
+                corr_reduced_count += 1
+                corr_reduced_pnl += pnl
+                if pnl > 0:
+                    corr_reduced_wins += 1
+                elif pnl < 0:
+                    corr_reduced_losses += 1
+            else:
+                normal_pnl += pnl
+
+        # Get portfolio summary from correlation manager
+        portfolio_summary = {}
+        if self._correlation_manager is not None:
+            portfolio_summary = self._correlation_manager.get_portfolio_summary()
+
+        return {
+            "correlation_reduced_trades": corr_reduced_count,
+            "correlation_reduced_wins": corr_reduced_wins,
+            "correlation_reduced_losses": corr_reduced_losses,
+            "correlation_reduced_pnl": corr_reduced_pnl,
+            "normal_pnl": normal_pnl,
+            "total_trades": len(all_trades),
+            "portfolio_summary": portfolio_summary,
         }
 
     @abstractmethod
@@ -1291,15 +1678,52 @@ class SimTradeManager(BaseTradeManager):
         # CRITICAL: Lock protects against race condition where two threads
         # could both pass is_stream_killed() before either marks the stream as active.
         # This ensures check-and-update is atomic in multi-threaded environments.
+
+        # === SMART RE-ENTRY CHECK (v46.x) ===
+        # Check if this is a valid re-entry after a recent SL hit
+        # Re-entry bypasses normal cooldown if conditions are met
+        is_reentry = False
+        cooldown_ref_time = trade_data.get("open_time_utc") or utcnow()
+
+        # Get re-entry config from trade_data or DEFAULT_STRATEGY_CONFIG
+        from core.config import DEFAULT_STRATEGY_CONFIG
+        use_smart_reentry = trade_data.get("use_smart_reentry", DEFAULT_STRATEGY_CONFIG.get("use_smart_reentry", False))
+        reentry_window_hours = float(trade_data.get("reentry_window_hours", DEFAULT_STRATEGY_CONFIG.get("reentry_window_hours", 4.0)))
+        reentry_price_threshold_pct = float(trade_data.get("reentry_price_threshold_pct", DEFAULT_STRATEGY_CONFIG.get("reentry_price_threshold_pct", 0.01)))
+        reentry_require_at_confirm = trade_data.get("reentry_require_at_confirm", DEFAULT_STRATEGY_CONFIG.get("reentry_require_at_confirm", True))
+
+        # Get current price and AlphaTrend from trade_data
+        current_price = float(trade_data.get("entry", 0))
+        indicators = trade_data.get("indicators_at_entry", {})
+        at_dominant = indicators.get("at_dominant", trade_data.get("at_dominant", ""))
+
         with self._circuit_breaker_lock:
             # Circuit breaker check - defense in depth
             # This guarantees no trade opens even if signal-side check was bypassed
             if self.is_stream_killed(sym, tf):
                 return False
 
-            # Early validation checks (inside lock for atomicity)
-            cooldown_ref_time = trade_data.get("open_time_utc") or utcnow()
-            if self.check_cooldown(sym, tf, cooldown_ref_time):
+            # === SMART RE-ENTRY: Check before cooldown ===
+            # If re-entry conditions are met, bypass cooldown
+            if use_smart_reentry and current_price > 0:
+                is_reentry = self.check_quick_reentry(
+                    symbol=sym,
+                    timeframe=tf,
+                    current_price=current_price,
+                    current_time=cooldown_ref_time,
+                    at_dominant=at_dominant,
+                    window_hours=reentry_window_hours,
+                    price_threshold_pct=reentry_price_threshold_pct,
+                    require_at_confirm=reentry_require_at_confirm,
+                )
+                if is_reentry:
+                    _logger.info(
+                        "SMART RE-ENTRY triggered: %s %s %s - bypassing cooldown",
+                        sym, tf, trade_type
+                    )
+
+            # Cooldown check (skipped if re-entry is valid)
+            if not is_reentry and self.check_cooldown(sym, tf, cooldown_ref_time):
                 return False
 
             # Check for existing open position on this stream
@@ -1309,6 +1733,52 @@ class SimTradeManager(BaseTradeManager):
 
             # Mark stream as active by proceeding with trade opening
             # (The actual trade opening continues outside the lock for performance)
+
+        # ==========================================
+        # CORRELATION CHECK (v45.x - Priority 4)
+        # ==========================================
+        # Check if new position violates correlation rules:
+        # 1. Max 2 positions in same direction (LONG or SHORT)
+        # 2. Position size reduction for correlated assets
+        correlation_size_multiplier = 1.0
+        if (self._use_correlation_management and
+            self._correlation_manager is not None and
+            HAS_CORRELATION_MANAGER):
+
+            # Build open positions dict for correlation check
+            open_positions_dict = {}
+            for t in self.open_trades:
+                t_sym = t.get("symbol", "")
+                t_dir = t.get("type", "")
+                t_size = abs(float(t.get("risk_amount", 0)))  # Use risk amount for sizing
+                if t_sym and t_dir:
+                    open_positions_dict[t_sym] = {
+                        "direction": t_dir,
+                        "size": t_size,
+                    }
+
+            # Check correlation rules
+            corr_result = self._correlation_manager.check_new_position(
+                symbol=sym,
+                direction=trade_type,
+                base_position_size=1.0,  # Normalized, actual size calculated later
+                open_positions=open_positions_dict,
+            )
+
+            if not corr_result.can_open:
+                _logger.info(
+                    "Trade BLOCKED by correlation manager: %s %s - %s",
+                    sym, trade_type, corr_result.reason
+                )
+                return False
+
+            # Apply size reduction for correlated assets
+            correlation_size_multiplier = corr_result.size_multiplier
+            if correlation_size_multiplier < 1.0:
+                _logger.info(
+                    "Position size reduced %.0f%% due to correlation: %s",
+                    (1 - correlation_size_multiplier) * 100, corr_result.reason
+                )
 
         setup_type = trade_data.get("setup", "Unknown")
 
@@ -1355,6 +1825,19 @@ class SimTradeManager(BaseTradeManager):
         partial_tranches = config_snapshot.get("partial_tranches", [])
         progressive_be_after_tranche = config_snapshot.get("progressive_be_after_tranche", 0)
 
+        # === ATR-BASED BE BUFFER (v46.x - BE Fix) ===
+        # Dynamic BE buffer based on ATR instead of fixed 0.2%
+        be_atr_multiplier = config_snapshot.get("be_atr_multiplier", 0.5)  # Default: 0.5x ATR
+        be_min_buffer_pct = config_snapshot.get("be_min_buffer_pct", 0.002)  # Min: 0.2%
+        be_max_buffer_pct = config_snapshot.get("be_max_buffer_pct", 0.01)  # Max: 1.0%
+
+        # === TIME-BASED TRADE INVALIDATION (v46.x) ===
+        # Exit stale trades at breakeven if no meaningful movement
+        use_time_invalidation = config_snapshot.get("use_time_invalidation", True)
+        time_invalidation_candles = config_snapshot.get("time_invalidation_candles", 8)
+        time_invalidation_min_move_pct = config_snapshot.get("time_invalidation_min_move_pct", 0.003)
+        time_invalidation_exit_mode = config_snapshot.get("time_invalidation_exit_mode", "breakeven")
+
         # Confidence-based risk multiplier
         # Backward compat: eski JSON'larda _confidence olabilir
         confidence_level = config_snapshot.get("confidence") or config_snapshot.get("_confidence", "high")
@@ -1385,6 +1868,21 @@ class SimTradeManager(BaseTradeManager):
             return False
 
         risk_amount = self.wallet_balance * effective_risk_pct
+
+        # Apply correlation-based position size reduction (v45.x - Priority 4)
+        # This reduces risk when opening positions in highly correlated assets
+        if correlation_size_multiplier < 1.0:
+            risk_amount *= correlation_size_multiplier
+
+        # === VOLATILITY REGIME POSITION SIZING (Expert Panel - Sinclair) ===
+        # Adjust position size based on volatility regime:
+        # - LOW_VOL: 0.5x (conservative - SSL whipsaws)
+        # - NORMAL_VOL: 1.0x (standard)
+        # - HIGH_VOL: 1.5x (aggressive - strong trends)
+        vol_regime_multiplier = float(trade_data.get("vol_position_multiplier", 1.0))
+        if vol_regime_multiplier != 1.0:
+            risk_amount *= vol_regime_multiplier
+
         tp_price = float(trade_data["tp"])
 
         # === MIN SL DISTANCE VALIDATION ===
@@ -1507,6 +2005,9 @@ class SimTradeManager(BaseTradeManager):
             # SL widening tracking (v42.x)
             "sl_widened": sl_was_widened,
             "original_sl": original_sl if sl_was_widened else None,
+            # Correlation management tracking (v45.x - Priority 4)
+            "correlation_size_multiplier": correlation_size_multiplier,
+            "correlation_reduced": correlation_size_multiplier < 1.0,
             # === MOMENTUM TP EXTENSION (v1.2) ===
             "momentum_tp_extension": momentum_tp_extension,
             "momentum_extension_threshold": momentum_extension_threshold,
@@ -1516,13 +2017,41 @@ class SimTradeManager(BaseTradeManager):
             "partial_tranches": partial_tranches,
             "progressive_be_after_tranche": progressive_be_after_tranche,
             "partials_taken_count": 0,  # Track number of partials taken
+            # === ATR-BASED BE BUFFER (v46.x - BE Fix) ===
+            "be_atr_multiplier": be_atr_multiplier,
+            "be_min_buffer_pct": be_min_buffer_pct,
+            "be_max_buffer_pct": be_max_buffer_pct,
+            # === TIME-BASED TRADE INVALIDATION (v46.x) ===
+            "use_time_invalidation": use_time_invalidation,
+            "time_invalidation_candles": time_invalidation_candles,
+            "time_invalidation_min_move_pct": time_invalidation_min_move_pct,
+            "time_invalidation_exit_mode": time_invalidation_exit_mode,
+            "candles_since_entry": 0,  # Counter for candles since trade opened
+            "max_favorable_move_pct": 0.0,  # Track max favorable move for invalidation check
             # Config snapshot for source tracking (bootstrap, carry_forward, etc.)
             "config_snapshot": config_snapshot,
+            # === SMART RE-ENTRY TRACKING (v46.x) ===
+            "is_reentry": is_reentry,  # True if this trade bypassed cooldown via re-entry
         }
 
         self.wallet_balance -= required_margin
         self.locked_margin += required_margin
         self.open_trades.append(new_trade)
+
+        # === SMART RE-ENTRY: Mark as used (v46.x) ===
+        # Prevents duplicate re-entries for the same SL trade
+        if is_reentry:
+            self.mark_reentry_used(sym, tf)
+
+        # Register position with correlation manager for tracking (v45.x - Priority 4)
+        if (self._use_correlation_management and
+            self._correlation_manager is not None and
+            HAS_CORRELATION_MANAGER):
+            self._correlation_manager.register_position(
+                symbol=sym,
+                direction=trade_type,
+                size=risk_amount,  # Use risk amount for correlation tracking
+            )
 
         return True
 
@@ -1565,6 +2094,17 @@ class SimTradeManager(BaseTradeManager):
                     closed_trade.get("pnl", 0),
                     closed_trade.get("r_multiple")
                 )
+
+                # Update smart re-entry stats (v46.x)
+                self.update_reentry_stats(closed_trade
+                )
+
+                # Close position in correlation manager (v45.x - Priority 4)
+                if (self._use_correlation_management and
+                    self._correlation_manager is not None and
+                    HAS_CORRELATION_MANAGER):
+                    closed_symbol = closed_trade.get("symbol", symbol)
+                    self._correlation_manager.close_position(closed_symbol)
 
         # Remove closed trades
         for idx in sorted(closed_indices, reverse=True):

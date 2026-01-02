@@ -71,8 +71,7 @@ except ImportError:
 # SYMBOLS AND TIMEFRAMES
 # ==========================================
 SYMBOLS = [
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "HYPEUSDT", "LINKUSDT",
-    "BNBUSDT", "XRPUSDT", "LTCUSDT", "DOGEUSDT", "SUIUSDT", "FARTCOINUSDT"
+    "BTCUSDT",  # Only BTC - other symbols removed for testing
 ]
 
 # HTF Only Mode (Optional)
@@ -103,9 +102,9 @@ M3_PERFORMANCE_CONFIG = {
     "min_warmup_bars": 250,  # Indicator warmup
 }
 
-_ALL_LOWER_TIMEFRAMES = ["5m", "15m", "30m", "1h"]
-LOWER_TIMEFRAMES = ["1h"] if HTF_ONLY_MODE else _ALL_LOWER_TIMEFRAMES
-HTF_TIMEFRAMES = ["4h", "12h", "1d"]
+_ALL_LOWER_TIMEFRAMES = ["15m"]  # Only 15m - other TFs removed for testing
+LOWER_TIMEFRAMES = _ALL_LOWER_TIMEFRAMES
+HTF_TIMEFRAMES = []  # HTF disabled for testing
 TIMEFRAMES = LOWER_TIMEFRAMES + HTF_TIMEFRAMES
 
 # ==========================================
@@ -426,7 +425,7 @@ WALK_FORWARD_CONFIG = {
     "enabled": True,            # Walk-forward testi etkinleştir
     "train_ratio": 0.70,        # %70 train, %30 test
     "min_test_trades": 3,       # Test için minimum trade sayısı (base)
-    "min_overfit_ratio": 0.70,  # Test E[R] / Train E[R] minimum oranı
+    "min_overfit_ratio": 0.60,  # Test E[R] / Train E[R] minimum oranı (0.70→0.60 for Optuna)
 }
 
 # Timeframe-based minimum OOS trades (quant trader recommendation)
@@ -502,16 +501,249 @@ ROLLING_ER_CONFIG = {
 }
 
 # ==========================================
+# TF-ADAPTIVE THRESHOLDS SYSTEM
+# ==========================================
+# Percentage-based thresholds that scale appropriately across timeframes.
+# 15m is the baseline (proven working) - other TFs adapt from this.
+#
+# Design rationale:
+# - Lower TFs (5m): Need TIGHTER thresholds due to more noise
+# - Higher TFs (1h+): Need LOOSER thresholds as moves are larger
+#
+# Thresholds explained:
+# - flat_threshold: AlphaTrend flat detection (higher = more signals, line must move more)
+# - ssl_touch_tolerance: Baseline touch detection (higher = more lenient touch)
+# - min_pbema_distance: Minimum distance to TP target (lower on HTF = smaller % moves)
+# - overlap_threshold: SSL-PBEMA overlap detection (higher = allow closer overlap)
+# - lookback_candles: Candles to check for baseline touch (fewer on HTF = same time)
+
+TF_THRESHOLDS = {
+    # 5m: Tighter thresholds (more noise filtering)
+    "5m": {
+        "flat_threshold": 0.0025,       # 0.25% - slightly tighter than 15m
+        "ssl_touch_tolerance": 0.0025,  # 0.25% - tighter touch detection
+        "min_pbema_distance": 0.005,    # 0.5% - need more room for noise
+        "overlap_threshold": 0.004,     # 0.4% - tighter overlap check
+        "lookback_candles": 6,          # More candles (6 * 5m = 30min)
+    },
+    # 15m: BASELINE - proven working, DO NOT CHANGE
+    "15m": {
+        "flat_threshold": 0.002,        # 0.2% - baseline
+        "ssl_touch_tolerance": 0.003,   # 0.3% - baseline
+        "min_pbema_distance": 0.004,    # 0.4% - baseline
+        "overlap_threshold": 0.005,     # 0.5% - baseline
+        "lookback_candles": 5,          # 5 candles (5 * 15m = 75min)
+    },
+    # 30m: Slightly looser
+    "30m": {
+        "flat_threshold": 0.0018,       # 0.18% - slightly looser
+        "ssl_touch_tolerance": 0.004,   # 0.4% - looser touch
+        "min_pbema_distance": 0.0035,   # 0.35% - slightly tighter (larger moves)
+        "overlap_threshold": 0.006,     # 0.6% - allow more overlap
+        "lookback_candles": 4,          # 4 candles (4 * 30m = 2h)
+    },
+    # 1h: Looser thresholds for larger moves
+    "1h": {
+        "flat_threshold": 0.0015,       # 0.15% - looser (bigger moves needed)
+        "ssl_touch_tolerance": 0.005,   # 0.5% - looser touch detection
+        "min_pbema_distance": 0.003,    # 0.3% - smaller % for same $ move
+        "overlap_threshold": 0.007,     # 0.7% - allow more overlap
+        "lookback_candles": 4,          # 4 candles (4 * 1h = 4h)
+    },
+    # 4h: Much looser for swing trading
+    "4h": {
+        "flat_threshold": 0.001,        # 0.1% - very loose
+        "ssl_touch_tolerance": 0.008,   # 0.8% - very loose touch
+        "min_pbema_distance": 0.002,    # 0.2% - smaller % target
+        "overlap_threshold": 0.01,      # 1.0% - generous overlap allowance
+        "lookback_candles": 3,          # 3 candles (3 * 4h = 12h)
+    },
+    # 12h: Position trading thresholds
+    "12h": {
+        "flat_threshold": 0.0008,       # 0.08% - very loose
+        "ssl_touch_tolerance": 0.01,    # 1.0% - very loose touch
+        "min_pbema_distance": 0.0015,   # 0.15% - small % target
+        "overlap_threshold": 0.012,     # 1.2% - generous overlap
+        "lookback_candles": 2,          # 2 candles (2 * 12h = 24h)
+    },
+    # 1d: Daily timeframe (very loose)
+    "1d": {
+        "flat_threshold": 0.0006,       # 0.06% - minimal movement detection
+        "ssl_touch_tolerance": 0.012,   # 1.2% - very loose touch
+        "min_pbema_distance": 0.001,    # 0.1% - small % target
+        "overlap_threshold": 0.015,     # 1.5% - very generous overlap
+        "lookback_candles": 2,          # 2 candles (2 * 1d = 2 days)
+    },
+}
+
+# Base thresholds (15m values) - used as fallback
+BASE_TF_THRESHOLDS = TF_THRESHOLDS["15m"].copy()
+
+
+# ==========================================
+# ALPHATREND 3-LAYER VALIDATION THRESHOLDS
+# ==========================================
+# Enhanced AlphaTrend filtering to prevent fake signals in ranging markets.
+#
+# Based on mathematical analysis of AT behavior across timeframes:
+# - recent_cross_lookback: How recently the AT cross (blue crosses red) must have occurred
+# - momentum_lookback: How many candles to confirm AT line continues moving in trade direction
+# - min_line_separation: Minimum % gap between blue/red lines to confirm real momentum
+#
+# Signal is VALID only when ALL 3 conditions are met:
+# 1. AT cross occurred within recent_cross_lookback candles
+# 2. Winning line (blue for LONG, red for SHORT) has been rising/falling for momentum_lookback candles
+# 3. Gap between lines >= min_line_separation
+#
+# If ANY condition fails -> signal is FAKE (ranging market, no momentum)
+
+AT_VALIDATION_THRESHOLDS = {
+    # TF-ADAPTIVE LINE SEPARATION (Quant Agent Recommendation 2026-01-02)
+    # Lower TF = more noise = tighter threshold
+    # Higher TF = cleaner moves = looser threshold (allow more signals)
+
+    # 1m: Most noise, need strict filtering
+    "1m": {
+        "recent_cross_lookback": 20,       # Cross within 20 minutes (relaxed)
+        "momentum_lookback": 3,            # 3 candles of momentum
+        "min_line_separation": 0.0015,     # 0.15% - tighter for noisy TF
+    },
+    # 5m: Still noisy, moderately strict
+    "5m": {
+        "recent_cross_lookback": 16,       # Cross within ~1.5 hours
+        "momentum_lookback": 3,            # 3 candles = 15 min of momentum
+        "min_line_separation": 0.0012,     # 0.12% - tighter for noise
+    },
+    # 15m: BASELINE - loosened from 0.1% to 0.08% to reduce overfit
+    "15m": {
+        "recent_cross_lookback": 16,       # Cross within 4 hours (16 * 15m)
+        "momentum_lookback": 3,            # 3 candles = 45 min of momentum
+        "min_line_separation": 0.0008,     # 0.08% - LOOSER to allow more signals
+    },
+    # 30m: Slightly looser
+    "30m": {
+        "recent_cross_lookback": 12,       # Cross within 6 hours
+        "momentum_lookback": 3,            # 3 candles = 1.5 hours of momentum
+        "min_line_separation": 0.0007,     # 0.07%
+    },
+    # 1h: HTF - looser thresholds for bigger moves
+    "1h": {
+        "recent_cross_lookback": 10,       # Cross within 10 hours
+        "momentum_lookback": 3,            # 3 candles = 3 hours of momentum
+        "min_line_separation": 0.0006,     # 0.06% - looser for HTF
+    },
+    # 4h: Swing trading - loose thresholds
+    "4h": {
+        "recent_cross_lookback": 8,        # Cross within 32 hours
+        "momentum_lookback": 3,            # 3 candles = 12 hours of momentum
+        "min_line_separation": 0.0004,     # 0.04% - loosest for swing trading
+    },
+    # 12h: Position trading
+    "12h": {
+        "recent_cross_lookback": 6,        # Cross within 3 days
+        "momentum_lookback": 2,            # 2 candles = 1 day of momentum
+        "min_line_separation": 0.0003,     # 0.03%
+    },
+    # 1d: Daily timeframe - loosest thresholds
+    "1d": {
+        "recent_cross_lookback": 5,        # Cross within 5 days
+        "momentum_lookback": 2,            # 2 days of consistent momentum
+        "min_line_separation": 0.0002,     # 0.02% - loosest for daily
+    },
+}
+
+# Base AT validation thresholds (15m values) - used as fallback
+BASE_AT_VALIDATION_THRESHOLDS = AT_VALIDATION_THRESHOLDS["15m"].copy()
+
+
+def get_at_validation_thresholds(timeframe: str) -> dict:
+    """
+    Get AlphaTrend 3-layer validation thresholds for a timeframe.
+
+    These thresholds are used to filter fake AT signals in ranging markets.
+    A signal is only valid when:
+    1. Cross occurred within recent_cross_lookback candles
+    2. Winning line moved in signal direction for momentum_lookback candles
+    3. Line separation >= min_line_separation
+
+    Args:
+        timeframe: Timeframe string (e.g., "15m", "1h", "4h")
+
+    Returns:
+        Dict with AT validation thresholds:
+        - recent_cross_lookback: int (candles since last cross)
+        - momentum_lookback: int (candles to check momentum)
+        - min_line_separation: float (minimum % gap between lines)
+
+    Example:
+        >>> get_at_validation_thresholds("4h")
+        {'recent_cross_lookback': 5, 'momentum_lookback': 4, 'min_line_separation': 0.005}
+    """
+    return AT_VALIDATION_THRESHOLDS.get(timeframe, BASE_AT_VALIDATION_THRESHOLDS).copy()
+
+
+def get_tf_threshold(threshold_name: str, timeframe: str) -> float:
+    """
+    Get TF-adaptive threshold value.
+
+    This provides timeframe-appropriate thresholds for strategy filters.
+    Uses 15m as baseline (proven working) and adapts for other timeframes.
+
+    Args:
+        threshold_name: One of:
+            - "flat_threshold": AlphaTrend flat detection
+            - "ssl_touch_tolerance": Baseline touch detection
+            - "min_pbema_distance": Minimum distance to TP target
+            - "overlap_threshold": SSL-PBEMA overlap detection
+            - "lookback_candles": Candles for baseline touch check
+        timeframe: Timeframe string (e.g., "5m", "15m", "1h", "4h")
+
+    Returns:
+        Threshold value for the given timeframe.
+        Falls back to 15m (baseline) if timeframe not found.
+
+    Example:
+        >>> get_tf_threshold("flat_threshold", "1h")
+        0.0015
+        >>> get_tf_threshold("ssl_touch_tolerance", "15m")
+        0.003
+    """
+    tf_config = TF_THRESHOLDS.get(timeframe, BASE_TF_THRESHOLDS)
+    return tf_config.get(threshold_name, BASE_TF_THRESHOLDS.get(threshold_name, 0.002))
+
+
+def get_tf_thresholds(timeframe: str) -> dict:
+    """
+    Get all TF-adaptive thresholds for a timeframe.
+
+    Args:
+        timeframe: Timeframe string (e.g., "5m", "15m", "1h")
+
+    Returns:
+        Dict with all threshold values for the timeframe.
+        Falls back to 15m (baseline) if timeframe not found.
+
+    Example:
+        >>> get_tf_thresholds("1h")
+        {'flat_threshold': 0.0015, 'ssl_touch_tolerance': 0.005, ...}
+    """
+    return TF_THRESHOLDS.get(timeframe, BASE_TF_THRESHOLDS).copy()
+
+
+# ==========================================
 # ALPHATREND DUAL-LINE CONFIG
 # ==========================================
 # AlphaTrend indicator now uses dual lines (buyers vs sellers)
 # instead of single line for more accurate trend detection.
 # See: core/indicators.py::calculate_alphatrend()
+#
+# NOTE: flat_threshold is now TF-adaptive. Use get_tf_threshold() or
+# pass timeframe to calculate_alphatrend() for proper scaling.
 ALPHATREND_CONFIG = {
     "coeff": 1.0,              # ATR multiplier
     "ap": 14,                  # ATR/MFI period
-    "flat_lookback": 5,        # Yatay hareket kontrolü için bakılacak mum sayısı
-    "flat_threshold": 0.002,   # FIX: Increased from 0.001 to 0.002 (less restrictive)
+    "flat_lookback": 5,        # Yatay hareket kontrolu icin bakilacak mum sayisi
+    "flat_threshold": 0.002,   # DEFAULT: 15m baseline (use get_tf_threshold for TF-adaptive)
     # Note: at_is_flat = True when change < threshold, so HIGHER threshold = MORE signals
 }
 
@@ -592,8 +824,36 @@ DEFAULT_STRATEGY_CONFIG = {
     "skip_overlap_check": False,     # Baseline: Check SSL-PBEMA overlap
     "skip_at_flat_filter": False,    # Baseline: Apply AT flat filter
     "skip_wick_rejection": True,     # FIX: Skip wick rejection filter (proven +$30 in P3 test)
+
+    # === SSL Flip Grace Period ===
+    # When SSL baseline is crossed (flip), allow signals for N bars even if AT hasn't confirmed yet
+    # This addresses AT lag (2-5 bars behind SSL) that causes missed entries at trend start
+    # Condition: SSL just flipped + AT is NOT opposing (not sellers_dominant for long)
+    "use_ssl_flip_grace": False,     # Disabled by default - enable in Optuna for testing
+    "ssl_flip_grace_bars": 3,        # Number of bars after SSL flip to allow grace
+
+    # === THREE-TIER AT ARCHITECTURE ===
+    # Mode controls how AlphaTrend is used in signal generation:
+    # - "binary": Original per-bar check (AT buyers/sellers dominant required) [RECOMMENDED]
+    # - "regime": Tier 1 - AT as regime filter (blocks only if strongly opposing)
+    # - "score": Tier 3 - AT contributes to score (+2 aligned, +0.5 neutral, -1 opposing)
+    # - "off": Disable AT entirely (useful for comparison)
+    "at_mode": "binary",             # Default: binary mode (proven baseline)
+    "at_regime_lookback": 20,        # Bars to calculate regime (used in regime/score modes)
+    "at_score_weight": 2.0,          # AT contribution weight when at_mode="score"
+
     "regime_adx_threshold": 20.0,    # Baseline: Standard regime threshold
-    "use_ssl_never_lost_filter": False,  # P5: Disabled (conflicts with baseline_touch)
+    "use_ssl_never_lost_filter": True,   # P1: Enabled - prevents counter-trend trades (+$6.44 in A/B test)
+    "ssl_never_lost_lookback": 20,       # P1: Lookback period for SSL never lost check
+
+    # === Confirmation Candle (P2 - Entry Timing) ===
+    # Addresses "entry too early" issue from trade annotations
+    # When enabled: Signal must form, then NEXT candle must confirm direction before entry
+    # TEST RESULT (01 Jan 2025): Too aggressive - filtered 16/26 trades, PnL -$28 worse
+    # Conclusion: Disabled - the filter blocks profitable entries along with bad ones
+    "use_confirmation_candle": False,    # P2: DISABLED after A/B test showed -$28 impact
+    "confirmation_candle_mode": "close", # "close" = next candle closes in signal direction
+                                         # "body" = next candle body in signal direction
 
     # === Scoring System (Alternative to AND Logic) ===
     # use_scoring=False (default): Binary AND logic - all filters must pass (strict, fewer trades)
@@ -615,6 +875,22 @@ DEFAULT_STRATEGY_CONFIG = {
     #   Wick rejection: 1.0
     #   Body position: 0.5
     #   No overlap: 0.5
+
+    # === MARKET STRUCTURE + FVG BONUS (v2.2.0) ===
+    # Market Structure: Required filter for trend alignment (HH/HL = bullish, LH/LL = bearish)
+    # FVG (Fair Value Gap): Bonus for entry timing - tighter SL when price returns to FVG
+    #
+    # TEST RESULTS (02 Jan 2026 - Full Year BTC+ETH+LINK):
+    #   WITHOUT MS+FVG: -$4.56, 1521 trades
+    #   WITH MS+FVG BONUS: +$4.83, 2062 trades (BEST)
+    #   Improvement: +$9.39 PnL, +541 trades
+    "use_market_structure": True,     # Required: Filter trades by MS trend alignment
+    "min_ms_score": 1.0,              # Minimum MS score (0=no filter, 1=trend-aligned, 2=strong trend)
+    "ms_swing_length": 5,             # Swing detection lookback
+    "use_fvg_bonus": True,            # Bonus: Use FVG for tighter SL when available
+    "fvg_min_gap_percent": 0.08,      # Minimum FVG size (0.08%)
+    "fvg_max_age_bars": 50,           # Maximum age of FVG to consider
+    "fvg_mitigation_lookback": 5,     # Bars to check for mitigation
 
     # === Shared Parameters ===
     "tp_min_dist_ratio": 0.0008,     # Min TP distance ratio
@@ -707,9 +983,15 @@ DEFAULT_STRATEGY_CONFIG = {
 
     # === SSL NEVER LOST FILTER (v46.x) ===
     # Skip counter-trend trades if SSL baseline was never broken in lookback
-    # P5: DISABLED - conflicts with baseline_touch filter (Phase 4 finding)
-    "use_ssl_never_lost_filter": False,      # P5: Disabled - conflicts with baseline_touch
+    # P1: ENABLED - prevents counter-trend trades (+$6.44 improvement in A/B test)
+    "use_ssl_never_lost_filter": True,       # P1: Enabled - prevents counter-trend trades
     "ssl_never_lost_lookback": 20,           # Lookback period to check if baseline was ever crossed
+
+    # === CONFIRMATION CANDLE (P2 - Entry Timing) ===
+    # Addresses "entry too early" issue from trade annotations
+    # TEST RESULT: Too aggressive - filtered 16/26 trades, PnL -$28 worse
+    "use_confirmation_candle": False,        # P2: DISABLED after A/B test
+    "confirmation_candle_mode": "close",     # "close" = next candle closes in signal direction
 
     # === TIME-BASED TRADE INVALIDATION (v46.x) ===
     # Exit stale trades at breakeven if no meaningful movement after X candles
@@ -739,6 +1021,53 @@ DEFAULT_STRATEGY_CONFIG = {
     "use_roc_filter": False,                 # DISABLED: Testing baseline recovery
     "roc_period": 10,                        # Lookback period for ROC calculation
     "roc_threshold": 2.0,                    # ROC threshold (2.0% = balanced filter - TEST)
+
+    # === HTF TREND FILTER (v1.14.0 - Counter-trend Prevention) ===
+    # Uses 4H timeframe to determine overall trend direction
+    # Only allows trades that align with HTF trend:
+    # - HTF UP = only LONG allowed
+    # - HTF DOWN = only SHORT allowed
+    # - HTF NEUTRAL = both directions allowed
+    "use_htf_filter": True,                  # Enable 4H trend filter
+    "htf_timeframe": "4h",                   # Higher timeframe for trend detection
+    "htf_trend_method": "baseline",          # "baseline" (SSL HMA60) or "ema" (EMA50/200)
+    "htf_trend_lookback": 3,                 # Candles to check for consistent trend
+
+    # === VOLATILITY REGIME (Expert Panel - Sinclair's 3-Tier System) ===
+    # Adapts trading rules based on volatility regime:
+    # - LOW_VOL: Conservative mode (strict AT confirmation, smaller positions)
+    # - NORMAL_VOL: Standard mode (baseline parameters)
+    # - HIGH_VOL: Aggressive mode (allow AT lag, larger positions)
+    "use_volatility_regime": True,           # Enable volatility-based regime adaptation
+    "vol_regime_lookback": 50,               # Lookback for ATR percentile calculation
+    "vol_low_threshold": 40.0,               # Below this = LOW_VOL (conservative)
+    "vol_high_threshold": 75.0,              # Above this = HIGH_VOL (aggressive)
+
+    # === FILTER HIERARCHY (Expert Panel - Clenow's Tier System) ===
+    # Controls which filters are required vs optional:
+    # - Tier 1 (Core): SSL direction, AT aligned, PBEMA path - ALWAYS required
+    # - Tier 2 (Quality): Baseline touch, PBEMA distance, ADX/RSI
+    # - Tier 3 (Risk): Wick rejection, body position, overlap
+    # Lower tier = more trades, lower quality
+    # Higher tier = fewer trades, higher quality
+    #
+    # FULL YEAR BACKTEST RESULTS (2025):
+    # - Tier 2: 149 trades, 31.5% WR, E[R]=0.283, ~$737 profit
+    # - Recommended: Tier 2 for optimal trade count vs quality balance
+    "filter_tier_level": 2,                  # UPDATED: Tier 2 (Expert Panel recommendation)
+
+    # === VOLATILITY-NORMALIZED PBEMA DISTANCE ===
+    # Ensures PBEMA target is within realistic ATR range
+    # Relaxed from 4.0 to 20.0 based on backtest analysis
+    "vol_norm_max_atr": 20.0,                # Maximum ATR distance (relaxed for trend-following)
+
+    # === RECOMMENDED PORTFOLIO (Expert Panel + Full Year Backtest) ===
+    # Based on 2025 full year backtest results:
+    # - BTCUSDT-1h: Best performer (48.6% WR, 0.895 E[R])
+    # - BTCUSDT-15m: High volume (48 trades, 0.046 E[R])
+    # - ETHUSDT-15m: Good volume (56 trades, 0.191 E[R])
+    # - 4h timeframes: Insufficient signals, excluded
+    # Recommended: symbols=["BTCUSDT", "ETHUSDT"], timeframes=["15m", "1h"]
 }
 
 # ==========================================

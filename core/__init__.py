@@ -40,6 +40,12 @@ from .config import (
     # Walk-forward and circuit breaker configs
     WALK_FORWARD_CONFIG, MIN_OOS_TRADES_BY_TF,
     CIRCUIT_BREAKER_CONFIG, ROLLING_ER_CONFIG,
+    # TF-Adaptive Thresholds
+    TF_THRESHOLDS, BASE_TF_THRESHOLDS,
+    get_tf_threshold, get_tf_thresholds,
+    # AlphaTrend 3-Layer Validation Thresholds
+    AT_VALIDATION_THRESHOLDS, BASE_AT_VALIDATION_THRESHOLDS,
+    get_at_validation_thresholds,
 )
 
 from .utils import (
@@ -80,9 +86,65 @@ from .binance_client import (
 
 from .indicators import (
     calculate_indicators, calculate_alphatrend,
+    add_at_validation_columns,  # AlphaTrend 3-layer validation
     get_indicator_value, get_candle_data,
     calculate_rr_ratio, check_wick_rejection,
     detect_regime, add_regime_column, get_regime_multiplier,
+    # Volatility Regime (Expert Panel - Sinclair's 3-Tier System)
+    classify_volatility_regime,
+)
+
+# Enhanced Regime Filter (Priority 2 - Hedge Fund Recommendation)
+from .regime_filter import (
+    RegimeFilter, RegimeType, RegimeResult,
+    check_regime_for_trade, get_btc_regime,
+    analyze_regime_distribution,
+)
+
+# Correlation Management (Priority 4 - Hedge Fund Recommendation)
+from .correlation_manager import (
+    CorrelationManager, CorrelationCheckResult,
+    check_correlation_risk, calculate_portfolio_effective_positions,
+    DEFAULT_CORRELATION_MATRIX,
+    adjust_kelly_for_correlation, calculate_portfolio_risk,
+)
+
+# Kelly Criterion Risk Management
+from .kelly_calculator import (
+    calculate_kelly, calculate_kelly_from_history,
+    calculate_growth_rate, trades_to_double,
+    kelly_comparison, edge_exists, minimum_win_rate_for_edge,
+    MIN_KELLY_FRACTION, MAX_KELLY_FRACTION, MIN_TRADES_FOR_KELLY,
+)
+
+# Drawdown Management
+from .drawdown_tracker import (
+    DrawdownTracker, DrawdownStatus, DrawdownState,
+    calculate_drawdown, get_drawdown_kelly_multiplier,
+    get_recovery_status, estimate_recovery_time,
+)
+
+# Risk Manager (Main Interface)
+from .risk_manager import (
+    RiskManager, PositionSizeResult, TradeRecord,
+    calculate_r_multiple as rm_calculate_r_multiple,
+    calculate_trade_rr, RISK_CONFIG,
+)
+
+# Market Structure Analysis
+from .market_structure import (
+    MarketStructure, StructureResult, SwingPoint,
+    SwingType, TrendType, StructureBreak,
+    detect_structure, is_trade_aligned, get_structure_score,
+    add_structure_columns,
+)
+
+# Fair Value Gap (FVG) Detection
+from .fvg_detector import (
+    FVGDetector, FairValueGap, FVGResult,
+    FVGType, FVGStatus,
+    detect_fvgs, get_fvg_score, is_in_fvg,
+    add_fvg_columns,
 )
 
 from .logging_config import (
@@ -117,6 +179,22 @@ from .optimizer import (
     STRATEGY_BLACKLIST,
 )
 
+# Optuna-based Optimizer (v2.3.0 - Bayesian optimization)
+try:
+    from .optuna_optimizer import (
+        OPTUNA_AVAILABLE,
+        SSLFlowOptimizer,
+        optimize_multiple_streams,
+        ParameterSpace,
+        DEFAULT_PARAM_SPACE,
+    )
+except ImportError:
+    OPTUNA_AVAILABLE = False
+    SSLFlowOptimizer = None
+    optimize_multiple_streams = None
+    ParameterSpace = None
+    DEFAULT_PARAM_SPACE = None
+
 __all__ = [
     # Environment
     'IS_COLAB', 'IS_HEADLESS', 'IS_NOTEBOOK', 'HAS_TQDM', 'HTF_ONLY_MODE',
@@ -141,6 +219,12 @@ __all__ = [
     # Walk-forward and circuit breaker configs
     'WALK_FORWARD_CONFIG', 'MIN_OOS_TRADES_BY_TF',
     'CIRCUIT_BREAKER_CONFIG', 'ROLLING_ER_CONFIG',
+    # TF-Adaptive Thresholds
+    'TF_THRESHOLDS', 'BASE_TF_THRESHOLDS',
+    'get_tf_threshold', 'get_tf_thresholds',
+    # AlphaTrend 3-Layer Validation Thresholds
+    'AT_VALIDATION_THRESHOLDS', 'BASE_AT_VALIDATION_THRESHOLDS',
+    'get_at_validation_thresholds',
     # Utils
     'normalize_datetime', 'tf_to_timedelta', 'tf_to_minutes',
     'calculate_funding_cost', 'format_time_utc', 'format_time_local',
@@ -158,8 +242,41 @@ __all__ = [
     'BinanceClient', 'get_client',
     # Indicators
     'calculate_indicators', 'calculate_alphatrend',
+    'add_at_validation_columns',  # AlphaTrend 3-layer validation
     'get_indicator_value', 'get_candle_data',
     'calculate_rr_ratio', 'check_wick_rejection',
+    'classify_volatility_regime',  # Volatility Regime (Sinclair's 3-Tier)
+    # Regime Filter (Priority 2)
+    'RegimeFilter', 'RegimeType', 'RegimeResult',
+    'check_regime_for_trade', 'get_btc_regime',
+    'analyze_regime_distribution',
+    # Correlation Management (Priority 4)
+    'CorrelationManager', 'CorrelationCheckResult',
+    'check_correlation_risk', 'calculate_portfolio_effective_positions',
+    'DEFAULT_CORRELATION_MATRIX',
+    'adjust_kelly_for_correlation', 'calculate_portfolio_risk',
+    # Kelly Criterion Risk Management
+    'calculate_kelly', 'calculate_kelly_from_history',
+    'calculate_growth_rate', 'trades_to_double',
+    'kelly_comparison', 'edge_exists', 'minimum_win_rate_for_edge',
+    'MIN_KELLY_FRACTION', 'MAX_KELLY_FRACTION', 'MIN_TRADES_FOR_KELLY',
+    # Drawdown Management
+    'DrawdownTracker', 'DrawdownStatus', 'DrawdownState',
+    'calculate_drawdown', 'get_drawdown_kelly_multiplier',
+    'get_recovery_status', 'estimate_recovery_time',
+    # Risk Manager
+    'RiskManager', 'PositionSizeResult', 'TradeRecord',
+    'calculate_trade_rr', 'RISK_CONFIG',
+    # Market Structure Analysis
+    'MarketStructure', 'StructureResult', 'SwingPoint',
+    'SwingType', 'TrendType', 'StructureBreak',
+    'detect_structure', 'is_trade_aligned', 'get_structure_score',
+    'add_structure_columns',
+    # Fair Value Gap (FVG) Detection
+    'FVGDetector', 'FairValueGap', 'FVGResult',
+    'FVGType', 'FVGStatus',
+    'detect_fvgs', 'get_fvg_score', 'is_in_fvg',
+    'add_fvg_columns',
     # Logging
     'get_logger', 'set_log_level', 'print_to_log',
     # Trading Engine
@@ -182,4 +299,10 @@ __all__ = [
     '_score_config_for_stream',
     'MIN_EXPECTANCY_PER_TRADE',
     'STRATEGY_BLACKLIST',
+    # Optuna Optimizer (v2.3.0)
+    'OPTUNA_AVAILABLE',
+    'SSLFlowOptimizer',
+    'optimize_multiple_streams',
+    'ParameterSpace',
+    'DEFAULT_PARAM_SPACE',
 ]

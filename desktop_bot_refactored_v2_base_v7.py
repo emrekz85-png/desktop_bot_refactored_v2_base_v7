@@ -564,7 +564,7 @@ def _audit_trade_logic_parity() -> dict:
         try:
             BEST_CONFIG_CACHE.clear()
             BEST_CONFIG_CACHE.update(original_cache)
-        except Exception:
+        except (RuntimeError, KeyError):
             pass
         return {"parity_ok": False, "error": str(exc)}
 
@@ -1223,7 +1223,7 @@ class TradeManager:
                     try:
                         if pb_top is not None and pb_bot is not None:
                             dyn_tp = float(pb_bot) if t_type == "LONG" else float(pb_top)
-                    except Exception:
+                    except (ValueError, TypeError):
                         dyn_tp = tp
                     self.open_trades[i]["tp"] = dyn_tp
 
@@ -1693,13 +1693,13 @@ class TradeManager:
                             if not trade.get('notional'):
                                 try:
                                     trade['notional'] = float(trade.get('entry', 0)) * float(trade.get('size', 0))
-                                except Exception:
+                                except (ValueError, TypeError):
                                     trade['notional'] = 0.0
                             events_val = trade.get("events")
                             if isinstance(events_val, str):
                                 try:
                                     trade["events"] = json.loads(events_val)
-                                except Exception:
+                                except (json.JSONDecodeError, TypeError):
                                     trade["events"] = []
                             self.locked_margin += m
                             open_pnl += float(trade.get('pnl', 0.0))
@@ -2045,7 +2045,7 @@ def create_chart_data_json(df, interval, symbol="BTCUSDT", signal=None, active_t
                 ts_val = trade.get('timestamp') or trade.get('time') or ''
                 try:
                     return dateutil.parser.parse(ts_val).timestamp()
-                except Exception:
+                except (ValueError, TypeError, AttributeError):
                     return 0.0
 
             # Deduplication
@@ -2082,7 +2082,7 @@ def create_chart_data_json(df, interval, symbol="BTCUSDT", signal=None, active_t
                     future_dt = start_dt + (time_diff * 20)
                     start_ts_str = start_dt.strftime('%Y-%m-%d %H:%M')
                     future_ts_str = future_dt.strftime('%Y-%m-%d %H:%M')
-                except Exception:
+                except (ValueError, TypeError, AttributeError):
                     continue
 
                 is_active = trade in active_trades;
@@ -2159,7 +2159,7 @@ class BinanceWebSocketKlineStream(threading.Thread):
             symbol, tf = args
             try:
                 return (symbol, tf, TradingEngine.get_data(symbol, tf, limit=self.max_candles))
-            except Exception:
+            except (ValueError, KeyError, ConnectionError, OSError):
                 return (symbol, tf, pd.DataFrame())
 
         # 10 paralel thread kullan (API rate limit'e dikkat ederek)
@@ -2219,7 +2219,7 @@ class BinanceWebSocketKlineStream(threading.Thread):
         try:
             if self._socket:
                 self._socket.close()
-        except Exception:
+        except (OSError, socket.error):
             pass
         self._socket = None
 
@@ -2290,7 +2290,7 @@ class BinanceWebSocketKlineStream(threading.Thread):
                 return
             with self._lock:
                 self._update_dataframe(symbol, interval, kline)
-        except Exception:
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
             pass
 
     def get_latest_bulk(self):
@@ -2583,11 +2583,14 @@ class LiveBotWorker(QThread):
                                         else:
                                             # YENİ İŞLEM AÇ
                                             # KRITIK: Sinyal üretirken kullanılan config'i trade'e göm
+                                            # Expert Panel (Sinclair): vol_position_multiplier for regime-adaptive sizing
+                                            vol_pos_mult = s_debug.get("vol_position_multiplier", 1.0) if s_debug else 1.0
                                             trade_data = {
                                                 "symbol": sym, "timestamp": next_open_ts_str, "open_time_utc": forming_ts_utc,
                                                 "timeframe": tf, "type": s_type,
                                                 "entry": next_open_price, "tp": s_tp, "sl": s_sl, "setup": setup_tag,
                                                 "config_snapshot": config,  # Sinyal üretiminde kullanılan config
+                                                "vol_position_multiplier": vol_pos_mult,  # Expert Panel: Regime-adaptive sizing
                                             }
                                             trade_manager.open_trade(trade_data)
                                             self.trade_signal.emit(trade_data)
@@ -2631,7 +2634,7 @@ class LiveBotWorker(QThread):
                                     if "rsi_value" not in checks:
                                         try:
                                             checks["rsi_value"] = float(df_closed["rsi"].iloc[-1])
-                                        except Exception:
+                                        except (IndexError, KeyError, ValueError, TypeError):
                                             pass
 
                                     final_decision = decision or "Rejected"
@@ -2719,7 +2722,7 @@ class OptimizerWorker(QThread):
                     if not df_trend.empty:
                         df_trend['ema_trend'] = get_ta().ema(df_trend['close'], length=200)
                         df_trend = df_trend[['timestamp', 'ema_trend']].dropna()
-                except Exception:
+                except (ValueError, KeyError, ConnectionError, OSError):
                     pass
 
             data_cache = {}
@@ -2879,7 +2882,7 @@ class OptimizerWorker(QThread):
                             if not self.monte_carlo_mode:
                                 try:
                                     duration_hours = (exit_time - entry_time).total_seconds() / 3600
-                                except Exception:
+                                except (TypeError, AttributeError):
                                     duration_hours = 0
 
                             # Funding (R cinsinden) = (Funding Rate * Kaldıraç * Periyot) / Risk Oranı
@@ -4770,7 +4773,7 @@ class MainWindow(QMainWindow):
         try:
             finished_dt = dateutil.parser.isoparse(finished_at)
             finished_str = finished_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
-        except Exception:
+        except (ValueError, TypeError, AttributeError):
             finished_str = finished_at or "-"
 
         lines = [f"📅 Tamamlanma: {finished_str}", "📈 Özet Tablo:"]
@@ -4992,7 +4995,7 @@ def plot_trade(
                 else:
                     ts = ts.tz_convert("UTC")
                 return ts
-            except Exception:
+            except (ValueError, TypeError, AttributeError):
                 pass
 
         for fallback_field in ("open_time_utc", "timestamp"):
@@ -5000,7 +5003,7 @@ def plot_trade(
                 try:
                     ts = pd.to_datetime(row.get(fallback_field), utc=True)
                     return ts
-                except Exception:
+                except (ValueError, TypeError, AttributeError):
                     continue
         return None
 
@@ -5008,7 +5011,7 @@ def plot_trade(
         if isinstance(raw_val, str):
             try:
                 return json.loads(raw_val)
-            except Exception:
+            except (json.JSONDecodeError, TypeError):
                 return []
         if isinstance(raw_val, list):
             return raw_val
@@ -5056,7 +5059,7 @@ def plot_trade(
                         "key": ev_key if ev_key in status_palette else "OTHER",
                     }
                 )
-            except Exception:
+            except (KeyError, ValueError, TypeError):
                 continue
 
     def _safe_dt_col(df: pd.DataFrame, col: str):
@@ -5222,7 +5225,7 @@ def plot_trade(
         if ev.get("price") is not None:
             try:
                 label_text = f"{ev['status']}\n@ {ev['price']:.2f}"
-            except Exception:
+            except (ValueError, TypeError):
                 label_text = ev["status"]
 
         ax.annotate(
@@ -5350,7 +5353,7 @@ def _launch_application_once() -> int:
     # Event loop kapandıktan sonra uygulamayı tamamen temizle
     try:
         app.quit()
-    except Exception:
+    except (RuntimeError, AttributeError):
         # Qt bazı platformlarda tekrar tekrar quit çağrısına izin vermeyebilir
         pass
 

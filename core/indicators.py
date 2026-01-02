@@ -14,7 +14,7 @@ import numpy as np
 from typing import Optional
 
 from .logging_config import get_logger
-from .config import ALPHATREND_CONFIG
+from .config import ALPHATREND_CONFIG, get_tf_threshold, get_at_validation_thresholds
 
 # Module logger
 _logger = get_logger(__name__)
@@ -37,7 +37,8 @@ def calculate_alphatrend(
     coeff: float = 1.0,
     ap: int = 14,
     flat_lookback: int = 5,
-    flat_threshold: float = 0.001
+    flat_threshold: float = None,
+    timeframe: str = None
 ) -> pd.DataFrame:
     """
     Calculate AlphaTrend indicator with DUAL lines (buyers vs sellers).
@@ -66,7 +67,11 @@ def calculate_alphatrend(
         coeff: ATR multiplier (default: 1.0)
         ap: ATR/MFI period (default: 14)
         flat_lookback: Number of candles to check for flat detection (default: 5)
-        flat_threshold: Minimum change ratio to consider non-flat (default: 0.001 = 0.1%)
+        flat_threshold: Minimum change ratio to consider non-flat.
+            If None, uses TF-adaptive threshold (recommended).
+            For backward compatibility, explicit value overrides TF-adaptive.
+        timeframe: Timeframe string (e.g., "15m", "1h") for TF-adaptive thresholds.
+            If None, uses default 15m threshold (0.002).
 
     Returns:
         DataFrame with the following columns added:
@@ -78,6 +83,12 @@ def calculate_alphatrend(
         - alphatrend: Backward compatible single line (dominant line)
         - alphatrend_2: alphatrend shifted by 2 (backward compat)
     """
+    # TF-adaptive flat_threshold
+    if flat_threshold is None:
+        if timeframe:
+            flat_threshold = get_tf_threshold("flat_threshold", timeframe)
+        else:
+            flat_threshold = 0.002  # Default 15m baseline
     try:
         import warnings
         warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -89,10 +100,10 @@ def calculate_alphatrend(
         n = len(df)
 
         # Calculate True Range and ATR
-        # FIX: Use RMA (Wilder's smoothing) instead of SMA to match TradingView
-        # TradingView's ATR uses RMA by default, not SMA
+        # FIX: AlphaTrend Pine Script uses SMA for ATR, not RMA!
+        # Pine code: ATR = ta.sma(ta.tr, AP)
         df['_at_tr'] = ta.true_range(df['high'], df['low'], df['close'])
-        df['_at_atr'] = ta.rma(df['_at_tr'], length=ap)
+        df['_at_atr'] = ta.sma(df['_at_tr'], length=ap)  # SMA to match Pine Script
 
         # Use MFI if volume available, otherwise use RSI
         # REVERTED: MFI produces more signals and user confirmed manual trading uses MFI
@@ -234,6 +245,300 @@ def calculate_alphatrend(
         return df
 
 
+def add_at_validation_columns(
+    df: pd.DataFrame,
+    timeframe: str = "15m"
+) -> pd.DataFrame:
+    """
+    Add AlphaTrend validation columns for fake signal filtering (SIMPLIFIED v2).
+
+    SIMPLIFIED APPROACH (based on TradingView chart analysis):
+    AlphaTrend moves in STEPS, not continuously. It holds flat then jumps.
+
+    The correct interpretation:
+    - "FLAT" = blue and red lines OVERLAPPING (no clear winner)
+    - "VALID" = clear separation between lines (one is dominant)
+
+    Previous 3-layer validation was WRONG because:
+    - Cross timing check was too restrictive (AT steps infrequently)
+    - Momentum check required "rising" but AT naturally holds flat then steps
+
+    NEW SIMPLIFIED VALIDATION:
+    1. Dominance: at_buyers > at_sellers (blue above red)
+    2. Not flat: Lines have meaningful separation (not overlapping)
+
+    That's it! The dominance already exists from calculate_alphatrend().
+    We just add a separation-based "flat" check.
+
+    Args:
+        df: DataFrame with AlphaTrend columns (at_buyers, at_sellers, alphatrend)
+        timeframe: Timeframe string for TF-adaptive thresholds
+
+    Returns:
+        DataFrame with validation columns added:
+        - at_line_separation: Percentage gap between lines
+        - at_not_flat: True if lines have meaningful separation
+        - at_valid_long: Buyers dominant AND not flat
+        - at_valid_short: Sellers dominant AND not flat
+        - at_cross_up/down: Cross detection (kept for analysis)
+        - at_bars_since_*_cross: Bars since cross (kept for analysis)
+    """
+    if df is None or df.empty:
+        return df
+
+    # Get TF-specific thresholds
+    thresholds = get_at_validation_thresholds(timeframe)
+    min_line_separation = thresholds.get("min_line_separation", 0.001)  # 0.1% default
+
+    n = len(df)
+
+    # Ensure required columns exist
+    if "at_buyers" not in df.columns or "at_sellers" not in df.columns:
+        _logger.warning("AT validation: Missing at_buyers/at_sellers columns")
+        df["at_valid_long"] = False
+        df["at_valid_short"] = False
+        return df
+
+    at_buyers = df["at_buyers"].values
+    at_sellers = df["at_sellers"].values
+    close_prices = df["close"].values
+
+    # ================================================================
+    # CROSS DETECTION (kept for analysis/debugging, NOT used in validation)
+    # ================================================================
+    at_cross_up = np.zeros(n, dtype=bool)
+    at_cross_down = np.zeros(n, dtype=bool)
+
+    for i in range(1, n):
+        if np.isnan(at_buyers[i]) or np.isnan(at_sellers[i]):
+            continue
+        if np.isnan(at_buyers[i - 1]) or np.isnan(at_sellers[i - 1]):
+            continue
+
+        # Bullish cross: was below/equal, now above
+        if at_buyers[i - 1] <= at_sellers[i - 1] and at_buyers[i] > at_sellers[i]:
+            at_cross_up[i] = True
+
+        # Bearish cross: was above/equal, now below
+        if at_buyers[i - 1] >= at_sellers[i - 1] and at_buyers[i] < at_sellers[i]:
+            at_cross_down[i] = True
+
+    df["at_cross_up"] = at_cross_up
+    df["at_cross_down"] = at_cross_down
+
+    # Bars since cross (kept for analysis)
+    bars_since_bullish = np.full(n, 999, dtype=int)
+    bars_since_bearish = np.full(n, 999, dtype=int)
+
+    last_bullish_cross = -999
+    last_bearish_cross = -999
+
+    for i in range(n):
+        if at_cross_up[i]:
+            last_bullish_cross = i
+        if at_cross_down[i]:
+            last_bearish_cross = i
+
+        if last_bullish_cross >= 0:
+            bars_since_bullish[i] = i - last_bullish_cross
+        if last_bearish_cross >= 0:
+            bars_since_bearish[i] = i - last_bearish_cross
+
+    df["at_bars_since_bullish_cross"] = bars_since_bullish
+    df["at_bars_since_bearish_cross"] = bars_since_bearish
+
+    # ================================================================
+    # LINE SEPARATION (key metric for "flat" detection)
+    # Gap between blue and red lines as percentage of price
+    # ================================================================
+    line_separation = np.zeros(n)
+    for i in range(n):
+        if close_prices[i] > 0 and not np.isnan(at_buyers[i]) and not np.isnan(at_sellers[i]):
+            gap = abs(at_buyers[i] - at_sellers[i])
+            line_separation[i] = gap / close_prices[i]
+
+    df["at_line_separation"] = line_separation
+
+    # ================================================================
+    # SIMPLIFIED VALIDATION (v2)
+    # "FLAT" = lines overlapping (separation < threshold)
+    # "VALID" = dominance + separation
+    # ================================================================
+
+    # Not flat = lines have meaningful separation
+    at_not_flat = line_separation >= min_line_separation
+    df["at_not_flat"] = at_not_flat
+
+    # Use existing dominance columns from calculate_alphatrend()
+    # at_buyers_dominant = at_buyers > at_sellers (blue above red)
+    # at_sellers_dominant = at_sellers > at_buyers (red above blue)
+
+    at_buyers_dominant = df["at_buyers_dominant"].values if "at_buyers_dominant" in df.columns else (at_buyers > at_sellers)
+    at_sellers_dominant = df["at_sellers_dominant"].values if "at_sellers_dominant" in df.columns else (at_sellers > at_buyers)
+
+    # SIMPLE VALIDATION:
+    # LONG valid = blue dominant AND not flat
+    # SHORT valid = red dominant AND not flat
+    at_valid_long = at_buyers_dominant & at_not_flat
+    at_valid_short = at_sellers_dominant & at_not_flat
+
+    df["at_valid_long"] = at_valid_long
+    df["at_valid_short"] = at_valid_short
+
+    # CRITICAL FIX: Prevent NaN propagation from early bars
+    # NaN & True = NaN in pandas, which breaks signal checks
+    df["at_valid_long"] = df["at_valid_long"].fillna(False)
+    df["at_valid_short"] = df["at_valid_short"].fillna(False)
+
+    # Legacy columns (set to match new logic for backward compatibility)
+    df["at_momentum_bullish"] = at_valid_long  # Simplified: same as valid_long
+    df["at_momentum_bearish"] = at_valid_short  # Simplified: same as valid_short
+
+    _logger.debug(
+        "AT Validation SIMPLIFIED [%s]: valid_long=%d (%.1f%%), valid_short=%d (%.1f%%), not_flat=%d (%.1f%%), total=%d",
+        timeframe,
+        at_valid_long.sum(),
+        at_valid_long.sum() / n * 100 if n > 0 else 0,
+        at_valid_short.sum(),
+        at_valid_short.sum() / n * 100 if n > 0 else 0,
+        at_not_flat.sum(),
+        at_not_flat.sum() / n * 100 if n > 0 else 0,
+        n
+    )
+
+    return df
+
+
+def calculate_at_regime(df: pd.DataFrame, index: int, lookback: int = 20) -> str:
+    """
+    Calculate AT regime over lookback period ENDING at the given index.
+
+    THREE-TIER AT ARCHITECTURE - TIER 1
+    ------------------------------------
+    Instead of checking AT per-bar (which causes lag issues),
+    determine the OVERALL REGIME over recent history.
+
+    This provides a more stable signal that:
+    - Doesn't flip-flop on every bar
+    - Captures the dominant market direction
+    - Allows SSL to handle timing while AT handles regime
+
+    CRITICAL: Uses bars [index-lookback+1 : index+1] to avoid look-ahead bias.
+
+    Args:
+        df: DataFrame with at_buyers_dominant and at_sellers_dominant columns
+        index: The bar index to calculate regime FOR (looks back from here)
+        lookback: Number of bars to analyze (default: 20)
+
+    Returns:
+        str: One of "bullish_regime", "bearish_regime", "neutral_regime"
+
+    Example:
+        >>> regime = calculate_at_regime(df, index=-2, lookback=20)
+        >>> if regime == "bearish_regime":
+        ...     block_longs = True  # Don't fight the regime
+    """
+    if df is None or df.empty:
+        return "neutral_regime"
+
+    if "at_buyers_dominant" not in df.columns:
+        return "neutral_regime"
+
+    # Convert negative index to positive
+    if index < 0:
+        index = len(df) + index
+
+    # Check if we have enough data
+    if index < lookback - 1:
+        return "neutral_regime"
+
+    # Get AT dominance for lookback bars ENDING at index (no look-ahead!)
+    start_idx = index - lookback + 1
+    end_idx = index + 1  # +1 because iloc is exclusive on end
+
+    recent_buyers = df["at_buyers_dominant"].iloc[start_idx:end_idx]
+    recent_sellers = df["at_sellers_dominant"].iloc[start_idx:end_idx]
+
+    # Count bars where each side is dominant
+    buyers_bars = recent_buyers.sum()
+    sellers_bars = recent_sellers.sum()
+
+    # Calculate dominance ratio
+    regime_threshold = 0.6  # 60% dominance required
+
+    buyers_ratio = buyers_bars / lookback
+    sellers_ratio = sellers_bars / lookback
+
+    if buyers_ratio >= regime_threshold:
+        return "bullish_regime"
+    elif sellers_ratio >= regime_threshold:
+        return "bearish_regime"
+    else:
+        return "neutral_regime"
+
+
+def calculate_at_score(df: pd.DataFrame, index: int, direction: str) -> float:
+    """
+    Calculate AT contribution as a SCORE (not binary filter).
+
+    THREE-TIER AT ARCHITECTURE - TIER 3
+    ------------------------------------
+    Instead of AT blocking signals (binary), AT contributes to signal quality score.
+    This allows:
+    - Good signals to proceed even if AT is neutral
+    - AT alignment to BOOST signal confidence
+    - AT misalignment to REDUCE (not block) signal confidence
+
+    Args:
+        df: DataFrame with AT columns
+        index: Bar index to check
+        direction: "long" or "short"
+
+    Returns:
+        float: Score contribution
+            - +2.0: Strong alignment (AT confirms direction)
+            - +0.5: Neutral (AT flat or inconclusive)
+            - -1.0: Misalignment (AT opposing direction)
+
+    Example:
+        >>> at_score = calculate_at_score(df, -2, "long")
+        >>> total_score = base_score + at_score
+        >>> if total_score >= threshold:
+        ...     take_trade = True
+    """
+    if df is None or df.empty:
+        return 0.0
+
+    try:
+        at_buyers = df["at_buyers_dominant"].iloc[index]
+        at_sellers = df["at_sellers_dominant"].iloc[index]
+        at_flat = df.get("at_is_flat", pd.Series([False] * len(df))).iloc[index]
+    except (IndexError, KeyError):
+        return 0.0
+
+    if direction == "long":
+        if at_buyers:
+            return 2.0   # Strong alignment - AT confirms bullish
+        elif at_flat:
+            return 0.5   # Neutral - no strong opinion
+        elif at_sellers:
+            return -1.0  # Misalignment - AT says bearish
+        else:
+            return 0.0   # Unknown state
+
+    elif direction == "short":
+        if at_sellers:
+            return 2.0   # Strong alignment - AT confirms bearish
+        elif at_flat:
+            return 0.5   # Neutral - no strong opinion
+        elif at_buyers:
+            return -1.0  # Misalignment - AT says bullish
+        else:
+            return 0.0   # Unknown state
+
+    return 0.0
+
+
 def calculate_indicators(df: pd.DataFrame, timeframe: str = None) -> pd.DataFrame:
     """
     Calculate all technical indicators for trading strategies.
@@ -329,14 +634,26 @@ def calculate_indicators(df: pd.DataFrame, timeframe: str = None) -> pd.DataFram
     df["atr"] = ta.sma(tr, length=14)
 
     # AlphaTrend (for optional trend filtering)
-    # Use ALPHATREND_CONFIG for flat detection thresholds
+    # Use TF-adaptive flat_threshold when timeframe is provided
+    # Otherwise fall back to ALPHATREND_CONFIG defaults
     df = calculate_alphatrend(
         df,
         coeff=ALPHATREND_CONFIG.get("coeff", 1.0),
         ap=ALPHATREND_CONFIG.get("ap", 14),
         flat_lookback=ALPHATREND_CONFIG.get("flat_lookback", 5),
-        flat_threshold=ALPHATREND_CONFIG.get("flat_threshold", 0.001)
+        flat_threshold=None,  # Let calculate_alphatrend use TF-adaptive
+        timeframe=timeframe   # Pass timeframe for TF-adaptive threshold
     )
+
+    # Add AlphaTrend 3-layer validation columns for fake signal filtering
+    # This adds: at_valid_long, at_valid_short based on:
+    # 1. Recent AT cross (within X candles)
+    # 2. Momentum (winning line moving in signal direction)
+    # 3. Line separation (minimum gap between blue/red)
+    if timeframe:
+        df = add_at_validation_columns(df, timeframe=timeframe)
+    else:
+        df = add_at_validation_columns(df, timeframe="15m")  # Default to 15m
 
     return df
 
@@ -364,7 +681,7 @@ def get_indicator_value(df: pd.DataFrame, indicator: str, index: int = -1) -> Op
         if pd.isna(value):
             return None
         return float(value)
-    except Exception:
+    except (IndexError, KeyError, ValueError, TypeError):
         return None
 
 
@@ -391,7 +708,7 @@ def get_candle_data(df: pd.DataFrame, index: int = -1) -> Optional[dict]:
             'close': float(row['close']),
             'timestamp': row['timestamp'] if 'timestamp' in row.index else None,
         }
-    except Exception:
+    except (IndexError, KeyError, ValueError, TypeError):
         return None
 
 
@@ -598,6 +915,125 @@ def add_regime_column(df: pd.DataFrame) -> pd.DataFrame:
     df["regime"] = np.select(conditions, choices, default="TRANSITIONAL")
 
     return df
+
+
+# ==========================================
+# VOLATILITY REGIME DETECTION (Sinclair's 3-Tier System)
+# ==========================================
+# Expert Panel Recommendation: Use volatility-adaptive trading rules
+# - LOW_VOL: Conservative mode (small positions, strict filters)
+# - NORMAL_VOL: Standard mode (baseline parameters)
+# - HIGH_VOL: Aggressive mode (larger positions, allow AT lag)
+
+
+def classify_volatility_regime(
+    df: pd.DataFrame,
+    index: int = -1,
+    lookback: int = 50,
+    low_vol_threshold: float = 40.0,
+    high_vol_threshold: float = 75.0,
+) -> dict:
+    """
+    Classify volatility regime using ATR percentile (Sinclair's 3-tier system).
+
+    This addresses the AlphaTrend "lag" problem identified in expert panel analysis:
+    - In LOW_VOL: SSL whipsaws, AT lag is actually helpful (quality filter)
+    - In HIGH_VOL: Strong trends, AT lag hurts (allow grace period)
+
+    The ATR percentile approach is more stable than raw ATR because it:
+    - Normalizes across different price levels
+    - Adapts to symbol-specific volatility profiles
+    - Provides consistent classification across timeframes
+
+    Args:
+        df: DataFrame with ATR column (or will calculate)
+        index: Bar index to classify (default: -1 = last bar)
+        lookback: Bars to calculate percentile over (default: 50)
+        low_vol_threshold: ATR percentile below this = LOW_VOL (default: 40)
+        high_vol_threshold: ATR percentile above this = HIGH_VOL (default: 75)
+
+    Returns:
+        Dict with:
+        - regime: "LOW_VOL", "NORMAL_VOL", or "HIGH_VOL"
+        - atr_percentile: Current ATR percentile (0-100)
+        - position_multiplier: Suggested position size multiplier
+        - allow_at_grace: Whether to allow AT lag grace period
+        - details: Human-readable description
+
+    Example:
+        >>> result = classify_volatility_regime(df, index=-2)
+        >>> if result["regime"] == "HIGH_VOL":
+        ...     allow_ssl_flip_grace = True  # Let AT lag, strong trend
+    """
+    if df is None or len(df) < lookback:
+        return {
+            "regime": "NORMAL_VOL",
+            "atr_percentile": 50.0,
+            "position_multiplier": 1.0,
+            "allow_at_grace": False,
+            "details": "Insufficient data, defaulting to NORMAL_VOL"
+        }
+
+    ta = _get_ta()
+
+    # Convert negative index to positive
+    if index < 0:
+        index = len(df) + index
+
+    # Get or calculate ATR
+    if "atr" in df.columns:
+        atr_series = df["atr"]
+    else:
+        tr = ta.true_range(df["high"], df["low"], df["close"])
+        atr_series = ta.sma(tr, length=14)
+
+    # Calculate ATR percentile over lookback period
+    start_idx = max(0, index - lookback + 1)
+    end_idx = index + 1
+    atr_window = atr_series.iloc[start_idx:end_idx].dropna()
+
+    if len(atr_window) < 10:
+        return {
+            "regime": "NORMAL_VOL",
+            "atr_percentile": 50.0,
+            "position_multiplier": 1.0,
+            "allow_at_grace": False,
+            "details": "Not enough ATR data"
+        }
+
+    current_atr = atr_window.iloc[-1]
+    atr_min = atr_window.min()
+    atr_max = atr_window.max()
+
+    if atr_max - atr_min > 0:
+        atr_percentile = ((current_atr - atr_min) / (atr_max - atr_min)) * 100
+    else:
+        atr_percentile = 50.0
+
+    # Classify regime
+    if atr_percentile < low_vol_threshold:
+        regime = "LOW_VOL"
+        position_multiplier = 0.5   # Conservative: half position
+        allow_at_grace = False      # Strict AT confirmation required
+        details = f"Low volatility (ATR pct={atr_percentile:.1f}%) - conservative mode"
+    elif atr_percentile > high_vol_threshold:
+        regime = "HIGH_VOL"
+        position_multiplier = 1.5   # Aggressive: larger position
+        allow_at_grace = True       # Allow AT lag, strong trends
+        details = f"High volatility (ATR pct={atr_percentile:.1f}%) - aggressive mode"
+    else:
+        regime = "NORMAL_VOL"
+        position_multiplier = 1.0   # Standard position
+        allow_at_grace = False      # Standard AT rules
+        details = f"Normal volatility (ATR pct={atr_percentile:.1f}%) - standard mode"
+
+    return {
+        "regime": regime,
+        "atr_percentile": float(atr_percentile),
+        "position_multiplier": position_multiplier,
+        "allow_at_grace": allow_at_grace,
+        "details": details
+    }
 
 
 def get_regime_multiplier(
