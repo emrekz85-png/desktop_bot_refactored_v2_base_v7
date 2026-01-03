@@ -563,27 +563,67 @@ def main():
         timeframes = DEFAULT_TIMEFRAMES
     elif args.symbol:
         symbols = [args.symbol]
-        timeframes = [args.timeframe] if args.timeframe else ["15m"]
+        # Check for both --timeframe and --timeframes
+        if args.timeframes:
+            timeframes = [t.strip() for t in args.timeframes.split(",")]
+        elif args.timeframe:
+            timeframes = [args.timeframe]
+        else:
+            timeframes = ["15m"]
     elif args.symbols:
         symbols = [s.strip() for s in args.symbols.split(",")]
-        timeframes = [t.strip() for t in args.timeframes.split(",")] if args.timeframes else ["15m"]
+        if args.timeframes:
+            timeframes = [t.strip() for t in args.timeframes.split(",")]
+        elif args.timeframe:
+            timeframes = [args.timeframe]
+        else:
+            timeframes = ["15m"]
     else:
         # Default: BTCUSDT 15m only
         symbols = ["BTCUSDT"]
         timeframes = ["15m"]
 
     if len(symbols) == 1 and len(timeframes) == 1:
-        report = run_full_pipeline(symbols[0], timeframes[0], args.days)
+        symbol = symbols[0]
+        tf = timeframes[0]
+        report = run_full_pipeline(symbol, tf, args.days)
 
-        # Save single report
-        os.makedirs("data/pipeline_reports", exist_ok=True)
+        # Save single report to symbol-specific folder
+        symbol_dir = f"data/pipeline_reports/{symbol}"
+        os.makedirs(symbol_dir, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_file = f"data/pipeline_reports/{symbols[0]}_{timeframes[0]}_{timestamp}.json"
+        report_file = f"{symbol_dir}/{symbol}_{tf}_{timestamp}.json"
         with open(report_file, "w") as f:
             json.dump(report, f, indent=2, default=str)
         print(f"\nReport saved: {report_file}")
+    elif len(symbols) == 1:
+        # Single symbol, multiple timeframes - save to symbol folder
+        symbol = symbols[0]
+        symbol_dir = f"data/pipeline_reports/{symbol}"
+        os.makedirs(symbol_dir, exist_ok=True)
+
+        result = run_multi_pipeline(symbols, timeframes, args.days, output_dir=symbol_dir)
+
+        # Rename report file to include symbol and timeframes
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        tfs_str = "_".join(timeframes)
+        new_report_file = f"{symbol_dir}/{symbol}_{tfs_str}_{timestamp}.json"
+        if os.path.exists(result["report_file"]):
+            os.rename(result["report_file"], new_report_file)
+            print(f"Report renamed to: {new_report_file}")
     else:
-        run_multi_pipeline(symbols, timeframes, args.days)
+        # Multiple symbols - save with symbol names in filename
+        symbols_str = "_".join(symbols)
+        tfs_str = "_".join(timeframes)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        result = run_multi_pipeline(symbols, timeframes, args.days)
+
+        # Rename to include symbols and timeframes
+        new_report_file = f"data/pipeline_reports/multi_{symbols_str}_{tfs_str}_{timestamp}.json"
+        if os.path.exists(result["report_file"]):
+            os.rename(result["report_file"], new_report_file)
+            print(f"Report renamed to: {new_report_file}")
 
 
 if __name__ == "__main__":
