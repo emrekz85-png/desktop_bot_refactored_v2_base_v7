@@ -2,6 +2,24 @@
 
 This file provides guidance to Claude Code when working with this repository.
 
+---
+
+## ⚡ ACTIVE FOCUS
+
+**ÖNCE [FOCUS.md](FOCUS.md) DOSYASINI OKU!**
+
+Aktif çalışma: **Filter Combo Discovery System**
+- Bottom-up filter optimization yaklaşımı
+- `check_core_signal` + incremental filters
+- Tüm komutlar ve son sonuçlar FOCUS.md'de
+
+```bash
+# Hızlı başlangıç
+python runners/run_filter_combo_test.py --symbol BTCUSDT --timeframe 15m --incremental
+```
+
+---
+
 ## Project Overview
 
 **Cryptocurrency Futures Trading Bot** implementing SSL Flow strategy for Binance Futures.
