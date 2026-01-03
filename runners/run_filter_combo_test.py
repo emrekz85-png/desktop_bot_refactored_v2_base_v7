@@ -44,6 +44,11 @@ def apply_filters(
     use_overlap_check: bool = False,
     use_body_position: bool = False,
     use_wick_rejection: bool = False,
+    # Filter flags - SL DISTANCE (from deep analysis)
+    use_min_sl_filter: bool = False,
+    # Signal values (needed for SL filter)
+    entry_price: float = None,
+    sl_price: float = None,
     # Parameters
     adx_min: float = 15.0,
     regime_lookback: int = 20,
@@ -54,6 +59,7 @@ def apply_filters(
     pbema_min_dist: float = 0.004,
     overlap_min_gap: float = 0.005,
     wick_ratio_max: float = 0.6,
+    min_sl_pct: float = 1.5,  # Minimum SL distance in percent
 ) -> Tuple[bool, str]:
     """
     Apply optional filters to a core signal.
@@ -205,6 +211,17 @@ def apply_filters(
                 if wick_ratio > wick_ratio_max:
                     return False, f"Lower Wick ({wick_ratio:.2f})"
 
+    # ========== FILTER 11: MINIMUM SL DISTANCE (from deep analysis) ==========
+    if use_min_sl_filter:
+        if entry_price is not None and sl_price is not None and entry_price > 0:
+            if signal_type == "LONG":
+                sl_distance_pct = (entry_price - sl_price) / entry_price * 100
+            else:
+                sl_distance_pct = (sl_price - entry_price) / entry_price * 100
+
+            if sl_distance_pct < min_sl_pct:
+                return False, f"SL Too Tight ({sl_distance_pct:.2f}% < {min_sl_pct}%)"
+
     return True, "OK"
 
 
@@ -259,8 +276,13 @@ def run_combo_test(df, filter_flags, min_bars_between=5):  # 5 = AT Scenario def
         signals_found += 1
         last_signal_idx = i  # Update on SIGNAL, not exit!
 
-        # Step 2: Apply optional filters
-        passed, filter_reason = apply_filters(df, i, signal_type, **filter_flags)
+        # Step 2: Apply optional filters (pass entry/sl for min_sl_filter)
+        passed, filter_reason = apply_filters(
+            df, i, signal_type,
+            entry_price=entry,
+            sl_price=sl,
+            **filter_flags
+        )
 
         if not passed:
             signals_filtered += 1
@@ -438,6 +460,7 @@ def run_specific_combo(symbol: str, timeframe: str, days: int,
         "use_overlap_check": "overlap_check" in filter_list,
         "use_body_position": "body_position" in filter_list,
         "use_wick_rejection": "wick_rejection" in filter_list,
+        "use_min_sl_filter": "min_sl_filter" in filter_list,
     }
 
     # Run test
@@ -498,6 +521,7 @@ def run_oos_validation(symbol: str, timeframe: str, days: int,
         "use_overlap_check": "overlap_check" in filter_list,
         "use_body_position": "body_position" in filter_list,
         "use_wick_rejection": "wick_rejection" in filter_list,
+        "use_min_sl_filter": "min_sl_filter" in filter_list,
     }
 
     # Run tests
@@ -583,7 +607,8 @@ def main():
     # All filter keys for easy management
     ALL_FILTERS = [
         "at_binary", "at_flat_filter", "adx_filter", "ssl_touch",  # EXISTING
-        "rsi_filter", "pbema_distance", "overlap_check", "body_position", "wick_rejection"  # NEW
+        "rsi_filter", "pbema_distance", "overlap_check", "body_position", "wick_rejection",  # OPTUNA
+        "min_sl_filter"  # SL DISTANCE (from deep analysis - 57% WR vs 31%)
     ]
 
     def make_flags(active_filters):
@@ -599,6 +624,7 @@ def main():
             "use_overlap_check": "overlap_check" in active_filters,
             "use_body_position": "body_position" in active_filters,
             "use_wick_rejection": "wick_rejection" in active_filters,
+            "use_min_sl_filter": "min_sl_filter" in active_filters,
         }
 
     # ========== BASELINE: No filters ==========

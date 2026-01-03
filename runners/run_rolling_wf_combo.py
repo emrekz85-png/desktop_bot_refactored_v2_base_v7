@@ -109,8 +109,8 @@ def run_window_test(df: pd.DataFrame, filter_flags: dict, min_bars_between: int 
 
         last_signal_idx = i
 
-        # Apply filters
-        passed, filter_reason = apply_filters(df, i, signal_type, **filter_flags)
+        # Apply filters (pass entry/sl for min_sl_filter)
+        passed, filter_reason = apply_filters(df, i, signal_type, entry_price=entry, sl_price=sl, **filter_flags)
 
         if not passed:
             continue

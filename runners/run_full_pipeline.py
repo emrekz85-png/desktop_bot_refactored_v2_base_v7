@@ -47,16 +47,18 @@ DEFAULT_TIMEFRAMES = ["5m", "15m", "1h", "4h"]
 ALL_FILTERS = [
     "regime", "at_binary", "at_flat_filter", "adx_filter",
     "ssl_touch", "rsi_filter", "pbema_distance", "overlap_check",
-    "body_position", "wick_rejection"
+    "body_position", "wick_rejection", "min_sl_filter"
 ]
 
 
-def apply_filters(df, idx, signal_type, **filter_flags) -> Tuple[bool, str]:
+def apply_filters(df, idx, signal_type, entry_price=None, sl_price=None, **filter_flags) -> Tuple[bool, str]:
     """Wrapper for original apply_filters from run_filter_combo_test."""
     return original_apply_filters(
         df=df,
         index=idx,
         signal_type=signal_type,
+        entry_price=entry_price,
+        sl_price=sl_price,
         use_regime_filter=filter_flags.get("use_regime_filter", False),
         use_at_binary=filter_flags.get("use_at_binary", False),
         use_at_flat_filter=filter_flags.get("use_at_flat_filter", False),
@@ -67,6 +69,7 @@ def apply_filters(df, idx, signal_type, **filter_flags) -> Tuple[bool, str]:
         use_overlap_check=filter_flags.get("use_overlap_check", False),
         use_body_position=filter_flags.get("use_body_position", False),
         use_wick_rejection=filter_flags.get("use_wick_rejection", False),
+        use_min_sl_filter=filter_flags.get("use_min_sl_filter", False),
     )
 
 
@@ -183,7 +186,7 @@ def run_backtest(df, filter_flags, slippage=0.0, fee=0.0, min_bars=5) -> dict:
 
         last_idx = i
 
-        passed, _ = apply_filters(df, i, signal_type, **filter_flags)
+        passed, _ = apply_filters(df, i, signal_type, entry_price=entry, sl_price=sl, **filter_flags)
         if not passed:
             continue
 

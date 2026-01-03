@@ -217,8 +217,8 @@ def run_realistic_backtest(
         signals_found += 1
         last_signal_idx = i
 
-        # Apply filters
-        passed, filter_reason = apply_filters(df, i, signal_type, **filter_flags)
+        # Apply filters (pass entry/sl for min_sl_filter)
+        passed, filter_reason = apply_filters(df, i, signal_type, entry_price=entry, sl_price=sl, **filter_flags)
 
         if not passed:
             signals_filtered += 1
@@ -503,7 +503,7 @@ def run_cost_aware_backtest(
         signals_found += 1
         last_signal_idx = i
 
-        passed, filter_reason = apply_filters(df, i, signal_type, **filter_flags)
+        passed, filter_reason = apply_filters(df, i, signal_type, entry_price=entry, sl_price=sl, **filter_flags)
 
         if not passed:
             signals_filtered += 1

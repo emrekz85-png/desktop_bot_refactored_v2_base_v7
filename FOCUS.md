@@ -1,168 +1,155 @@
-# FOCUS: Filter Combo Discovery System
+# FOCUS: Trading Bot Test System
 
-**Son Güncelleme:** 2026-01-03
-**Aktif Çalışma:** Filter-based signal optimization
-
----
-
-## MEVCUT DURUM
-
-### Yaklaşım: Bottom-Up Filter Discovery
-```
-MİNİMAL BAŞLA → BOL TRADE → ANALİZ ET → AKILLI FİLTRELE
-```
-
-Eski sistem (top-down) yerine yeni yaklaşım:
-1. `check_core_signal` ile baseline al (1500+ sinyal)
-2. Regime filter ekle
-3. Incremental olarak filtre test et
-4. Rolling WF ile validate et
-5. Cost-aware test ile gerçekçiliği kontrol et
+**Son Guncelleme:** 2026-01-03
+**Aktif Calisma:** Simplified Test Runner + Min SL Filter
 
 ---
 
-## SON TEST SONUÇLARI (BTCUSDT)
+## TEK KOMUT: `run.py`
 
-| TF | Best Config | Trades | İdeal PnL | Gerçekçi PnL | Durum |
-|----|-------------|--------|-----------|--------------|-------|
-| 5m | REGIME + at_binary | 1289 | +$18.90 | -$89.36 | Edge < Cost |
-| 15m | REGIME + at_flat + adx | 238 | +$15.91 | -$4.07 | Edge < Cost |
-| 1h | BASELINE (no filter) | 499 | +$38.40 | -$3.54 | Edge < Cost |
-| 4h | - | - | - | - | Yetersiz veri |
-
-### Problem
-- Strateji edge: %0.04 - %0.21
-- Trading maliyeti: %0.24 (slippage + commission)
-- **Edge < Maliyet = Net Zarar**
-
-### Hedef
-- Edge'i %0.30+ yapmak VEYA
-- Maliyeti %0.15 altına düşürmek
-
----
-
-## KULLANILACAK ARAÇLAR
-
-### 0. FULL PIPELINE (Önerilen)
 ```bash
-# Tek symbol/timeframe
-python runners/run_full_pipeline.py --symbol BTCUSDT --timeframe 15m
+# Full 1-year test (recommended)
+python run.py test BTCUSDT 15m
 
-# BTC tüm timeframe'ler
-python runners/run_full_pipeline.py --btc-only
+# Quick 90-day test
+python run.py test BTCUSDT 15m --quick
 
-# Birden fazla symbol
-python runners/run_full_pipeline.py --symbols BTCUSDT,ETHUSDT --timeframes 15m,1h
+# Test all recommended symbols
+python run.py test --all
 
-# Tüm kombinasyonlar
-python runners/run_full_pipeline.py --all
-```
-Tüm adımları otomatik çalıştırır ve kapsamlı rapor üretir.
+# Visualize trades from latest test
+python run.py viz BTCUSDT 15m
 
-### 1. AT Scenario Analysis
-```bash
-python runners/run_at_scenario_analysis.py --symbol BTCUSDT --timeframe 15m --days 365
-```
-Core sinyalleri analiz eder, AT modlarını karşılaştırır.
-
-### 2. Filter Combo Test
-```bash
-# Incremental (tek tek filtre ekle)
-python runners/run_filter_combo_test.py --symbol BTCUSDT --timeframe 15m --incremental
-
-# Full scan (tüm kombinasyonlar)
-python runners/run_filter_combo_test.py --symbol BTCUSDT --timeframe 15m --full-scan
-
-# Specific combo
-python runners/run_filter_combo_test.py --specific "regime,at_flat_filter,adx_filter"
+# Show all test results
+python run.py report
 ```
 
-### 3. Rolling WF Validation
-```bash
-python runners/run_rolling_wf_combo.py --symbol BTCUSDT --timeframe 15m \
-    --filters "regime,at_flat_filter,adx_filter" --full-year
-```
+**Output:** `data/results/{SYMBOL}_{TF}_{TIMESTAMP}/`
 
-### 4. Cost-Aware Test (Gerçekçi)
-```bash
-# Karşılaştırma (ideal vs gerçekçi)
-python runners/run_realistic_backtest.py --filters "regime,at_flat_filter" --compare
+---
 
-# Sadece cost-aware
-python runners/run_realistic_backtest.py --filters "regime,at_flat_filter" --cost-aware
+## SON SONUCLAR (BTCUSDT 15m, 1 Year)
+
+| Metric | Deger |
+|--------|-------|
+| **Filters** | regime, at_flat_filter, min_sl_filter |
+| **Signals** | 1683 raw → 40 final (97.6% filtered) |
+| **Trades** | 26 |
+| **Win Rate** | 46.15% |
+| **PnL** | +$72.99 (+7.3%) |
+| **Max DD** | $35.70 (3.57%) |
+| **Profit Factor** | 1.45 |
+| **Verdict** | PASS |
+
+### Key Insight: Min SL Filter
+
+SL distance < 1.5% olan trade'ler noise ile SL hit oluyor.
+
+| SL Distance | Win Rate | Status |
+|-------------|----------|--------|
+| < 1.0% | 23.7% | REJECT |
+| 1.0 - 1.5% | 34.2% | REJECT |
+| > 1.5% | 55.0%+ | ACCEPT |
+
+**min_sl_filter = 1.5%** ile kayiplar kontrol altina alindi.
+
+---
+
+## MEVCUT KONFIGÜRASYON
+
+```python
+# run.py icindeki ayarlar
+BEST_FILTERS = ["regime", "at_flat_filter", "min_sl_filter"]
+
+# Portfolio settings
+initial_balance = 1000
+risk_per_trade = 1%   # $10 per trade
+leverage = 10x
+max_position = 10%
+slippage = 0.05%
+fee = 0.07%
 ```
 
 ---
 
-## MEVCUT FİLTRELER
-
-| Filtre | Açıklama | Etki |
-|--------|----------|------|
-| `regime` | Neutral regime'i atla | **TEMEL** |
-| `at_binary` | AT alignment gerekli | 5m'de iyi |
-| `at_flat_filter` | AT flat ise atla | 15m'de iyi |
-| `adx_filter` | ADX > 15 gerekli | Trend filtresi |
-| `ssl_touch` | Son 5 bar'da SSL touch | Nötr |
-| `rsi_filter` | RSI limitleri | Minimal etki |
-| `pbema_distance` | PBEMA mesafesi | Minimal etki |
-| `overlap_check` | SSL-PBEMA gap | Hafif pozitif |
-| `body_position` | Mum gövde pozisyonu | Değişken |
-| `wick_rejection` | Wick oranı | Değişken |
-
----
-
-## ÇALIŞMA AKIŞI
+## DOSYA YAPISI (Simplified)
 
 ```
-1. Symbol/TF seç
-2. AT Scenario Analysis çalıştır → baseline al
-3. Filter Combo Test (incremental) → en iyi filtreleri bul
-4. Rolling WF Validation → OOS test
-5. Cost-Aware Test → gerçekçi sonuç
-6. Eğer kârlı değilse → yeni filtre/parametre dene
+run.py                              # TEK GIRIS NOKTASI
+├── test   → Full pipeline          # Signal + Filter + Portfolio
+├── viz    → Trade charts           # Visualize results
+├── report → Summary                # All test results
+└── list   → Result dirs            # List outputs
+
+data/results/                       # CONSOLIDATED OUTPUT
+├── BTCUSDT_15m_20260103_*/
+│   ├── result.json                 # Main summary
+│   ├── signals.json                # All signals
+│   ├── trades.json                 # All trades
+│   ├── summary.txt                 # Human-readable
+│   └── charts/                     # Visualizations
 ```
 
----
+### Legacy (Deprecated)
 
-## DOSYA YAPISI
-
+Eski runner'lar hala calisiyor ama `run.py` tercih edilmeli:
 ```
 runners/
-├── run_at_scenario_analysis.py   # AT scenario tester
-├── run_filter_combo_test.py      # Filter combo discovery
-├── run_rolling_wf_combo.py       # WF validation with filters
-├── run_realistic_backtest.py     # Cost-aware backtest
-└── rolling_wf.py                 # Core WF logic
-
-data/filter_combo_logs/           # Test sonuçları
-├── combo_tests_BTCUSDT_15m.jsonl # Append-only log
-└── BTCUSDT_15m_365d_*.json       # Full scan results
-
-docs/
-├── COST_ANALYSIS_REPORT.md       # Maliyet analizi
-└── PROJECT_INDEX.md              # Proje indeksi
+├── run_full_pipeline.py     # Deprecated → use run.py test
+├── run_filter_combo_test.py # Deprecated
+├── run_portfolio_test.py    # Deprecated
+└── ...
 ```
 
 ---
 
-## SONRAKİ ADIMLAR (ÖNERİLER)
+## WORKFLOW
 
-1. **TP/SL Optimizasyonu** - Risk/reward oranını iyileştir
-2. **Entry Timing** - Limit order ile slippage azalt
-3. **Yeni Filtreler** - Volume, volatility bazlı filtreler
-4. **Multi-TF Confirmation** - 1h sinyal + 15m entry
-5. **Farklı Semboller** - ETH, LINK için aynı analizi yap
+```
+1. python run.py test BTCUSDT 15m        # Full test
+2. python run.py viz BTCUSDT 15m         # Check trades visually
+3. python run.py report                   # Compare results
+```
 
----
-
-## UYARILAR
-
-- ❌ Eski `run_rolling_wf_test.py` KULLANMA (eski sistem)
-- ❌ `check_signal` yerine `check_core_signal` kullan
-- ❌ İdeal sonuçlara güvenme, her zaman cost-aware test yap
-- ✅ Her değişikliği incremental test et
-- ✅ Sonuçları `data/filter_combo_logs/` klasörüne logla
+Yeni sembol/timeframe icin:
+```
+1. python run.py test ETHUSDT 15m --quick  # Quick validation
+2. If PASS → python run.py test ETHUSDT 15m  # Full test
+3. Update docs/SYMBOL_SETTINGS.md with results
+```
 
 ---
 
-**Bu dosyayı her session başında oku.**
+## AKTIF FILTRELER
+
+| Filter | Aciklama | Default |
+|--------|----------|---------|
+| `regime` | Sadece trending market | ON |
+| `at_flat_filter` | AT flat degilse trade | ON |
+| `min_sl_filter` | SL >= 1.5% olmali | ON |
+
+Inactive (gelecek arastirma icin):
+- `adx_filter`, `ssl_touch`, `rsi_filter`, `pbema_distance`
+
+---
+
+## SONRAKI ADIMLAR
+
+1. [x] min_sl_filter implementation
+2. [x] Portfolio sizing integration
+3. [x] Simplified run.py
+4. [ ] ETH/SOL test with same config
+5. [ ] Multi-symbol portfolio optimization
+
+---
+
+## NOTLAR
+
+- Her test `data/results/` klasorune kaydedilir
+- `python run.py report` ile tum sonuclari gor
+- Trade chart'lari `viz` komutu ile otomatik olusturulur
+- Eski `data/pipeline_reports/`, `data/filter_combo_logs/` legacy
+
+---
+
+**Bu dosyayi her session basinda oku.**
