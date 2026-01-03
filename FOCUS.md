@@ -43,6 +43,22 @@ Eski sistem (top-down) yerine yeni yaklaşım:
 
 ## KULLANILACAK ARAÇLAR
 
+### 0. FULL PIPELINE (Önerilen)
+```bash
+# Tek symbol/timeframe
+python runners/run_full_pipeline.py --symbol BTCUSDT --timeframe 15m
+
+# BTC tüm timeframe'ler
+python runners/run_full_pipeline.py --btc-only
+
+# Birden fazla symbol
+python runners/run_full_pipeline.py --symbols BTCUSDT,ETHUSDT --timeframes 15m,1h
+
+# Tüm kombinasyonlar
+python runners/run_full_pipeline.py --all
+```
+Tüm adımları otomatik çalıştırır ve kapsamlı rapor üretir.
+
 ### 1. AT Scenario Analysis
 ```bash
 python runners/run_at_scenario_analysis.py --symbol BTCUSDT --timeframe 15m --days 365
