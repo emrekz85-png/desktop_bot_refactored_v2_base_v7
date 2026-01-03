@@ -8,15 +8,28 @@ This file provides guidance to Claude Code when working with this repository.
 
 **ÖNCE [FOCUS.md](FOCUS.md) DOSYASINI OKU!**
 
-Aktif çalışma: **Filter Combo Discovery System**
-- Bottom-up filter optimization yaklaşımı
-- `check_core_signal` + incremental filters
-- Tüm komutlar ve son sonuçlar FOCUS.md'de
+Aktif çalışma: **Integrated Test Pipeline**
+
+### Tek Komut: `run.py`
 
 ```bash
-# Hızlı başlangıç
-python runners/run_filter_combo_test.py --symbol BTCUSDT --timeframe 15m --incremental
+# Quick test (sabit config)
+python run.py test BTCUSDT 15m
+
+# Full pipeline (discovery + WF + portfolio)
+python run.py test BTCUSDT 15m --full
+
+# Visualize trades
+python run.py viz BTCUSDT 15m
+
+# Show all results
+python run.py report
 ```
+
+### Pipeline Akisi (--full mode)
+1. Fetch data → 2. Baseline → 3. Filter discovery → 4. Rolling WF → 5. Portfolio → 6. Verdict
+
+**Detaylar icin FOCUS.md'ye bak.**
 
 ---
 
@@ -63,22 +76,23 @@ SSL Flow is a trend-following strategy:
 
 ---
 
-## Recommended Portfolio
+## Current Status (2026-01-03)
 
-Based on full-year testing (2025):
+**⚠️ UYARI: Strateji şu anki haliyle maliyetler sonrası kârlı DEĞİL.**
 
-| Symbol | Status | Notes |
-|--------|--------|-------|
-| BTCUSDT | **RECOMMENDED** | Best performance |
-| ETHUSDT | **RECOMMENDED** | Consistent results |
-| LINKUSDT | **RECOMMENDED** | High win rate |
+Son pipeline sonuçları (BTCUSDT 15m, 1 yıl):
+- Best Config: REGIME + at_flat_filter
+- 242 trades, 31% win rate
+- Ideal PnL: +$14.62
+- Cost-Aware PnL: **-$5.70**
+- Edge: 0.17% < Cost: 0.24%
 
-**Avoid all other symbols** - they either lost money or produced no trades.
+**Öneri:** Trade etme, stratejiyi iyileştir.
 
-**Expected Performance (BTC+ETH+LINK):**
-- PnL: ~$145 (H2 2025)
-- Win Rate: ~79%
-- Max Drawdown: ~$44
+**Çalışma Alanları:**
+- Portfolio sistemi yazılacak
+- Entry timing iyileştirmesi
+- TP/SL optimizasyonu
 
 ---
 
@@ -100,22 +114,26 @@ Based on full-year testing (2025):
 | Purpose | File |
 |---------|------|
 | Main application | `desktop_bot_refactored_v2_base_v7.py` |
+| **Full Pipeline** | `runners/run_full_pipeline.py` |
+| **Trade Visualizer** | `core/trade_visualizer.py` |
 | Core config | `core/config.py` |
 | Indicators | `core/indicators.py` |
+| Core signal detection | `core/at_scenario_analyzer.py` |
 | Trade logic | `core/trade_manager.py` |
 | SSL Flow strategy | `strategies/ssl_flow.py` |
 
 ### Common Commands
 
 ```bash
-# Run backtest
-python run_backtest.py
+# Full Pipeline (Önerilen - tüm analiz adımları)
+python runners/run_full_pipeline.py --symbol BTCUSDT --timeframe 15m
 
-# Run walk-forward test
-python run_rolling_wf_test.py
+# Pipeline with trade logging
+python runners/run_full_pipeline.py --symbol BTCUSDT --timeframe 15m --save-trades
 
-# Full year test
-python run_rolling_wf_test.py --full-year
+# Trade Visualizer
+python runners/run_trade_visualizer.py --symbol BTCUSDT --timeframe 15m \
+    --entry-time "2025-03-02 21:00" --signal-type SHORT
 
 # Run tests
 pytest
