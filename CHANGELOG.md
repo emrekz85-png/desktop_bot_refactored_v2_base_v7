@@ -7,6 +7,135 @@ Versiyonlama: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ---
 
+## [v2.2.0] - 2026-01-04 - Pattern Integration & Momentum Exit
+
+### Özet
+7 trading pattern'i (gerçek trade analizinden) sisteme entegre edildi. PBEMA Retest stratejisi düzeltildi ve çalışır hale getirildi. Momentum Exit özelliği trade loop'a eklendi.
+
+### Değişiklikler (Changes)
+
+#### Eklenen (Added)
+
+**PBEMA Retest Stratejisi Düzeltmesi:**
+- `strategies/pbema_retest.py` - Breakout detection logic düzeltildi
+  - Eski: `prev_close < pb_bot AND close > pb_top` (tek mumda tüm bulutu geçme - imkansız)
+  - Yeni: `prev_close <= pb_top AND close > pb_top` (bulut kenarını geçme - gerçekçi)
+  - `min_rr`: 1.5 → 1.0 (daha fazla sinyal)
+  - `breakout_lookback`: 20 → 30 (daha geniş arama)
+  - `min_breakout_strength`: 0.5% → 0.2% (daha gerçekçi)
+  - Sonuç: 0 sinyal → **450 sinyal**, %52.7 WR, +$12.60 PnL
+
+**Momentum Exit Entegrasyonu:**
+- `runners/run_filter_combo_test.py::simulate_trade()` güncellendi
+  - `use_momentum_exit` parametresi eklendi
+  - Trade loop içinde momentum exhaustion kontrolü
+  - Sadece kârdayken momentum exit kontrol edilir
+  - Exit types: TP, SL, MOMENTUM, EOD
+
+- `run_comprehensive_test.py` güncellendi
+  - Momentum Exit test fonksiyonları eklendi
+  - Exit type istatistikleri gösterimi
+  - SSL Flow ve PBEMA Retest için momentum exit karşılaştırması
+
+**Pattern Filter Düzeltmeleri:**
+- `runners/run_filter_combo_test.py::apply_filters()` düzeltildi
+  - Pattern 3 (Liquidity Grab): Artık grab detection ZORUNLU
+  - Pattern 7 (SSL Dynamic): SHORT için de destek eklendi
+
+- `core/pattern_filters.py` threshold ayarları:
+  - Pattern 4 (SSL Slope): `flat_threshold` 0.0015 → 0.0006
+  - Pattern 5 (HTF Bounce): `drop_threshold` 3% → 1.5%
+  - Pattern 6 (Momentum Loss): `min_consecutive` 5 → 3
+
+#### Değiştirilen (Changed)
+- `run_comprehensive_test.py` - 6 adımlı test pipeline'ı
+- PBEMA Retest için regime filter kaldırıldı (kendi trend detection'ı var)
+
+### Test Sonuçları (1 Yıl, BTCUSDT 15m)
+
+| Sistem | Trade | WR | PnL | Not |
+|--------|-------|-----|-----|-----|
+| SSL Flow (Current Default) | 34 | 50.0% | **$24.39** | 🥇 En iyi PnL |
+| SSL Flow + SSL Slope | 25 | 52.0% | $22.13 | |
+| SSL Flow + SSL Dynamic | 8 | 75.0% | $19.75 | En yüksek WR |
+| PBEMA Retest | 450 | 52.7% | $12.60 | Çok trade |
+| SSL + Momentum Exit | 40 | 70.0% | $4.86 | Yüksek WR, düşük PnL |
+| PBEMA + Momentum Exit | 450 | 60.7% | $0.70 | |
+
+### Ana Bulgular
+
+1. **SSL Flow (Current Default) hala en iyi** - $24.39 PnL ile birinci
+2. **PBEMA Retest artık çalışıyor** - 450 trade, %52.7 WR, +$12.60
+3. **Pattern filtreleri iyileştirme sağlamıyor** - P3-P7 PnL'i düşürüyor
+4. **Momentum Exit trade-off'u:**
+   - Win rate artıyor (%50 → %70)
+   - PnL düşüyor ($24 → $5)
+   - Erken çıkış = daha az kâr
+
+### Kullanım
+
+```bash
+# Comprehensive test (tüm stratejiler)
+python run_comprehensive_test.py BTCUSDT 15m --days 365
+
+# PBEMA Retest kullanımı
+from strategies import check_pbema_retest_signal
+signal_type, entry, tp, sl, reason = check_pbema_retest_signal(df, index=-2)
+
+# Momentum Exit ile trade simulation
+from runners.run_filter_combo_test import simulate_trade
+trade = simulate_trade(df, idx, signal_type, entry, tp, sl, use_momentum_exit=True)
+```
+
+---
+
+## [v2.1.0] - 2026-01-02 - Kelly Criterion Risk Management
+
+### Özet
+Matematiksel olarak optimize edilmiş risk yönetim sistemi eklendi.
+
+### Değişiklikler (Changes)
+
+#### Eklenen (Added)
+- `core/kelly_calculator.py` - Kelly Criterion hesaplamaları
+  - `calculate_kelly()` - Optimal pozisyon boyutu
+  - `calculate_growth_rate()` - Geometrik büyüme oranı
+  - `trades_to_double()` - Sermayeyi ikiye katlamak için gereken trade sayısı
+
+- `core/drawdown_tracker.py` - Drawdown takibi ve oto-ayarlama
+  - `DrawdownTracker` sınıfı - Equity ve peak takibi
+  - `get_drawdown_kelly_multiplier()` - Üstel azalma ile Kelly çarpanı
+  - Circuit breaker: %20 max drawdown
+
+- `core/risk_manager.py` - Merkezi risk yönetimi koordinatörü
+  - `RiskManager` sınıfı - Tüm bileşenleri entegre eder
+  - `calculate_position_size()` - Master pozisyon boyutlandırma metodu
+  - R-Multiple takibi ve beklenti hesaplaması
+
+- `tests/test_risk_manager.py` - 49 kapsamlı unit test
+- `docs/RISK_MANAGEMENT_SPEC.md` - Tam spesifikasyon dokümanı (~1030 satır)
+
+#### Değiştirilen (Changed)
+- `core/correlation_manager.py` - Kelly entegrasyon fonksiyonları eklendi
+  - `adjust_kelly_for_correlation()` - Korelasyon bazlı Kelly ayarlama
+  - `calculate_portfolio_risk()` - Portföy risk hesaplama
+- `core/__init__.py` - Yeni modül exportları
+
+### Temel Özellikler
+
+| Özellik | Açıklama |
+|---------|----------|
+| Kelly Criterion | f* = W - (1-W)/R, Half-Kelly varsayılan |
+| Drawdown Auto-Adjust | 0%→1.0, 10%→0.70, 20%→0.0 üstel azalma |
+| Circuit Breaker | %20 max drawdown tüm işlemleri durdurur |
+| Recovery Mode | %5 recovery gerekli, %25 boyutta devam |
+| Korelasyon Ayarlama | Korelasyonlu pozisyonlar için boyut azaltma |
+
+### Test Sonuçları
+- 49/49 unit test başarılı
+
+---
+
 ## [v2.0.0] - 2026-01-01 - Indicator Parity Fix
 
 ### Özet

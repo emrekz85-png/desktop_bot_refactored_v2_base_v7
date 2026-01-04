@@ -46,6 +46,14 @@ def apply_filters(
     use_wick_rejection: bool = False,
     # Filter flags - SL DISTANCE (from deep analysis)
     use_min_sl_filter: bool = False,
+    # Filter flags - PATTERN FILTERS (Real Trade Analysis 2026-01-04)
+    use_momentum_exit: bool = False,
+    use_pbema_retest: bool = False,
+    use_liquidity_grab: bool = False,
+    use_ssl_slope_filter: bool = False,
+    use_htf_bounce: bool = False,
+    use_momentum_loss: bool = False,
+    use_ssl_dynamic_support: bool = False,
     # Signal values (needed for SL filter)
     entry_price: float = None,
     sl_price: float = None,
@@ -222,35 +230,152 @@ def apply_filters(
             if sl_distance_pct < min_sl_pct:
                 return False, f"SL Too Tight ({sl_distance_pct:.2f}% < {min_sl_pct}%)"
 
+    # ========== PATTERN FILTERS (Real Trade Analysis 2026-01-04) ==========
+
+    # Pattern 3: Liquidity Grab (Entry Enhancement)
+    # FIXED: Now REQUIRES a liquidity grab to be detected (was passing when no grab)
+    if use_liquidity_grab:
+        from core import detect_liquidity_grab
+        grab_type, _ = detect_liquidity_grab(df, index)
+
+        # Require liquidity grab to exist AND match signal direction
+        if grab_type is None:
+            return False, "Liquidity Grab: No Grab Detected"
+        if signal_type == "LONG" and grab_type != "LONG_GRAB":
+            return False, "Liquidity Grab: Wrong Direction"
+        if signal_type == "SHORT" and grab_type != "SHORT_GRAB":
+            return False, "Liquidity Grab: Wrong Direction"
+
+    # Pattern 4: SSL Baseline Slope Filter (Anti-Ranging)
+    if use_ssl_slope_filter:
+        from core import is_ssl_baseline_ranging
+        is_ranging, _ = is_ssl_baseline_ranging(df, index)
+
+        if is_ranging:
+            return False, "SSL: Ranging Market"
+
+    # Pattern 5: HTF Bounce Detection (Entry Confirmation)
+    if use_htf_bounce:
+        from core import detect_htf_bounce
+        bounce_type, _ = detect_htf_bounce(df, index)
+
+        # Require HTF bounce to match signal direction
+        if bounce_type is None:
+            return False, "HTF: No Bounce"
+
+        if signal_type == "LONG" and bounce_type != "LONG_BOUNCE":
+            return False, "HTF: Wrong Bounce Direction"
+        if signal_type == "SHORT" and bounce_type != "SHORT_BOUNCE":
+            return False, "HTF: Wrong Bounce Direction"
+
+    # Pattern 6: Momentum Loss After Trend (Counter-Trend Entry)
+    if use_momentum_loss:
+        from core import detect_momentum_loss_after_trend
+        break_type, _ = detect_momentum_loss_after_trend(df, index)
+
+        # Require momentum break to match signal direction
+        if break_type is None:
+            return False, "Momentum: No Break"
+
+        if signal_type == "LONG" and break_type != "LONG_BREAK":
+            return False, "Momentum: Wrong Break Direction"
+        if signal_type == "SHORT" and break_type != "SHORT_BREAK":
+            return False, "Momentum: Wrong Break Direction"
+
+    # Pattern 7: SSL Dynamic Support/Resistance (Entry Confirmation)
+    # FIXED: Now handles both LONG (support) and SHORT (resistance)
+    if use_ssl_dynamic_support:
+        from core import is_ssl_acting_as_dynamic_support
+        is_active, _ = is_ssl_acting_as_dynamic_support(df, index)
+
+        # For LONG: SSL must be acting as support (price bouncing off SSL from above)
+        if signal_type == "LONG" and not is_active:
+            return False, "SSL: Not Active Support"
+
+        # For SHORT: SSL must NOT be active support (indicates resistance instead)
+        # If SSL is strong support, SHORT signals are risky
+        if signal_type == "SHORT" and is_active:
+            return False, "SSL: Active Support Blocks SHORT"
+
+    # Note: Pattern 1 (momentum_exit) is an EXIT filter, not entry filter
+    # Note: Pattern 2 (pbema_retest) is a separate strategy, not a filter
+
     return True, "OK"
 
 
-def simulate_trade(df, signal_idx, signal_type, entry, tp, sl, position_size=35.0):
-    """Simulate a single trade."""
+def simulate_trade(df, signal_idx, signal_type, entry, tp, sl, position_size=35.0,
+                   use_momentum_exit=False, min_profit_for_momentum=0.005):
+    """
+    Simulate a single trade with optional momentum-based exit.
+
+    Args:
+        df: DataFrame with OHLCV + indicators
+        signal_idx: Entry signal index
+        signal_type: "LONG" or "SHORT"
+        entry: Entry price
+        tp: Take profit price
+        sl: Stop loss price
+        position_size: Position size in dollars
+        use_momentum_exit: If True, exit when momentum exhausts (Pattern 1)
+        min_profit_for_momentum: Minimum profit % before checking momentum (0.5%)
+
+    Returns:
+        dict: Trade result with pnl, win, exit_idx, exit_type
+    """
     abs_idx = signal_idx if signal_idx >= 0 else (len(df) + signal_idx)
+
+    # Import momentum exit function if needed
+    if use_momentum_exit:
+        from core.momentum_exit import should_exit_on_momentum
 
     for i in range(abs_idx + 1, len(df)):
         candle = df.iloc[i]
-        high, low = float(candle["high"]), float(candle["low"])
+        high, low, close = float(candle["high"]), float(candle["low"]), float(candle["close"])
 
         if signal_type == "LONG":
+            # Check SL first
             if low <= sl:
-                return {"pnl": (sl - entry) / entry * position_size, "win": False, "exit_idx": i}
+                return {"pnl": (sl - entry) / entry * position_size, "win": False,
+                        "exit_idx": i, "exit_type": "SL"}
+            # Check TP
             if high >= tp:
-                return {"pnl": (tp - entry) / entry * position_size, "win": True, "exit_idx": i}
-        else:
-            if high >= sl:
-                return {"pnl": (entry - sl) / entry * position_size, "win": False, "exit_idx": i}
-            if low <= tp:
-                return {"pnl": (entry - tp) / entry * position_size, "win": True, "exit_idx": i}
+                return {"pnl": (tp - entry) / entry * position_size, "win": True,
+                        "exit_idx": i, "exit_type": "TP"}
 
-    # EOD
+            # Check momentum exit (only if in profit)
+            if use_momentum_exit:
+                current_profit_pct = (close - entry) / entry
+                if current_profit_pct >= min_profit_for_momentum:
+                    if should_exit_on_momentum(df, i, signal_type):
+                        pnl = (close - entry) / entry * position_size
+                        return {"pnl": pnl, "win": pnl > 0,
+                                "exit_idx": i, "exit_type": "MOMENTUM"}
+        else:  # SHORT
+            # Check SL first
+            if high >= sl:
+                return {"pnl": (entry - sl) / entry * position_size, "win": False,
+                        "exit_idx": i, "exit_type": "SL"}
+            # Check TP
+            if low <= tp:
+                return {"pnl": (entry - tp) / entry * position_size, "win": True,
+                        "exit_idx": i, "exit_type": "TP"}
+
+            # Check momentum exit (only if in profit)
+            if use_momentum_exit:
+                current_profit_pct = (entry - close) / entry
+                if current_profit_pct >= min_profit_for_momentum:
+                    if should_exit_on_momentum(df, i, signal_type):
+                        pnl = (entry - close) / entry * position_size
+                        return {"pnl": pnl, "win": pnl > 0,
+                                "exit_idx": i, "exit_type": "MOMENTUM"}
+
+    # EOD - End of Data
     last = float(df.iloc[-1]["close"])
     if signal_type == "LONG":
         pnl = (last - entry) / entry * position_size
     else:
         pnl = (entry - last) / entry * position_size
-    return {"pnl": pnl, "win": pnl > 0, "exit_idx": len(df) - 1}
+    return {"pnl": pnl, "win": pnl > 0, "exit_idx": len(df) - 1, "exit_type": "EOD"}
 
 
 def run_combo_test(df, filter_flags, min_bars_between=5):  # 5 = AT Scenario default
