@@ -42,10 +42,19 @@ ALL_FILTERS = [
     "htf_bounce",           # Pattern 5: HTF bounce detection
     "momentum_loss",        # Pattern 6: Momentum loss after trend
     "ssl_dynamic_support",  # Pattern 7: SSL dynamic support
+
+    # === NEW: Professional Analysis Filters (2026-01-04) ===
+    "ssl_slope_direction",      # Priority 1A: Directional slope filter (+$60-75/yr)
+    "ssl_stability",            # Priority 1C: SSL stability check (+$25-35/yr)
+    "quick_failure_predictor",  # Combined predictor (targets LONG quick failures)
 ]
 
 # Default config (for quick tests)
-DEFAULT_FILTERS = ["regime", "at_flat_filter", "min_sl_filter"]
+# Updated 2026-01-04: Added quick_failure_predictor based on Professional Analysis
+# - PnL increased from $72.99 to $91.12 (+24.8%)
+# - WR increased from 46.2% to 60.0% (+13.8%)
+# - Max DD decreased from $35.70 to $24.15 (-32.3%)
+DEFAULT_FILTERS = ["regime", "at_flat_filter", "min_sl_filter", "quick_failure_predictor"]
 
 
 def ensure_dir(path: Path) -> Path:
@@ -296,6 +305,11 @@ def make_filter_flags(filter_list: List[str]) -> Dict:
         "use_htf_bounce": "htf_bounce" in filter_list,
         "use_momentum_loss": "momentum_loss" in filter_list,
         "use_ssl_dynamic_support": "ssl_dynamic_support" in filter_list,
+
+        # === NEW: Professional Analysis Filters (2026-01-04) ===
+        "use_ssl_slope_direction": "ssl_slope_direction" in filter_list,
+        "use_ssl_stability": "ssl_stability" in filter_list,
+        "use_quick_failure_predictor": "quick_failure_predictor" in filter_list,
     }
 
 

@@ -53,12 +53,13 @@ def run_rolling_walkforward_optimized(
     symbols: list = None,
     timeframes: list = None,
     mode: str = "weekly",
-    lookback_days: int = 30,
+    lookback_days: int = 60,  # 60-day optimizer window for better OOS performance
     forward_days: int = 7,
     start_date: str = None,
     end_date: str = None,
     fixed_config: dict = None,
     calibration_days: int = 60,
+    pre_calibration_days: int = 60,  # NEW: Pre-calibration period for initial configs (weekly mode)
     verbose: bool = True,
     output_dir: str = None,
     run_id: str = None,  # Shared run ID to avoid multiple folders
@@ -163,7 +164,8 @@ def run_rolling_walkforward_optimized(
                 "config": fixed_config,
             })
     else:
-        current_start = start_dt + timedelta(days=lookback_days)
+        # FIX: Trade from start_date, optimize using data BEFORE start_date
+        current_start = start_dt  # First trade window starts at start_date (not start + lookback)
         window_id = 0
         while current_start < end_dt:
             window_end = min(current_start + timedelta(days=forward_days), end_dt)
@@ -190,6 +192,20 @@ def run_rolling_walkforward_optimized(
 
     # Calculate full data range needed (with buffer for indicators)
     buffer_days = max(60, lookback_days)  # Buffer for indicator warmup
+
+    # Pre-calibration period calculation (for weekly mode)
+    pre_cal_start = None
+    pre_cal_end = None
+
+    if mode == "weekly" and pre_calibration_days > 0 and windows:
+        # Pre-calibration runs BEFORE first window's optimize_start
+        first_window = windows[0]
+        pre_cal_end = first_window["optimize_start"]
+        pre_cal_start = pre_cal_end - timedelta(days=pre_calibration_days)
+        # Extend buffer to include pre-calibration period
+        buffer_days = max(buffer_days, (start_dt - pre_cal_start).days + 60)
+        log(f"📊 Pre-calibration dönemi: {pre_cal_start.strftime('%Y-%m-%d')} → {pre_cal_end.strftime('%Y-%m-%d')} ({pre_calibration_days} gün)")
+
     fetch_start = (start_dt - timedelta(days=buffer_days)).strftime("%Y-%m-%d")
 
     def fetch_func(sym, tf, start, end):
@@ -244,7 +260,7 @@ def run_rolling_walkforward_optimized(
         return {"error": "no_data"}
 
     # ==========================================
-    # 4. HELPER FUNCTIONS (with optimizations)
+    # 3.5 HELPER FUNCTIONS (define early for pre-calibration)
     # ==========================================
 
     def filter_data_by_date_fast(df, start_dt, end_dt):
@@ -274,6 +290,41 @@ def run_rolling_walkforward_optimized(
             use_walk_forward=False,
             quick_mode=True,  # Quick mode for speed
         )
+
+    # ==========================================
+    # 3.6 PRE-CALIBRATION (Weekly Mode Only)
+    # ==========================================
+    # Pre-calibration provides initial configs BEFORE Window 0
+    # These configs seed good_configs_history so Window 0 has fallback
+
+    pre_cal_configs = {}  # Will be used to seed good_configs_history
+
+    if mode == "weekly" and pre_cal_start is not None and pre_cal_end is not None:
+        log(f"\n🔧 Pre-calibration optimizasyonu başlatılıyor...")
+        log(f"   Dönem: {pre_cal_start.strftime('%Y-%m-%d')} → {pre_cal_end.strftime('%Y-%m-%d')}")
+
+        # Filter data for pre-calibration period
+        pre_cal_streams = {}
+        for (sym, tf), df in all_streams.items():
+            filtered = filter_data_by_date_fast(df, pre_cal_start, pre_cal_end)
+            if len(filtered) >= 250:
+                pre_cal_streams[(sym, tf)] = filtered
+
+        if pre_cal_streams:
+            pre_cal_pairs = [(sym, tf) for (sym, tf) in pre_cal_streams.keys()]
+            pre_cal_configs = run_isolated_optimization(pre_cal_streams, pre_cal_pairs, log)
+
+            enabled_pre_cal = {k: v for k, v in pre_cal_configs.items() if not v.get('disabled')}
+            disabled_pre_cal = len(pre_cal_configs) - len(enabled_pre_cal)
+
+            log(f"   ✅ Pre-cal sonuç: {len(enabled_pre_cal)} enabled, {disabled_pre_cal} disabled")
+        else:
+            log(f"   ⚠️ Pre-calibration için yeterli veri yok")
+
+    # ==========================================
+    # 4. ADDITIONAL HELPER FUNCTIONS
+    # ==========================================
+    # Note: filter_data_by_date_fast and run_isolated_optimization are defined in section 3.5
 
     def apply_mode_profile(config_map, wf_mode):
         """Apply mode-based default exit profile to configs."""
@@ -314,6 +365,21 @@ def run_rolling_walkforward_optimized(
 
     good_configs_history = {}
     config_source_log = []
+
+    # Seed good_configs_history with pre-calibration results
+    # This ensures Window 0 (and later windows) have fallback configs
+    if pre_cal_configs:
+        enabled_pre_cal = {k: v for k, v in pre_cal_configs.items() if not v.get('disabled')}
+        for stream_key, cfg in enabled_pre_cal.items():
+            good_configs_history[stream_key] = {
+                "config": cfg.copy(),
+                "window_id": -1,  # -1 = pre-calibration
+                "pnl": 0.0,  # No trades yet
+                "trades": 0,
+                "win_rate": 0.0,
+                "source": "pre_calibration",
+            }
+        log(f"📊 Pre-cal ile seed edilen stream sayısı: {len(enabled_pre_cal)}")
 
     if mode == "fixed" and fixed_config is not None:
         for sym in symbols:
@@ -426,6 +492,7 @@ def run_rolling_walkforward_optimized(
             if carry_forward_enabled and opt_streams:
                 current_window_id = window["window_id"]
                 carry_forward_count = 0
+                precal_cf_count = 0
 
                 for stream_key in opt_streams.keys():
                     cfg = config_map.get(stream_key, {})
@@ -440,10 +507,17 @@ def run_rolling_walkforward_optimized(
                                     cf_config = hist["config"].copy()
                                     cf_config["carry_forward"] = True
                                     cf_config["carry_forward_age"] = age
+                                    cf_config["carry_forward_from_window"] = hist["window_id"]
+                                    cf_config["carry_forward_risk_multiplier"] = carry_forward_risk_mult
                                     cf_config["disabled"] = False
 
                                     config_map[stream_key] = cf_config
-                                    window_config_sources[stream_key] = "carry_forward"
+                                    # Track if this is from pre-calibration or regular window
+                                    if hist["window_id"] == -1:
+                                        window_config_sources[stream_key] = "carry_forward_precal"
+                                        precal_cf_count += 1
+                                    else:
+                                        window_config_sources[stream_key] = "carry_forward"
                                     carry_forward_count += 1
                                 else:
                                     window_config_sources[stream_key] = "disabled_no_cf"
@@ -453,7 +527,10 @@ def run_rolling_walkforward_optimized(
                             window_config_sources[stream_key] = "optimized"
 
                 if carry_forward_count > 0:
-                    log(f"   PR-2: {carry_forward_count} carry-forward configs")
+                    cf_msg = f"   PR-2: {carry_forward_count} carry-forward configs"
+                    if precal_cf_count > 0:
+                        cf_msg += f" ({precal_cf_count} from pre-cal)"
+                    log(cf_msg)
 
                 config_source_log.append({
                     "window_id": current_window_id,
@@ -804,11 +881,13 @@ def _run_window_backtest_optimized(
 
         # Update existing trades
         # v1.7.1: Pass ADX for Dynamic Partial TP by Regime
+        # v46.x: Pass ATR for ATR-based BE buffer
         candle_adx = arr["adx"][idx] if "adx" in arr else 25.0
+        candle_atr = arr["atr"][idx] if "atr" in arr else None
         closed = tm.update_trades(
             sym, tf, candle_high, candle_low, candle_close,
             candle_time, pb_top, pb_bot,
-            candle_data={"adx": candle_adx}
+            candle_data={"adx": candle_adx, "atr": candle_atr}
         )
 
         for trade in closed:
@@ -874,11 +953,37 @@ def _run_window_backtest_optimized(
                 signal_type, entry, tp, sl, reason = sig[:5]
 
                 row = df.iloc[idx]
+
+                # Calculate AT score and regime for analysis
+                # Import here to avoid circular dependency
+                try:
+                    from core.indicators import calculate_at_score, calculate_at_regime
+                    at_regime_lookback = cfg.get("at_regime_lookback", 20)
+                    at_score_weight = cfg.get("at_score_weight", 2.0)
+
+                    at_regime = calculate_at_regime(df, idx, lookback=at_regime_lookback)
+                    at_score_long = calculate_at_score(df, idx, "long") * at_score_weight
+                    at_score_short = calculate_at_score(df, idx, "short") * at_score_weight
+
+                    # Select appropriate score based on trade direction
+                    at_score = at_score_long if signal_type == "LONG" else at_score_short
+                except (ImportError, Exception):
+                    at_regime = "unknown"
+                    at_score = None
+                    at_score_long = None
+                    at_score_short = None
+
                 indicators_at_entry = {
                     "at_buyers": float(row.get("at_buyers", 0)) if pd.notna(row.get("at_buyers")) else None,
                     "at_sellers": float(row.get("at_sellers", 0)) if pd.notna(row.get("at_sellers")) else None,
                     "at_is_flat": bool(row.get("at_is_flat", False)) if pd.notna(row.get("at_is_flat")) else False,
+                    "at_buyers_dominant": bool(row.get("at_buyers_dominant", False)) if pd.notna(row.get("at_buyers_dominant")) else False,
+                    "at_sellers_dominant": bool(row.get("at_sellers_dominant", False)) if pd.notna(row.get("at_sellers_dominant")) else False,
                     "at_dominant": "BUYERS" if row.get("at_buyers_dominant", False) else ("SELLERS" if row.get("at_sellers_dominant", False) else "FLAT"),
+                    "at_regime": at_regime,
+                    "at_score": at_score,
+                    "at_score_long": at_score_long,
+                    "at_score_short": at_score_short,
                     "baseline": float(row.get("baseline", 0)) if pd.notna(row.get("baseline")) else None,
                     "pb_ema_top": float(row.get("pb_ema_top", 0)) if pd.notna(row.get("pb_ema_top")) else None,
                     "pb_ema_bot": float(row.get("pb_ema_bot", 0)) if pd.notna(row.get("pb_ema_bot")) else None,
@@ -1009,7 +1114,7 @@ def _fetch_all_data(
             # v1.7.1: Pass timeframe for TF-adaptive SSL lookback
             df = TradingEngine.calculate_indicators(df, timeframe=tf)
             return (sym, tf, df.reset_index(drop=True))
-        except Exception:
+        except (ValueError, KeyError, ConnectionError, OSError):
             return None
 
     jobs = [(s, t) for s in symbols for t in timeframes]
@@ -1075,7 +1180,7 @@ def compare_rolling_modes_optimized(
         if mode == "fixed":
             mode_params = {"mode": "fixed", "fixed_config": fixed_config}
         elif mode == "weekly":
-            mode_params = {"mode": "weekly", "lookback_days": 30, "forward_days": 7}
+            mode_params = {"mode": "weekly", "lookback_days": 60, "forward_days": 7}
 
         results[mode] = run_rolling_walkforward_optimized(
             symbols=symbols,

@@ -101,7 +101,7 @@ def check_keltner_bounce_signal(
 
     try:
         curr = df.iloc[index]
-    except Exception:
+    except (IndexError, KeyError):
         return _ret(None, None, None, None, "Index Error")
 
     for c in required_cols:

@@ -609,7 +609,7 @@ def calculate_duration(entry_time, exit_time) -> str:
             return f"{hours}h {minutes}m"
         else:
             return f"{minutes}m"
-    except Exception:
+    except (ValueError, TypeError, AttributeError):
         return "N/A"
 
 

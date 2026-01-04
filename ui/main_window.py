@@ -1239,7 +1239,7 @@ class MainWindow(QMainWindow):
         try:
             finished_dt = dateutil.parser.isoparse(finished_at)
             finished_str = finished_dt.strftime("%Y-%m-%d %H:%M:%S UTC")
-        except Exception:
+        except (ValueError, TypeError, AttributeError):
             finished_str = finished_at or "-"
 
         lines = [f"📅 Tamamlanma: {finished_str}", "📈 Özet Tablo:"]

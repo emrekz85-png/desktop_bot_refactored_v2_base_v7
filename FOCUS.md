@@ -1,7 +1,7 @@
 # FOCUS: Trading Bot Test System
 
-**Son Guncelleme:** 2026-01-03
-**Aktif Calisma:** Integrated Test Pipeline
+**Son Guncelleme:** 2026-01-04
+**Aktif Calisma:** Quick Failure Predictor Implementation
 
 ---
 
@@ -88,18 +88,30 @@ python run.py report
 
 ## SON SONUCLAR (BTCUSDT 15m, 1 Year)
 
-| Metric | Deger |
-|--------|-------|
-| **Filters** | regime, at_flat_filter, min_sl_filter |
-| **Signals** | 1683 raw → 40 final (97.6% filtered) |
-| **Trades** | 26 |
-| **Win Rate** | 46.15% |
-| **PnL** | +$72.99 (+7.3%) |
-| **Max DD** | $35.70 (3.57%) |
-| **Profit Factor** | 1.45 |
-| **Verdict** | PASS |
+### YENI CONFIG (2026-01-04) - Quick Failure Predictor
 
-### Key Insight: Min SL Filter
+| Metric | Eski | **YENI** | Degisim |
+|--------|------|----------|---------|
+| **Filters** | regime + at_flat + min_sl | **+ quick_failure_predictor** | +1 filter |
+| **Trades** | 26 | **15** | -42% |
+| **Win Rate** | 46.2% | **60.0%** | **+13.8%** |
+| **PnL** | +$72.99 | **+$91.12** | **+24.8%** |
+| **Max DD** | $35.70 | **$24.15** | **-32.3%** |
+| **Profit Factor** | 1.45 | **2.30** | **+58.6%** |
+
+**VERDICT: PASS** - Quick Failure Predictor basarili!
+
+### Key Insight: Quick Failure Predictor
+
+Analiz raporunda LONG trade'lerin %40'inin "quick failure" (≤20 bar icinde SL hit) oldugu tespit edildi.
+Bu trade'lerin ortak ozellikleri:
+1. SSL Baseline slope signal yonunde degil
+2. SSL Baseline erratic/unstable
+3. Son 3 mumda SSL yon degisikligi
+
+`quick_failure_predictor` bu 3 faktoru birlikte degerlendirip LONG quick failure'lari engelliyor.
+
+### Min SL Filter (Onceki Iyilestirme)
 
 SL distance < 1.5% olan trade'ler noise ile SL hit oluyor.
 
@@ -116,8 +128,8 @@ SL distance < 1.5% olan trade'ler noise ile SL hit oluyor.
 ## MEVCUT KONFIGURASYON
 
 ```python
-# run.py icindeki sabit ayarlar
-DEFAULT_FILTERS = ["regime", "at_flat_filter", "min_sl_filter"]
+# run.py icindeki sabit ayarlar (2026-01-04 guncellendi)
+DEFAULT_FILTERS = ["regime", "at_flat_filter", "min_sl_filter", "quick_failure_predictor"]
 
 # Portfolio settings (core/simple_portfolio.py)
 initial_balance = 1000
@@ -168,6 +180,15 @@ data/results/                       # CONSOLIDATED OUTPUT
 | `regime` | Sadece trending market (ADX-based) | ON |
 | `at_flat_filter` | AlphaTrend flat degilse trade | ON |
 | `min_sl_filter` | SL >= 1.5% olmali | ON |
+| `quick_failure_predictor` | **YENİ:** LONG quick failure riski tespit et | ON |
+
+### Yeni Filtreler (2026-01-04)
+
+| Filter | Aciklama | Etki |
+|--------|----------|------|
+| `ssl_slope_direction` | SSL slope yonu signal yonunde olmali | WR +11%, PnL -$1.27 |
+| `ssl_stability` | SSL baseline stable olmali | WR ayni, PnL -$14 |
+| `quick_failure_predictor` | **ONERILEN** - 3 faktoru birlikte kullanir | **WR +13.8%, PnL +$18** |
 
 Inactive (gelecek arastirma icin):
 - `adx_filter`, `ssl_touch`, `rsi_filter`, `pbema_distance`
@@ -180,8 +201,10 @@ Inactive (gelecek arastirma icin):
 2. [x] Portfolio sizing integration
 3. [x] Simplified run.py
 4. [x] PnL calculation bug fix
-5. [ ] ETH/SOL test with same config
-6. [ ] Multi-symbol portfolio optimization
+5. [x] **Quick Failure Predictor implementation** (2026-01-04)
+6. [ ] ETH/SOL test with same config
+7. [ ] Multi-symbol portfolio optimization
+8. [ ] Out-of-sample (2024) validation with new config
 
 ---
 

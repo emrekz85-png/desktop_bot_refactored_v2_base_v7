@@ -842,6 +842,14 @@ DEFAULT_STRATEGY_CONFIG = {
     "at_regime_lookback": 20,        # Bars to calculate regime (used in regime/score modes)
     "at_score_weight": 2.0,          # AT contribution weight when at_mode="score"
 
+    # === REGIME FILTER (Based on AT Scenario Analysis 2026-01-03) ===
+    # Controls regime-based trade filtering. Key finding: Neutral regime has 19.7% win rate!
+    # - "off": No regime filtering (default, backward compatible)
+    # - "skip_neutral": Skip trades in neutral regime (RECOMMENDED - adds +$17 value)
+    # - "aligned": Only trade when signal matches regime (LONG in bullish, SHORT in bearish)
+    # - "veto": Block only opposing signals (LONG in bearish, SHORT in bullish)
+    "regime_filter": "skip_neutral",  # NEW: Skip neutral regime (proven +$17 improvement)
+
     "regime_adx_threshold": 20.0,    # Baseline: Standard regime threshold
     "use_ssl_never_lost_filter": True,   # P1: Enabled - prevents counter-trend trades (+$6.44 in A/B test)
     "ssl_never_lost_lookback": 20,       # P1: Lookback period for SSL never lost check
@@ -1068,6 +1076,81 @@ DEFAULT_STRATEGY_CONFIG = {
     # - ETHUSDT-15m: Good volume (56 trades, 0.191 E[R])
     # - 4h timeframes: Insufficient signals, excluded
     # Recommended: symbols=["BTCUSDT", "ETHUSDT"], timeframes=["15m", "1h"]
+}
+
+# ==========================================
+# PATTERN 1: MOMENTUM EXHAUSTION EXIT CONFIGURATION
+# ==========================================
+# Dynamic TP based on momentum instead of fixed PBEMA target
+#
+# Core Concept: "Momentum yavaşlayan dek trade tutup TP oluyoruz"
+# Exit when momentum slows down, not at fixed price level
+#
+# Evidence: Real trade analysis shows 5+ trades use momentum-based exits
+#
+# Examples from Real Trades:
+# - NO 7: "momentum yavaşlayan dek takip edip TP oluyoruz"
+# - NO 9: "momentum azalana dek fiyatı takip edip TP aldım"
+# - NO 12: "momentum bitene dek trade devam ediyor"
+# - NO 15: "momentum yavaşlayan dek trade tutup tp oluyorum"
+# - NO 18: "momentum yavaşlayan dek trade tuttum"
+
+MOMENTUM_EXIT_CONFIG = {
+    # === Core Parameters ===
+    "enabled": False,                     # Enable momentum-based exits (default: disabled)
+    "lookback": 3,                        # Candles to analyze for momentum
+    "min_conditions": 2,                  # Conditions required (2 of 3)
+
+    # === Detection Thresholds ===
+    "slope_threshold": 0.5,               # AlphaTrend slope threshold (0-1)
+    "range_threshold": 0.7,               # Candle range threshold (0-1)
+    "atr_threshold": 0.5,                 # ATR movement threshold (0-1)
+
+    # === Dynamic TP Extension ===
+    "min_profit_pct": 0.005,              # Min profit before extending (0.5%)
+    "max_extension": 3.0,                 # Max TP extension multiplier
+    "extension_multiplier": 1.2,          # TP extension when momentum strong
+
+    # === Trade Management ===
+    "lock_profit_on_exhaustion": True,    # Exit at current price when exhausted
+    "use_lenient_mode": False,            # Require only 1 condition (more exits)
+}
+
+# ==========================================
+# PBEMA RETEST STRATEGY CONFIGURATION
+# ==========================================
+# Trade PBEMA cloud as support/resistance after breakout
+#
+# Strategy: After price breaks through PBEMA, enter on retest
+# Evidence: Real trade analysis shows 33% of profitable setups use this pattern
+#
+# Examples from Real Trades:
+# - NO 7: "PBEMADAN güçlü fiyat sekmesi yaşanabileceği icin long entry"
+# - NO 11: "Fiyat PBEMA bandını kazanıyor ve retest ediyor, entry aldım"
+# - NO 12-13: "PBEMA retestinde entry aldım"
+# - NO 18: "Fiyat PBEMA üzerinde yer edinmiş, bir çok kez retest edip entry aldım"
+
+PBEMA_RETEST_CONFIG = {
+    # === Core Parameters ===
+    "min_rr": 1.5,                        # Minimum risk/reward ratio
+    "breakout_lookback": 20,              # Candles to search for PBEMA breakout
+    "min_breakout_strength": 0.005,       # Min distance beyond PBEMA (0.5%)
+    "retest_tolerance": 0.003,            # Touch tolerance for retest (0.3%)
+    "min_wick_ratio": 0.15,               # Minimum wick for rejection (15%)
+
+    # === TP/SL Configuration ===
+    "tp_target": "baseline",              # "baseline" (SSL) or "percentage"
+    "tp_percentage": 0.015,               # TP % if using percentage mode (1.5%)
+    "sl_buffer": 0.003,                   # SL buffer beyond PBEMA (0.3%)
+
+    # === Optional Filters ===
+    "require_at_confirmation": False,     # Require AlphaTrend confirmation
+    "require_multiple_retests": False,    # Require 2+ retests (stronger setup)
+    "min_retests": 2,                     # Minimum retest count if required
+    "use_volume_confirmation": False,     # Volume spike on breakout
+
+    # === Strategy Mode ===
+    "strategy_mode": "pbema_retest",      # Strategy identifier
 }
 
 # ==========================================

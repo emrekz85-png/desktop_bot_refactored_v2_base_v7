@@ -737,7 +737,7 @@ def run_portfolio_backtest(
                         if trade_time_ts >= oos_start_ts:
                             grouped_by_trade.setdefault(key, []).append(net)
                         # OOS öncesi trade'ler atlanır (curve-fitted dönem)
-                    except Exception:
+                    except (ValueError, TypeError, pd.errors.ParserError):
                         # Dönüştürme başarısız olursa tüm trade'leri say
                         grouped_by_trade.setdefault(key, []).append(net)
                 else:

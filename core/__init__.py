@@ -10,6 +10,7 @@
 # - binance_client.py: Binance API client with retry logic
 # - indicators.py: Technical indicator calculations
 # - logging_config.py: Centralized logging with file rotation
+# - momentum_exit.py: Pattern 1 - Momentum exhaustion exit detection
 #
 # This modular structure eliminates code duplication and improves maintainability.
 
@@ -92,6 +93,31 @@ from .indicators import (
     detect_regime, add_regime_column, get_regime_multiplier,
     # Volatility Regime (Expert Panel - Sinclair's 3-Tier System)
     classify_volatility_regime,
+)
+
+# Pattern 1: Momentum Exhaustion Exit (Real Trade Analysis 2026-01-04)
+from .momentum_exit import (
+    detect_momentum_exhaustion,
+    calculate_dynamic_tp_from_momentum,
+    should_exit_on_momentum,
+)
+
+# Patterns 3-7: Additional Trading Patterns (Real Trade Analysis 2026-01-04)
+from .pattern_filters import (
+    # Pattern 3: Liquidity Grab
+    detect_liquidity_grab,
+    # Pattern 4: SSL Slope Filter (Original)
+    is_ssl_baseline_ranging,
+    # Pattern 4B-D: NEW SSL Filters (Professional Analysis 2026-01-04)
+    check_ssl_slope_direction,  # Priority 1A: Directional slope filter
+    check_ssl_stability,        # Priority 1C: Stability check
+    predict_quick_failure,      # Combined quick failure predictor
+    # Pattern 5: HTF Bounce
+    detect_htf_bounce,
+    # Pattern 6: Momentum Loss
+    detect_momentum_loss_after_trend,
+    # Pattern 7: SSL Dynamic Support
+    is_ssl_acting_as_dynamic_support,
 )
 
 # Enhanced Regime Filter (Priority 2 - Hedge Fund Recommendation)

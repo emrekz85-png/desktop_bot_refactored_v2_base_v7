@@ -360,6 +360,13 @@ def check_ssl_flow_signal(
         at_mode: str = "binary",           # Default: binary (proven baseline)
         at_regime_lookback: int = 20,      # Tier 1: Bars to calculate regime
         at_score_weight: float = 2.0,      # Tier 3: AT contribution to score
+        # === REGIME FILTER (AT Scenario Analysis 2026-01-03) ===
+        # Key finding: Neutral regime has 19.7% win rate - skip it!
+        # - "off": No regime filtering (backward compatible)
+        # - "skip_neutral": Skip trades in neutral regime (RECOMMENDED - adds +$17 value)
+        # - "aligned": Only trade when signal matches regime
+        # - "veto": Block only opposing signals
+        regime_filter: str = "skip_neutral",  # NEW: Skip neutral regime
         # === SSL FLIP GRACE PERIOD (addresses AT lag issue) ===
         use_ssl_flip_grace: bool = False,  # Allow signals when SSL just flipped even if AT hasn't confirmed
         ssl_flip_grace_bars: int = 3,      # Number of bars after SSL flip to allow grace
@@ -843,12 +850,13 @@ def check_ssl_flow_signal(
     # - "score": AT contributes to signal score, doesn't block
     # - "off": AT completely disabled
 
-    # Calculate AT regime (Tier 1)
+    # Calculate AT regime (Tier 1) - also needed for regime_filter
     at_regime = "neutral_regime"
     at_regime_blocks_long = False
     at_regime_blocks_short = False
 
-    if at_mode in ("regime", "score"):
+    # Calculate regime if at_mode uses it OR if regime_filter is active
+    if at_mode in ("regime", "score") or regime_filter != "off":
         # Lazy import to avoid circular dependency
         try:
             from core.indicators import calculate_at_regime
@@ -857,14 +865,30 @@ def check_ssl_flow_signal(
         except ImportError:
             at_regime = "neutral_regime"
 
-        # Regime only blocks if STRONGLY opposing
+        # Regime only blocks if STRONGLY opposing (for at_mode="regime")
         at_regime_blocks_long = (at_regime == "bearish_regime")
         at_regime_blocks_short = (at_regime == "bullish_regime")
 
     debug_info["at_mode"] = at_mode
     debug_info["at_regime"] = at_regime
+    debug_info["regime_filter"] = regime_filter
     debug_info["at_regime_blocks_long"] = at_regime_blocks_long
     debug_info["at_regime_blocks_short"] = at_regime_blocks_short
+
+    # ================= REGIME FILTER CHECK (AT Scenario Analysis 2026-01-03) =================
+    # Key finding: Neutral regime has 19.7% win rate - skip it!
+    # This check happens BEFORE other filters because regime is the most predictive factor.
+    if regime_filter == "skip_neutral":
+        if at_regime == "neutral_regime":
+            return _ret(None, None, None, None, "Regime Filter: Neutral (19.7% WR)")
+    elif regime_filter == "aligned":
+        # LONG only in bullish, SHORT only in bearish, block all in neutral
+        # (will be checked below when we know signal direction)
+        pass  # Direction-specific check done later
+    elif regime_filter == "veto":
+        # LONG blocked in bearish, SHORT blocked in bullish
+        # (will be checked below when we know signal direction)
+        pass  # Direction-specific check done later
 
     # Calculate AT score (Tier 3)
     at_score_long = 0.0
@@ -1015,6 +1039,17 @@ def check_ssl_flow_signal(
     else:  # "off"
         at_allows_long = True
 
+    # REGIME FILTER CHECK for LONG (direction-specific)
+    regime_allows_long = True
+    if regime_filter == "aligned":
+        # LONG only allowed in bullish regime
+        regime_allows_long = (at_regime == "bullish_regime")
+    elif regime_filter == "veto":
+        # LONG blocked only in bearish regime
+        regime_allows_long = (at_regime != "bearish_regime")
+    # "skip_neutral" already handled above, "off" = always True
+    debug_info["regime_allows_long"] = regime_allows_long
+
     # ================= FILTER HIERARCHY (Clenow's Tier System) =================
     # Tier 1 (Core): SSL direction, AT aligned, PBEMA path - ALWAYS required
     # Tier 2 (Quality): Baseline touch, PBEMA distance, ADX/RSI - required if tier >= 2
@@ -1027,6 +1062,7 @@ def check_ssl_flow_signal(
     tier1_long = (
         price_above_baseline and           # Core: SSL direction
         at_allows_long and                 # Core: AT confirmation
+        regime_allows_long and             # Core: Regime filter (skip_neutral etc.)
         pbema_above_baseline               # Core: PBEMA path exists
     )
 
@@ -1102,11 +1138,23 @@ def check_ssl_flow_signal(
     else:  # "off"
         at_allows_short = True
 
+    # REGIME FILTER CHECK for SHORT (direction-specific)
+    regime_allows_short = True
+    if regime_filter == "aligned":
+        # SHORT only allowed in bearish regime
+        regime_allows_short = (at_regime == "bearish_regime")
+    elif regime_filter == "veto":
+        # SHORT blocked only in bullish regime
+        regime_allows_short = (at_regime != "bullish_regime")
+    # "skip_neutral" already handled above, "off" = always True
+    debug_info["regime_allows_short"] = regime_allows_short
+
     # SHORT FILTER HIERARCHY (same tier structure as LONG)
     # TIER 1 - CORE FILTERS (always required)
     tier1_short = (
         price_below_baseline and           # Core: SSL direction
         at_allows_short and                # Core: AT confirmation
+        regime_allows_short and            # Core: Regime filter (skip_neutral etc.)
         pbema_below_baseline               # Core: PBEMA path exists
     )
 

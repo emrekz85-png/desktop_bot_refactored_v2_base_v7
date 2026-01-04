@@ -388,7 +388,7 @@ class LiveBotWorker(QThread):
                                     if "rsi_value" not in checks:
                                         try:
                                             checks["rsi_value"] = float(df_closed["rsi"].iloc[-1])
-                                        except Exception:
+                                        except (IndexError, KeyError, ValueError, TypeError):
                                             pass
 
                                     final_decision = decision or "Rejected"
@@ -475,7 +475,7 @@ class OptimizerWorker(QThread):
                     if not df_trend.empty:
                         df_trend['ema_trend'] = ta.ema(df_trend['close'], length=200)
                         df_trend = df_trend[['timestamp', 'ema_trend']].dropna()
-                except Exception:
+                except (ValueError, KeyError, ConnectionError, OSError):
                     pass
 
             data_cache = {}
@@ -633,7 +633,7 @@ class OptimizerWorker(QThread):
                             if not self.monte_carlo_mode:
                                 try:
                                     duration_hours = (exit_time - entry_time).total_seconds() / 3600
-                                except Exception:
+                                except (TypeError, AttributeError):
                                     duration_hours = 0
 
                             funding_cost_r = ((duration_hours / 8) * self.funding_rate_8h * self.leverage) / risk_pct

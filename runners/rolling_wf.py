@@ -32,12 +32,13 @@ def run_rolling_walkforward(
     symbols: list = None,
     timeframes: list = None,
     mode: str = "weekly",  # "fixed" or "weekly" (v40.6: monthly/triday removed)
-    lookback_days: int = 30,  # Optimize window
+    lookback_days: int = 60,  # 60-day optimizer window for better OOS performance
     forward_days: int = 7,    # Trade window (freeze period)
     start_date: str = None,   # "YYYY-MM-DD" - test period start
     end_date: str = None,     # "YYYY-MM-DD" - test period end
     fixed_config: dict = None,  # For mode="fixed" - config to use
     calibration_days: int = 60,  # For mode="fixed" - days to find config
+    pre_calibration_days: int = 60,  # NEW: Pre-calibration period for initial configs (weekly mode)
     verbose: bool = True,
     output_dir: str = None,   # Run-specific output directory
 ) -> dict:
@@ -58,6 +59,8 @@ def run_rolling_walkforward(
         end_date: Test dönemi sonu
         fixed_config: mode="fixed" için kullanılacak config
         calibration_days: mode="fixed" için ilk N gün calibration (test dışı)
+        pre_calibration_days: mode="weekly" için test öncesi pre-calibration süresi
+                              Bu dönem Window 0 için fallback config sağlar
         verbose: Detaylı çıktı
         output_dir: Run çıktılarının kaydedileceği klasör
 
@@ -163,7 +166,8 @@ def run_rolling_walkforward(
             })
     else:
         # Rolling mode: Generate windows
-        current_start = start_dt + timedelta(days=lookback_days)  # First trade window start
+        # FIX: Trade from start_date, optimize using data BEFORE start_date
+        current_start = start_dt  # First trade window starts at start_date (not start + lookback)
 
         window_id = 0
         while current_start < end_dt:
@@ -445,9 +449,12 @@ def run_rolling_walkforward(
                 continue
 
             # Update existing trades
+            # v46.x: Pass ATR for ATR-based BE buffer
+            candle_atr = arr["atr"][idx] if "atr" in arr else None
             closed = tm.update_trades(
                 sym, tf, candle_high, candle_low, candle_close,
-                candle_time, pb_top, pb_bot
+                candle_time, pb_top, pb_bot,
+                candle_data={"atr": candle_atr}
             )
 
             for trade in closed:
@@ -703,6 +710,10 @@ def run_rolling_walkforward(
 
     master_cache = {}  # (sym, tf) -> DataFrame with all indicators pre-calculated
 
+    # Pre-calibration period calculation (for weekly mode)
+    pre_cal_start = None
+    pre_cal_end = None
+
     if windows:
         # Determine the full date range needed
         first_window = windows[0]
@@ -713,6 +724,15 @@ def run_rolling_walkforward(
             master_start = first_window["optimize_start"]
         else:
             master_start = first_window["trade_start"] - timedelta(days=30)
+
+        # NEW: For weekly mode, extend to include pre-calibration period
+        # Pre-calibration runs BEFORE first window's optimize_start
+        if mode == "weekly" and pre_calibration_days > 0:
+            pre_cal_end = first_window["optimize_start"]  # Pre-cal ends where first optimize starts
+            pre_cal_start = pre_cal_end - timedelta(days=pre_calibration_days)
+            # Extend master_start to include pre-calibration period
+            master_start = min(master_start, pre_cal_start)
+            log(f"📊 Pre-calibration dönemi: {pre_cal_start.strftime('%Y-%m-%d')} → {pre_cal_end.strftime('%Y-%m-%d')} ({pre_calibration_days} gün)")
 
         # Add extra buffer for indicator warmup (200+ candles)
         buffer_days = 45  # Extra buffer for indicator calculation warmup
@@ -777,6 +797,50 @@ def run_rolling_walkforward(
                 sliced_streams[(sym, tf)] = df_sliced
 
         return sliced_streams
+
+    # ==========================================
+    # 4.6 PRE-CALIBRATION (Weekly Mode Only)
+    # ==========================================
+    # Run optimization on period BEFORE first window's optimize_start
+    # to provide initial configs for Window 0 and carry-forward fallback.
+    # This ensures Window 0 has fallback configs even when optimizer finds nothing.
+
+    if mode == "weekly" and pre_cal_start is not None and pre_cal_end is not None and master_cache:
+        log(f"\n🔧 Pre-calibration optimizasyonu başlatılıyor...")
+        log(f"   Dönem: {pre_cal_start.strftime('%Y-%m-%d')} → {pre_cal_end.strftime('%Y-%m-%d')}")
+
+        # Get data for pre-calibration period from master cache
+        pre_cal_streams = get_streams_from_cache(pre_cal_start, pre_cal_end, use_master_cache=True)
+
+        if pre_cal_streams:
+            log(f"   ✓ {len(pre_cal_streams)} stream için pre-calibration verisi hazır")
+
+            # Run optimization on pre-calibration period
+            pre_cal_pairs = [(sym, tf) for (sym, tf) in pre_cal_streams.keys()]
+            pre_cal_configs = run_isolated_optimization(pre_cal_streams, pre_cal_pairs, log)
+
+            # Count enabled configs
+            enabled_pre_cal = {k: v for k, v in pre_cal_configs.items() if not v.get('disabled')}
+            disabled_pre_cal = {k: v for k, v in pre_cal_configs.items() if v.get('disabled')}
+
+            log(f"   ✓ Pre-calibration tamamlandı: {len(enabled_pre_cal)} aktif, {len(disabled_pre_cal)} disabled config")
+
+            # Initialize good_configs_history with pre-calibration results
+            # Use window_id=-1 to indicate pre-calibration origin
+            for stream_key, cfg in enabled_pre_cal.items():
+                good_configs_history[stream_key] = {
+                    "config": cfg,
+                    "window_id": -1,  # -1 = pre-calibration
+                    "pnl": 0.0,  # Unknown - not traded yet
+                    "trades": 0,
+                    "win_rate": 0.0,
+                    "source": "pre_calibration",
+                }
+
+            if enabled_pre_cal:
+                log(f"   📋 {len(enabled_pre_cal)} pre-cal config good_configs_history'ye eklendi (fallback için)")
+        else:
+            log(f"   ⚠️ Pre-calibration verisi yetersiz - fallback config olmayacak")
 
     for window in windows:
         log(f"\n{'─'*50}")
@@ -921,6 +985,8 @@ def run_rolling_walkforward(
                                 age = current_window_id - hist["window_id"]
 
                                 # Check if within age limit
+                                # For pre-calibration (window_id=-1), age will be window_id + 1
+                                # e.g., Window 0: age = 0 - (-1) = 1, Window 1: age = 1 - (-1) = 2
                                 if age <= carry_forward_max_age:
                                     # Use carry-forward config with reduced risk
                                     cf_config = hist["config"].copy()
@@ -931,7 +997,11 @@ def run_rolling_walkforward(
                                     cf_config["disabled"] = False  # Enable it
 
                                     config_map[stream_key] = cf_config
-                                    window_config_sources[stream_key] = "carry_forward"
+                                    # Track if this is from pre-calibration or regular window
+                                    if hist["window_id"] == -1:
+                                        window_config_sources[stream_key] = "carry_forward_precal"
+                                    else:
+                                        window_config_sources[stream_key] = "carry_forward"
                                     carry_forward_count += 1
                                 else:
                                     # Too old for carry-forward
@@ -1150,7 +1220,7 @@ def run_rolling_walkforward(
         pr2_total_streams_disabled += len(w.get("streams_disabled", []))
 
     # Config source breakdown
-    pr2_sources = {"optimized": 0, "carry_forward": 0, "disabled_no_cf": 0, "disabled_no_history": 0}
+    pr2_sources = {"optimized": 0, "carry_forward": 0, "carry_forward_precal": 0, "disabled_no_cf": 0, "disabled_no_history": 0}
     for log_entry in config_source_log:
         for stream_key, source in log_entry.get("sources", {}).items():
             if source in pr2_sources:
@@ -1244,7 +1314,7 @@ def run_rolling_walkforward(
     log(f"\n   📋 PR-2 Metrics:")
     log(f"   ├── Loss Limit Windows: {pr2_loss_limit_windows}")
     log(f"   ├── Streams Disabled (fullstop): {pr2_total_streams_disabled}")
-    log(f"   ├── Config Sources: opt={pr2_sources['optimized']}, cf={pr2_sources['carry_forward']}")
+    log(f"   ├── Config Sources: opt={pr2_sources['optimized']}, cf={pr2_sources['carry_forward']}, precal={pr2_sources['carry_forward_precal']}")
     log(f"   ├── Disabled: no_cf={pr2_sources['disabled_no_cf']}, no_hist={pr2_sources['disabled_no_history']}")
     log(f"   └── Carry-Forward PnL: ${pr2_carry_forward_pnl:.2f}")
     log(f"{'='*70}")
@@ -1317,7 +1387,7 @@ def compare_rolling_modes(
     # PR-2: Mode config definitions (v40.6: monthly/triday removed)
     all_mode_configs = [
         ("fixed", {"mode": "fixed", "fixed_config": fixed_config}),
-        ("weekly", {"mode": "weekly", "lookback_days": 30, "forward_days": 7}),
+        ("weekly", {"mode": "weekly", "lookback_days": 60, "forward_days": 7}),
     ]
 
     # PR-2: Filter modes if specified
@@ -1586,7 +1656,7 @@ def compare_rolling_modes_fast(
     # v40.6: monthly/triday removed
     all_mode_configs = [
         ("fixed", {"mode": "fixed", "fixed_config": fixed_config}),
-        ("weekly", {"mode": "weekly", "lookback_days": 30, "forward_days": 7}),
+        ("weekly", {"mode": "weekly", "lookback_days": 60, "forward_days": 7}),
     ]
 
     # PR-2: Filter modes if specified
@@ -1707,7 +1777,7 @@ def compare_rolling_modes_fast(
         log(f"   ├── Loss Limit Windows: {metrics.get('pr2_loss_limit_windows', 0)}")
         log(f"   ├── Streams Disabled (fullstop): {metrics.get('pr2_streams_disabled_total', 0)}")
         pr2_sources = metrics.get("pr2_config_sources", {})
-        log(f"   ├── Config Sources: opt={pr2_sources.get('optimized', 0)}, cf={pr2_sources.get('carry_forward', 0)}")
+        log(f"   ├── Config Sources: opt={pr2_sources.get('optimized', 0)}, cf={pr2_sources.get('carry_forward', 0)}, precal={pr2_sources.get('carry_forward_precal', 0)}")
         log(f"   └── Carry-Forward PnL: ${metrics.get('pr2_carry_forward_pnl', 0):.2f}")
         log(f"{'='*70}\n")
 

@@ -406,6 +406,45 @@ def check_signal_fast(
     at_sellers_dominant = bool(curr.get("at_sellers_dominant", False))
     at_is_flat = bool(curr.get("at_is_flat", False))
 
+    # === REGIME FILTER (AT Scenario Analysis 2026-01-03) ===
+    # Key finding: Neutral regime has 19.7% win rate - skip it!
+    regime_filter = config.get("regime_filter", "skip_neutral")
+    at_regime = "neutral_regime"  # Default
+
+    if regime_filter != "off":
+        # Calculate AT regime over lookback period
+        at_regime_lookback = config.get("at_regime_lookback", 20)
+        if abs_index >= at_regime_lookback - 1:
+            start_idx = abs_index - at_regime_lookback + 1
+            end_idx = abs_index + 1
+            buyers_bars = df["at_buyers_dominant"].iloc[start_idx:end_idx].sum()
+            sellers_bars = df["at_sellers_dominant"].iloc[start_idx:end_idx].sum()
+
+            regime_threshold = 0.6  # 60% dominance required
+            buyers_ratio = buyers_bars / at_regime_lookback
+            sellers_ratio = sellers_bars / at_regime_lookback
+
+            if buyers_ratio >= regime_threshold:
+                at_regime = "bullish_regime"
+            elif sellers_ratio >= regime_threshold:
+                at_regime = "bearish_regime"
+            else:
+                at_regime = "neutral_regime"
+
+        # Apply regime filter - skip_neutral blocks ALL trades in neutral
+        if regime_filter == "skip_neutral" and at_regime == "neutral_regime":
+            return None, None, None, None, "Regime Filter: Neutral"
+
+    # Regime allows for direction-specific filters (aligned/veto modes)
+    regime_allows_long = True
+    regime_allows_short = True
+    if regime_filter == "aligned":
+        regime_allows_long = (at_regime == "bullish_regime")
+        regime_allows_short = (at_regime == "bearish_regime")
+    elif regime_filter == "veto":
+        regime_allows_long = (at_regime != "bearish_regime")
+        regime_allows_short = (at_regime != "bullish_regime")
+
     # === SSL FLIP GRACE PERIOD ===
     # When SSL flips, allow N bars grace even if AT hasn't confirmed yet
     ssl_flip_grace_long = False
@@ -536,6 +575,7 @@ def check_signal_fast(
     is_long = (
         price_above_baseline and
         at_allows_long and
+        regime_allows_long and  # NEW: Regime filter
         baseline_touch_long and
         (skip_body_position or body_above_baseline) and
         long_pbema_distance >= min_pbema_distance and
@@ -550,6 +590,7 @@ def check_signal_fast(
     is_short = (
         price_below_baseline and
         at_allows_short and
+        regime_allows_short and  # NEW: Regime filter
         baseline_touch_short and
         (skip_body_position or body_below_baseline) and
         short_pbema_distance >= min_pbema_distance and

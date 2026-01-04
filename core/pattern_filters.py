@@ -367,6 +367,277 @@ def detect_momentum_loss_after_trend(
 
 
 # ==========================================
+# PATTERN 4B: SSL SLOPE DIRECTION FILTER (NEW - From Professional Analysis)
+# ==========================================
+# Analysis Evidence:
+# - 40% of LONG trades are "quick failures" (≤20 bars, 0% recovery)
+# - All 8 quick failures show flat or oscillating SSL Baseline
+# - SHORT trades have 0% quick failures (better signal quality)
+# - SSL slope filter expected to add $60-75/year
+
+def check_ssl_slope_direction(
+        df: pd.DataFrame,
+        index: int,
+        signal_type: str,  # "LONG" or "SHORT"
+        lookback: int = 10,
+        min_slope_pct: float = 0.003,  # 0.3% minimum slope (from analysis recommendation)
+        return_debug: bool = False,
+) -> Tuple[bool, Optional[Dict]]:
+    """
+    Check if SSL baseline slope supports the signal direction.
+
+    Key Insight from Analysis:
+    - LONG signals need UPWARD sloping SSL (min 0.3%)
+    - SHORT signals need DOWNWARD sloping SSL (min 0.3%)
+    - Flat SSL = ranging market = avoid entry
+
+    This filter is specifically designed to eliminate LONG quick failures
+    which occur when SSL is flat but price temporarily crosses above baseline.
+
+    Args:
+        df: DataFrame with 'baseline' column
+        index: Current candle index
+        signal_type: "LONG" or "SHORT"
+        lookback: Candles for slope calculation (default: 10)
+        min_slope_pct: Minimum slope as percentage (default: 0.3%)
+        return_debug: Return debug information
+
+    Returns:
+        (slope_supports_signal, debug_info)
+        - True if slope supports signal direction, False otherwise
+        - debug_info: Slope value and direction (if return_debug=True)
+
+    Example:
+        >>> ok, debug = check_ssl_slope_direction(df, -1, "LONG", return_debug=True)
+        >>> if not ok:
+        ...     print(f"SSL slope insufficient: {debug['slope_pct']:.4f}")
+    """
+
+    debug_info = {
+        "slope_pct": None,
+        "slope_direction": None,
+        "required_direction": "UP" if signal_type == "LONG" else "DOWN",
+        "passes": False,
+    }
+
+    if 'baseline' not in df.columns:
+        return (False, debug_info) if return_debug else (False, None)
+
+    abs_idx = index if index >= 0 else len(df) + index
+
+    if abs_idx < lookback + 5:
+        return (False, debug_info) if return_debug else (False, None)
+
+    try:
+        # Get baseline values over lookback period
+        start_idx = abs_idx - lookback
+        baseline_start = float(df['baseline'].iloc[start_idx])
+        baseline_end = float(df['baseline'].iloc[abs_idx])
+
+        # Calculate slope as percentage change
+        slope_pct = (baseline_end - baseline_start) / baseline_start
+
+        debug_info["slope_pct"] = slope_pct
+        debug_info["slope_direction"] = "UP" if slope_pct > 0 else ("DOWN" if slope_pct < 0 else "FLAT")
+
+        # Check if slope supports signal direction
+        if signal_type == "LONG":
+            # LONG requires positive slope >= min_slope_pct
+            passes = slope_pct >= min_slope_pct
+        else:  # SHORT
+            # SHORT requires negative slope <= -min_slope_pct
+            passes = slope_pct <= -min_slope_pct
+
+        debug_info["passes"] = passes
+
+        return (passes, debug_info) if return_debug else (passes, None)
+
+    except (IndexError, ValueError, ZeroDivisionError):
+        return (False, debug_info) if return_debug else (False, None)
+
+
+# ==========================================
+# PATTERN 4C: SSL BASELINE STABILITY CHECK (NEW - From Professional Analysis)
+# ==========================================
+# Analysis Evidence:
+# - Quick failures occur in choppy markets where SSL oscillates
+# - Stable baseline = clear trend = better trades
+# - Expected to add $25-35/year
+
+def check_ssl_stability(
+        df: pd.DataFrame,
+        index: int,
+        lookback: int = 10,
+        max_volatility: float = 0.005,  # Max 0.5% standard deviation
+        return_debug: bool = False,
+) -> Tuple[bool, Optional[Dict]]:
+    """
+    Check if SSL baseline is stable (not oscillating erratically).
+
+    Key Insight from Analysis:
+    - Erratic SSL baseline indicates choppy market
+    - Stable SSL indicates clear trend
+    - Filter out signals when SSL is too volatile
+
+    Args:
+        df: DataFrame with 'baseline' column
+        index: Current candle index
+        lookback: Candles to check for stability (default: 10)
+        max_volatility: Maximum normalized std deviation (default: 0.5%)
+        return_debug: Return debug information
+
+    Returns:
+        (is_stable, debug_info)
+        - True if SSL is stable, False if erratic
+        - debug_info: Volatility metrics (if return_debug=True)
+
+    Example:
+        >>> stable, debug = check_ssl_stability(df, -1, return_debug=True)
+        >>> if not stable:
+        ...     print(f"SSL too volatile: {debug['volatility_pct']:.4f}")
+    """
+
+    debug_info = {
+        "volatility_pct": None,
+        "is_stable": False,
+    }
+
+    if 'baseline' not in df.columns:
+        return (False, debug_info) if return_debug else (False, None)
+
+    abs_idx = index if index >= 0 else len(df) + index
+
+    if abs_idx < lookback + 5:
+        return (True, debug_info) if return_debug else (True, None)  # Default to stable if not enough data
+
+    try:
+        # Get baseline values over lookback period
+        ssl_recent = df['baseline'].iloc[abs_idx - lookback:abs_idx + 1]
+
+        # Calculate normalized volatility (std/mean)
+        ssl_mean = ssl_recent.mean()
+        ssl_std = ssl_recent.std()
+
+        volatility_pct = ssl_std / ssl_mean if ssl_mean > 0 else 0
+
+        debug_info["volatility_pct"] = volatility_pct
+        is_stable = volatility_pct <= max_volatility
+        debug_info["is_stable"] = is_stable
+
+        return (is_stable, debug_info) if return_debug else (is_stable, None)
+
+    except (IndexError, ValueError, ZeroDivisionError):
+        return (True, debug_info) if return_debug else (True, None)
+
+
+# ==========================================
+# PATTERN 4D: QUICK FAILURE PREDICTOR (NEW - From Professional Analysis)
+# ==========================================
+# Analysis Evidence:
+# - 57% of losses are "quick failures" (≤20 bars)
+# - All 8 quick failures are LONG trades
+# - Combined filter to catch potential quick failures
+
+def predict_quick_failure(
+        df: pd.DataFrame,
+        index: int,
+        signal_type: str,
+        lookback: int = 10,
+        return_debug: bool = False,
+) -> Tuple[bool, Optional[Dict]]:
+    """
+    Predict if a signal is likely to be a "quick failure".
+
+    A quick failure is a trade that hits SL within 20 bars.
+    This combines multiple signals that correlate with quick failures:
+    1. SSL slope doesn't support direction
+    2. SSL baseline is erratic/unstable
+    3. Recent SSL direction change (weak flip)
+
+    Args:
+        df: DataFrame with indicators
+        index: Current candle index
+        signal_type: "LONG" or "SHORT"
+        lookback: Candles for analysis (default: 10)
+        return_debug: Return debug information
+
+    Returns:
+        (is_likely_quick_failure, debug_info)
+        - True if likely quick failure (DON'T TRADE)
+        - debug_info: Risk factors (if return_debug=True)
+
+    Example:
+        >>> risky, debug = predict_quick_failure(df, -1, "LONG", return_debug=True)
+        >>> if risky:
+        ...     print(f"Quick failure risk: {debug['risk_factors']}")
+    """
+
+    debug_info = {
+        "slope_ok": False,
+        "stability_ok": False,
+        "direction_established": False,
+        "risk_factors": [],
+        "risk_score": 0,
+    }
+
+    abs_idx = index if index >= 0 else len(df) + index
+
+    if abs_idx < lookback + 10:
+        return (False, debug_info) if return_debug else (False, None)
+
+    try:
+        risk_score = 0
+        risk_factors = []
+
+        # Check 1: SSL Slope Direction
+        slope_ok, slope_debug = check_ssl_slope_direction(
+            df, index, signal_type, lookback=lookback, min_slope_pct=0.002, return_debug=True
+        )
+        debug_info["slope_ok"] = slope_ok
+        if not slope_ok:
+            risk_score += 2  # High weight - this is the main predictor
+            risk_factors.append(f"SSL slope wrong direction ({slope_debug.get('slope_pct', 0):.4f})")
+
+        # Check 2: SSL Stability
+        stable, stability_debug = check_ssl_stability(
+            df, index, lookback=lookback, max_volatility=0.004, return_debug=True
+        )
+        debug_info["stability_ok"] = stable
+        if not stable:
+            risk_score += 1
+            risk_factors.append(f"SSL unstable ({stability_debug.get('volatility_pct', 0):.4f})")
+
+        # Check 3: Recent Direction Change (weak flip)
+        # If SSL direction changed in last 3 candles, the flip may not be sustained
+        if 'baseline' in df.columns:
+            baseline_now = float(df['baseline'].iloc[abs_idx])
+            baseline_3_ago = float(df['baseline'].iloc[abs_idx - 3])
+            baseline_10_ago = float(df['baseline'].iloc[abs_idx - 10])
+
+            recent_trend = baseline_now - baseline_3_ago
+            prior_trend = baseline_3_ago - baseline_10_ago
+
+            # If trends have opposite signs, there was a recent reversal
+            if (recent_trend > 0 and prior_trend < 0) or (recent_trend < 0 and prior_trend > 0):
+                debug_info["direction_established"] = False
+                risk_score += 1
+                risk_factors.append("Recent SSL direction change")
+            else:
+                debug_info["direction_established"] = True
+
+        debug_info["risk_factors"] = risk_factors
+        debug_info["risk_score"] = risk_score
+
+        # Risk score >= 2 means likely quick failure
+        is_risky = risk_score >= 2
+
+        return (is_risky, debug_info) if return_debug else (is_risky, None)
+
+    except (IndexError, ValueError, ZeroDivisionError):
+        return (False, debug_info) if return_debug else (False, None)
+
+
+# ==========================================
 # PATTERN 7: SSL DYNAMIC SUPPORT
 # ==========================================
 # Real Trade Evidence:

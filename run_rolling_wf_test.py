@@ -523,7 +523,7 @@ def write_trade_log(result: dict, output_dir: str = None) -> str:
                     window_trade_map[window.get("window_id", 0)].append(trade)
                     assigned = True
                     break
-            except Exception:
+            except (ValueError, TypeError, KeyError):
                 pass
 
         if not assigned and window_results:
