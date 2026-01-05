@@ -1,0 +1,153 @@
+{
+  "project_name": "SSL Flow Trading Bot",
+  "version": "v2.0.0",
+  "version_codename": "filter-combo-discovery",
+  "generated": "2026-01-03",
+  "type": "Cryptocurrency Futures Trading Bot",
+  "exchange": "Binance",
+
+  "stats": {
+    "python_files": 108,
+    "markdown_docs": 97,
+    "core_modules": 34,
+    "strategy_files": 5,
+    "runner_scripts": 12,
+    "test_files": 15
+  },
+
+  "entry_points": {
+    "main": {
+      "file": "desktop_bot_refactored_v2_base_v7.py",
+      "command": "python desktop_bot_refactored_v2_base_v7.py [--headless]",
+      "description": "Main application with GUI and CLI modes"
+    },
+    "pipeline": {
+      "file": "runners/run_full_pipeline.py",
+      "command": "python runners/run_full_pipeline.py --symbol BTCUSDT --timeframe 15m [--save-trades]",
+      "description": "Full analysis pipeline (RECOMMENDED)"
+    },
+    "visualizer": {
+      "file": "runners/run_trade_visualizer.py",
+      "command": "python runners/run_trade_visualizer.py --symbol BTCUSDT --timeframe 15m",
+      "description": "Trade chart generation"
+    },
+    "tests": {
+      "file": "pytest.ini",
+      "command": "pytest -v",
+      "description": "Run test suite"
+    }
+  },
+
+  "modules": {
+    "core": {
+      "path": "core/",
+      "key_files": [
+        "config.py",
+        "indicators.py",
+        "trade_manager.py",
+        "trading_engine.py",
+        "trade_visualizer.py",
+        "at_scenario_analyzer.py",
+        "optuna_optimizer.py",
+        "binance_client.py",
+        "regime_filter.py",
+        "risk_manager.py"
+      ],
+      "exports": {
+        "config": ["SYMBOLS", "TIMEFRAMES", "TRADING_CONFIG"],
+        "indicators": ["calculate_indicators", "calculate_alphatrend"],
+        "trade_manager": ["SimTradeManager"],
+        "trading_engine": ["TradingEngine", "set_backtest_mode"],
+        "trade_visualizer": ["TradeVisualizer", "visualize_trade"],
+        "at_scenario_analyzer": ["check_core_signal", "ATScenarioAnalyzer"],
+        "binance_client": ["BinanceClient", "get_client"]
+      }
+    },
+    "strategies": {
+      "path": "strategies/",
+      "files": ["ssl_flow.py", "keltner_bounce.py", "router.py", "base.py"],
+      "active_strategy": "ssl_flow"
+    },
+    "runners": {
+      "path": "runners/",
+      "key_files": [
+        "run_full_pipeline.py",
+        "run_at_scenario_analysis.py",
+        "run_filter_combo_test.py",
+        "run_rolling_wf_combo.py",
+        "run_realistic_backtest.py",
+        "run_trade_visualizer.py"
+      ]
+    },
+    "ui": {
+      "path": "ui/",
+      "files": ["main_window.py", "workers.py"]
+    },
+    "tests": {
+      "path": "tests/",
+      "manual_tests": "tests/manual/"
+    }
+  },
+
+  "data_directories": {
+    "pipeline_reports": "data/pipeline_reports/",
+    "optuna_runs": "data/optuna_runs/",
+    "rolling_wf_runs": "data/rolling_wf_runs/",
+    "trade_charts": "trade_charts/"
+  },
+
+  "configuration": {
+    "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"],
+    "timeframes": ["5m", "15m", "1h", "4h"],
+    "risk_per_trade_pct": 0.0175,
+    "max_portfolio_risk_pct": 0.05,
+    "leverage": 10,
+    "initial_balance": 2000.0
+  },
+
+  "strategy": {
+    "name": "SSL Flow",
+    "description": "Trend following with SSL HYBRID baseline and PBEMA target",
+    "indicators": {
+      "ssl_hybrid": "HMA60 baseline",
+      "pbema_cloud": "EMA200 band",
+      "alphatrend": "Blue (buyers) / Red (sellers)"
+    }
+  },
+
+  "documentation": {
+    "claude_instructions": "CLAUDE.md",
+    "active_focus": "FOCUS.md",
+    "requirements": "docs/REQUIREMENTS.md",
+    "architecture": "docs/ARCHITECTURE.md",
+    "changelog": "docs/CHANGELOG.md"
+  },
+
+  "current_status": {
+    "date": "2026-01-03",
+    "best_config": "REGIME + at_flat_filter",
+    "trades_1y": 242,
+    "win_rate": 0.31,
+    "ideal_pnl": 14.62,
+    "cost_aware_pnl": -5.70,
+    "edge_pct": 0.17,
+    "cost_pct": 0.24,
+    "recommendation": "DO NOT TRADE",
+    "reason": "Strategy edge < Trading costs"
+  },
+
+  "next_steps": [
+    "Portfolio System - $2000 balance ile gerçekçi backtest",
+    "Entry Timing - Limit order ile slippage azalt",
+    "TP/SL Optimization - Risk/reward ratio iyileştir",
+    "Trade Pattern Analysis - Kaybeden trade'lerde ortak patern bul"
+  ],
+
+  "quick_start": {
+    "pipeline": "python runners/run_full_pipeline.py --symbol BTCUSDT --timeframe 15m --save-trades",
+    "visualizer": "python runners/run_trade_visualizer.py --symbol BTCUSDT --timeframe 15m",
+    "gui": "python desktop_bot_refactored_v2_base_v7.py",
+    "headless": "python desktop_bot_refactored_v2_base_v7.py --headless",
+    "tests": "pytest -v"
+  }
+}

@@ -1132,21 +1132,28 @@ MOMENTUM_EXIT_CONFIG = {
 
 PBEMA_RETEST_CONFIG = {
     # === Core Parameters ===
-    "min_rr": 1.5,                        # Minimum risk/reward ratio
-    "breakout_lookback": 20,              # Candles to search for PBEMA breakout
-    "min_breakout_strength": 0.005,       # Min distance beyond PBEMA (0.5%)
+    # UPDATED 2026-01-04 based on Real Trade Analysis
+    "min_rr": 1.0,                        # Lowered from 1.5 - more signals with better filters
+    "breakout_lookback": 30,              # Increased from 20 - more breakout detection time
+    "min_breakout_strength": 0.002,       # Lowered from 0.5% to 0.2% - more realistic
     "retest_tolerance": 0.003,            # Touch tolerance for retest (0.3%)
     "min_wick_ratio": 0.15,               # Minimum wick for rejection (15%)
 
     # === TP/SL Configuration ===
-    "tp_target": "baseline",              # "baseline" (SSL) or "percentage"
+    # NEW: "momentum" mode uses dynamic exit based on momentum exhaustion
+    "tp_target": "momentum",              # "momentum" (dynamic), "baseline", or "percentage"
     "tp_percentage": 0.015,               # TP % if using percentage mode (1.5%)
     "sl_buffer": 0.003,                   # SL buffer beyond PBEMA (0.3%)
+    "min_sl_distance": 0.015,             # Minimum SL distance (1.5%)
+    "use_atr_sl": True,                   # Use ATR-based SL
+    "atr_sl_multiplier": 1.5,             # ATR multiplier for SL
 
-    # === Optional Filters ===
+    # === Critical Filters (from Real Trade Analysis) ===
+    # Evidence: NO 7-18 charts show these patterns
     "require_at_confirmation": False,     # Require AlphaTrend confirmation
-    "require_multiple_retests": False,    # Require 2+ retests (stronger setup)
-    "min_retests": 2,                     # Minimum retest count if required
+    "require_multiple_retests": True,     # ENABLED: "bir çok kez değip" pattern
+    "min_retests": 2,                     # Minimum 2 retests before entry
+    "require_trend_alignment": True,      # NEW: Only trade in trend direction
     "use_volume_confirmation": False,     # Volume spike on breakout
 
     # === Strategy Mode ===

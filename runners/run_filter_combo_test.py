@@ -58,6 +58,8 @@ def apply_filters(
     use_ssl_slope_direction: bool = False,  # Priority 1A: Directional slope
     use_ssl_stability: bool = False,        # Priority 1C: Stability check
     use_quick_failure_predictor: bool = False,  # Combined predictor
+    # MOMENTUM PATTERN (Session 2026-01-05)
+    use_momentum_pattern: bool = False,     # Momentum exhaustion pattern detection
     # Signal values (needed for SL filter)
     entry_price: float = None,
     sl_price: float = None,
@@ -87,6 +89,35 @@ def apply_filters(
     baseline = float(curr["baseline"])
     pb_top = float(curr.get("pb_ema_top", np.nan))
     pb_bot = float(curr.get("pb_ema_bot", np.nan))
+
+    # ========== MOMENTUM PATTERN DETECTION (v2.3.0) ==========
+    # When momentum exhaustion pattern detected, skip AT flat filter
+    # This addresses: "Bot is missing 90% of trades"
+    # QUALITY FILTER: Only GOOD or EXCELLENT quality + 3+ phases
+    momentum_pattern_detected = False
+    if use_momentum_pattern:
+        try:
+            from core.momentum_patterns import detect_momentum_exhaustion_pattern
+            pattern_result = detect_momentum_exhaustion_pattern(
+                df, abs_index, signal_type=signal_type, require_all_phases=False
+            )
+            if pattern_result.get('pattern_detected'):
+                quality = pattern_result.get('quality', 'NONE')
+                phases = pattern_result.get('phases', {})
+                phases_passed = sum(1 for v in phases.values() if v)
+
+                # Fakeout (SSL touch) is REQUIRED - this is the entry signal
+                # Other phases are supporting confirmation
+                phases = pattern_result.get('phases', {})
+                has_fakeout = phases.get('fakeout', False)
+
+                if has_fakeout and (
+                    (quality == 'EXCELLENT') or
+                    (quality == 'GOOD' and phases_passed >= 3)
+                ):
+                    momentum_pattern_detected = True
+        except ImportError:
+            pass  # Module not available
 
     # ========== FILTER 1: REGIME FILTER ==========
     if use_regime_filter:
@@ -120,7 +151,8 @@ def apply_filters(
             return False, "AT: No Sellers"
 
     # ========== FILTER 3: AT FLAT ==========
-    if use_at_flat_filter:
+    # MOMENTUM PATTERN OVERRIDE: Skip AT flat when momentum pattern detected
+    if use_at_flat_filter and not momentum_pattern_detected:
         at_flat = bool(curr.get("at_is_flat", False))
         if at_flat:
             return False, "AT: Flat"

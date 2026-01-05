@@ -67,3 +67,12 @@ trades_temp_*.csv
 
 # Replay charts
 replay_charts/
+
+# Debug/Analysis output
+scripts/debug/*.log
+scripts/analysis/*.csv
+scripts/analysis/*.json
+
+# Temporary files
+*.log
+*.tmp

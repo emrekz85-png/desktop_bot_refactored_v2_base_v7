@@ -117,6 +117,26 @@ except ImportError:
     FVGDetector = None
     FVGType = None
 
+# Import Momentum Pattern Detection (v2.3.0 - Session 2026-01-05)
+# Addresses: "Bot is missing 90% of trades" - captures momentum exhaustion patterns
+# NOTE: Uses lazy import to avoid circular dependency with core.trading_engine
+HAS_MOMENTUM_PATTERNS = None  # Lazy-loaded
+_momentum_patterns_module = None
+
+
+def _get_momentum_patterns():
+    """Lazy import of momentum_patterns to avoid circular dependency."""
+    global HAS_MOMENTUM_PATTERNS, _momentum_patterns_module
+    if HAS_MOMENTUM_PATTERNS is None:
+        try:
+            from core import momentum_patterns as mp
+            _momentum_patterns_module = mp
+            HAS_MOMENTUM_PATTERNS = True
+        except ImportError:
+            HAS_MOMENTUM_PATTERNS = False
+            _momentum_patterns_module = None
+    return _momentum_patterns_module
+
 
 def detect_htf_trend(
     htf_df: pd.DataFrame,
@@ -416,6 +436,13 @@ def check_ssl_flow_signal(
         # Tier 2 (Quality): Baseline touch, PBEMA distance, ADX/RSI - configurable
         # Tier 3 (Risk): Wick rejection, body position, overlap - configurable
         filter_tier_level: int = 3,              # 1=core only, 2=+quality, 3=+risk (full)
+        # === MOMENTUM PATTERN DETECTION (v2.3.0 - Session 2026-01-05) ===
+        # Addresses: "Bot is missing 90% of trades"
+        # When momentum exhaustion pattern detected, relax AT flat filter
+        # This captures pattern sequences: Stairstepping → Sharp Break → Fakeout → SSL Sideways
+        use_momentum_pattern: bool = False,      # Enable momentum pattern detection
+        momentum_min_quality: str = "MODERATE",  # Minimum pattern quality (MODERATE, GOOD, EXCELLENT)
+        momentum_skip_at_flat: bool = True,      # Skip AT flat filter when pattern detected
         return_debug: bool = False,
 ) -> Union[SignalResult, SignalResultWithDebug]:
     """
@@ -528,6 +555,12 @@ def check_ssl_flow_signal(
         "vol_allow_at_grace": None,
         # Filter Tier info (Clenow's Tier System)
         "filter_tier_level": filter_tier_level,
+        # Momentum Pattern info (v2.3.0)
+        "use_momentum_pattern": use_momentum_pattern,
+        "momentum_pattern_detected": False,
+        "momentum_pattern_quality": "NONE",
+        "momentum_pattern_confidence": 0.0,
+        "momentum_phases": {},
     }
 
     def _ret(s_type, entry, tp, sl, reason):
@@ -688,6 +721,68 @@ def check_ssl_flow_signal(
 
     if regime == "RANGING":
         return _ret(None, None, None, None, f"RANGING Regime (ADX_avg={adx_avg:.1f})")
+
+    # ================= MOMENTUM PATTERN DETECTION (v2.3.0) =================
+    # Detects momentum exhaustion patterns from user's real trade analysis:
+    # Pattern: Stairstepping → Sharp Selloff → Fakeout → SSL Sideways → Entry
+    #
+    # When pattern detected:
+    # - Skip AT flat filter (momentum signals override AT lag)
+    # - Use pattern quality for confidence scoring
+    #
+    # This addresses the core finding: "Bot is missing 90% of trades"
+    # Human trades use pattern sequences, not static filters
+    momentum_pattern_result = None
+    momentum_pattern_detected = False
+    momentum_pattern_quality = "NONE"
+    momentum_pattern_confidence = 0.0
+    momentum_skip_at_flat_effective = False
+
+    # Lazy load momentum patterns module
+    mp_module = _get_momentum_patterns() if use_momentum_pattern else None
+
+    if use_momentum_pattern and mp_module is not None:
+        # Quality hierarchy: EXCELLENT > GOOD > MODERATE > POOR
+        quality_order = {"EXCELLENT": 4, "GOOD": 3, "MODERATE": 2, "POOR": 1, "NONE": 0}
+        min_quality_level = quality_order.get(momentum_min_quality, 2)
+
+        # Detect pattern for both directions (we'll use appropriate one later)
+        # Check SHORT pattern (momentum exhaustion after uptrend)
+        momentum_pattern_short = mp_module.detect_momentum_exhaustion_pattern(
+            df, abs_index, signal_type="SHORT", require_all_phases=False
+        )
+        # Check LONG pattern (momentum exhaustion after downtrend)
+        momentum_pattern_long = mp_module.detect_momentum_exhaustion_pattern(
+            df, abs_index, signal_type="LONG", require_all_phases=False
+        )
+
+        # Use the pattern that matches potential signal direction
+        # For SHORT: price below baseline → check SHORT pattern
+        # For LONG: price above baseline → check LONG pattern
+        if close < baseline:  # Potential SHORT
+            momentum_pattern_result = momentum_pattern_short
+        else:  # Potential LONG
+            momentum_pattern_result = momentum_pattern_long
+
+        if momentum_pattern_result and momentum_pattern_result.get('pattern_detected'):
+            pattern_quality = momentum_pattern_result.get('quality', 'NONE')
+            pattern_quality_level = quality_order.get(pattern_quality, 0)
+
+            if pattern_quality_level >= min_quality_level:
+                momentum_pattern_detected = True
+                momentum_pattern_quality = pattern_quality
+                momentum_pattern_confidence = momentum_pattern_result.get('confidence', 0.0)
+
+                # Key effect: Skip AT flat filter when momentum pattern detected
+                if momentum_skip_at_flat:
+                    momentum_skip_at_flat_effective = True
+
+        # Store in debug info
+        debug_info["momentum_pattern_detected"] = momentum_pattern_detected
+        debug_info["momentum_pattern_quality"] = momentum_pattern_quality
+        debug_info["momentum_pattern_confidence"] = momentum_pattern_confidence
+        debug_info["momentum_phases"] = momentum_pattern_result.get('phases', {}) if momentum_pattern_result else {}
+        debug_info["momentum_skip_at_flat_effective"] = momentum_skip_at_flat_effective
 
     # ================= SSL NEVER LOST FILTER =================
     # Derived from user annotations: "SSL HYBRID not even lost. Should be no short trade here"
@@ -907,8 +1002,14 @@ def check_ssl_flow_signal(
 
     # AT Flat check - only in binary mode
     # In regime/score mode, flat market is handled by regime detection
+    # MOMENTUM PATTERN OVERRIDE (v2.3.0): Skip AT flat when momentum pattern detected
+    # Rationale: Momentum exhaustion pattern signals override AT lag issues
     if at_mode == "binary":
-        if at_is_flat and not skip_at_flat_filter:
+        # Effective skip: either explicitly disabled OR momentum pattern overrides
+        effective_skip_at_flat = skip_at_flat_filter or momentum_skip_at_flat_effective
+        debug_info["effective_skip_at_flat"] = effective_skip_at_flat
+
+        if at_is_flat and not effective_skip_at_flat:
             return _ret(None, None, None, None, "AlphaTrend Flat (No Flow)")
 
     # ================= PBEMA DISTANCE CHECK =================
