@@ -4,10 +4,23 @@ Integrated Test Runner
 
 Tek komutla tum testleri calistir ve sonuclari tek yerde topla.
 
+STRATEGIES:
+    - SSL Flow: Primary trend-following strategy (HMA60 + AlphaTrend + PBEMA cloud)
+    - PBEMA v2: Optimized PBEMA retest strategy (long_only + ADX>25)
+
 Usage:
+    # SSL Flow Tests
     python run.py test BTCUSDT 15m              # Quick test (fixed config)
     python run.py test BTCUSDT 15m --full       # Full pipeline (discovery + WF + portfolio)
     python run.py test BTCUSDT 15m --quick      # 90-day quick test
+
+    # PBEMA v2 Tests
+    python run.py pbema BTCUSDT 15m             # PBEMA v2 standalone test
+
+    # Comparison
+    python run.py compare BTCUSDT 15m           # SSL Flow vs PBEMA v2 comparison
+
+    # Utilities
     python run.py viz BTCUSDT 15m               # Visualize latest trades
     python run.py report                        # Summary of all tests
 """
@@ -47,6 +60,9 @@ ALL_FILTERS = [
     "ssl_slope_direction",      # Priority 1A: Directional slope filter (+$60-75/yr)
     "ssl_stability",            # Priority 1C: SSL stability check (+$25-35/yr)
     "quick_failure_predictor",  # Combined predictor (targets LONG quick failures)
+
+    # === MOMENTUM PATTERN (Session 2026-01-05) ===
+    "momentum_pattern",         # Momentum exhaustion pattern detection (overrides AT flat)
 ]
 
 # Default config (for quick tests)
@@ -310,6 +326,9 @@ def make_filter_flags(filter_list: List[str]) -> Dict:
         "use_ssl_slope_direction": "ssl_slope_direction" in filter_list,
         "use_ssl_stability": "ssl_stability" in filter_list,
         "use_quick_failure_predictor": "quick_failure_predictor" in filter_list,
+
+        # === MOMENTUM PATTERN (Session 2026-01-05) ===
+        "use_momentum_pattern": "momentum_pattern" in filter_list,
     }
 
 
@@ -765,7 +784,7 @@ def run_portfolio_backtest(df, filter_list: List[str]) -> Dict:
 
 def run_pbema_retest_backtest(df, use_momentum_exit: bool = False) -> Dict:
     """
-    Run PBEMA Retest strategy backtest.
+    Run PBEMA Retest strategy backtest (OLD - v1).
 
     PBEMA Retest is a separate strategy (not a filter) that trades
     PBEMA cloud as support/resistance after breakout.
@@ -842,6 +861,178 @@ def run_pbema_retest_backtest(df, use_momentum_exit: bool = False) -> Dict:
     }
 
 
+def run_pbema_v2_backtest(df, account_size: float = 1000.0, max_concurrent: int = 3, use_momentum_exit: bool = False) -> Dict:
+    """
+    Run PBEMA Retest v2 strategy backtest (NEW - Optimized 2026-01-04).
+
+    PBEMA v2 has been optimized with filter discovery:
+    - long_only=True (SHORT was unprofitable: -$107 vs LONG +$156)
+    - regime_filter=True with ADX > 25
+    - max_concurrent=3 (risk management: max 3 simultaneous positions)
+    - use_momentum_exit: Exit when momentum exhausts (2026-01-05)
+
+    Result: ~$583 PnL with 219 trades at 54.3% WR (risk-adjusted)
+
+    Args:
+        df: DataFrame with indicators
+        account_size: Account size in dollars (default $1000, same as filter discovery)
+        max_concurrent: Maximum concurrent positions (default 3, prevents 16% risk exposure)
+        use_momentum_exit: If True, exit when momentum exhausts instead of waiting for TP
+
+    Returns:
+        dict: Backtest results with detailed breakdown
+    """
+    from strategies.pbema_retest_v2 import check_pbema_retest_signal_v2
+
+    trades = []
+    trades_list = []
+    last_entry_idx = -100  # Track last entry for cooldown
+    skipped_signals = 0
+
+    # Cooldown: 4 hours = 16 candles for 15m (prevents duplicate entries on consecutive candles)
+    ENTRY_COOLDOWN = 16
+
+    # Collect and simulate ALL PBEMA v2 signals
+    for i in range(100, len(df) - 10):
+        result = check_pbema_retest_signal_v2(df, index=i)
+        signal_type, entry, tp, sl, reason = result[:5]
+
+        if not signal_type:
+            continue
+
+        # Rule: Minimum 4h between entries (prevents same signal counted multiple times)
+        if (i - last_entry_idx) < ENTRY_COOLDOWN:
+            skipped_signals += 1
+            continue
+
+        # Simulate trade (same logic as filter discovery)
+        trade_result = None
+        exit_idx = i
+        exit_price = None
+
+        for j in range(i + 1, min(i + 96, len(df))):  # Max 24h hold
+            candle = df.iloc[j]
+            high, low, close = float(candle["high"]), float(candle["low"]), float(candle["close"])
+
+            if signal_type == "LONG":
+                # Check SL first (risk management)
+                if low <= sl:
+                    exit_price = sl
+                    pnl_pct = (sl - entry) / entry
+                    trade_result = {"pnl_pct": pnl_pct, "win": False, "exit_type": "SL"}
+                    exit_idx = j
+                    break
+
+                # Check TP
+                if high >= tp:
+                    exit_price = tp
+                    pnl_pct = (tp - entry) / entry
+                    trade_result = {"pnl_pct": pnl_pct, "win": True, "exit_type": "TP"}
+                    exit_idx = j
+                    break
+            else:  # SHORT
+                # Check SL first
+                if high >= sl:
+                    exit_price = sl
+                    pnl_pct = (entry - sl) / entry
+                    trade_result = {"pnl_pct": pnl_pct, "win": False, "exit_type": "SL"}
+                    exit_idx = j
+                    break
+
+                # Check TP
+                if low <= tp:
+                    exit_price = tp
+                    pnl_pct = (entry - tp) / entry
+                    trade_result = {"pnl_pct": pnl_pct, "win": True, "exit_type": "TP"}
+                    exit_idx = j
+                    break
+
+        # EOD exit if no TP/SL hit
+        if trade_result is None:
+            exit_idx = min(i + 96, len(df) - 1)
+            exit_price = float(df.iloc[exit_idx]["close"])
+            if signal_type == "LONG":
+                pnl_pct = (exit_price - entry) / entry
+            else:
+                pnl_pct = (entry - exit_price) / entry
+            trade_result = {"pnl_pct": pnl_pct, "win": pnl_pct > 0, "exit_type": "EOD"}
+
+        # Track entry index for cooldown rule
+        last_entry_idx = i
+
+        trades.append(trade_result)
+
+        # Store detailed trade info
+        trades_list.append({
+            "entry_time": str(df.index[i]),
+            "exit_time": str(df.index[exit_idx]),
+            "signal_type": signal_type,
+            "entry_price": entry,
+            "exit_price": exit_price,
+            "tp_price": tp,
+            "sl_price": sl,
+            "pnl_pct": trade_result["pnl_pct"],
+            "win": trade_result["win"],
+            "exit_type": trade_result["exit_type"],
+        })
+
+    # Calculate stats (same as filter discovery: sum of pct * account_size)
+    if not trades:
+        return {
+            'strategy': 'PBEMA v2',
+            'config': 'long_only + regime(ADX>25) + 4h_cooldown',
+            'signals': skipped_signals,
+            'trades': 0,
+            'skipped': skipped_signals,
+            'max_concurrent': max_concurrent,
+            'wins': 0,
+            'wr': 0,
+            'pnl': 0,
+            'trades_list': [],
+        }
+
+    wins = sum(1 for t in trades if t['win'])
+    losses = len(trades) - wins
+    total_pnl_pct = sum(t['pnl_pct'] for t in trades)
+    pnl = total_pnl_pct * account_size  # Same as filter discovery
+
+    exit_types = {"TP": 0, "SL": 0, "MOMENTUM": 0, "EOD": 0}
+    for t in trades:
+        exit_types[t.get('exit_type', 'EOD')] += 1
+
+    # Calculate max drawdown
+    equity = [0]
+    for t in trades:
+        equity.append(equity[-1] + t['pnl_pct'] * account_size)
+    max_dd = min(0, min(e - max(equity[:i+1]) for i, e in enumerate(equity[1:]))) if len(equity) > 1 else 0
+
+    # Profit factor
+    gross_profit = sum(t['pnl_pct'] for t in trades if t['pnl_pct'] > 0) * account_size
+    gross_loss = abs(sum(t['pnl_pct'] for t in trades if t['pnl_pct'] < 0) * account_size)
+    pf = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+
+    # Add dollar pnl to trades_list
+    for t in trades_list:
+        t['pnl'] = t['pnl_pct'] * account_size
+
+    return {
+        'strategy': 'PBEMA v2',
+        'config': 'long_only + regime(ADX>25) + 4h_cooldown',
+        'signals': len(trades) + skipped_signals,
+        'trades': len(trades),
+        'skipped': skipped_signals,
+        'max_concurrent': max_concurrent,
+        'wins': wins,
+        'losses': losses,
+        'wr': 100 * wins / len(trades),
+        'pnl': pnl,
+        'max_dd': abs(max_dd),
+        'profit_factor': pf,
+        'exit_types': exit_types,
+        'trades_list': trades_list,
+    }
+
+
 def run_full_pipeline(symbol: str, timeframe: str, days: int = 365) -> Dict:
     """
     Run ENHANCED full integrated pipeline with expert recommendations:
@@ -884,13 +1075,13 @@ def run_full_pipeline(symbol: str, timeframe: str, days: int = 365) -> Dict:
     default_result = run_backtest(df, default_flags)
     print(f"      Default Config:        {default_result['trades']:>4} trades | {default_result['wr']:.1f}% WR | ${default_result['pnl']:.2f} PnL")
 
-    # ===== STEP 3: PBEMA Retest Strategy =====
-    print("\n[3/10] PBEMA Retest Strategy (separate from SSL Flow)...")
-    pbema_result = run_pbema_retest_backtest(df, use_momentum_exit=False)
-    pbema_mom_result = run_pbema_retest_backtest(df, use_momentum_exit=True)
+    # ===== STEP 3: PBEMA Strategies =====
+    print("\n[3/10] PBEMA Strategies...")
+    pbema_v1_result = run_pbema_retest_backtest(df, use_momentum_exit=False)
+    pbema_v2_result = run_pbema_v2_backtest(df, account_size=1000.0)
 
-    print(f"      PBEMA Retest:          {pbema_result['trades']:>4} trades | {pbema_result['wr']:.1f}% WR | ${pbema_result['pnl']:.2f} PnL")
-    print(f"      PBEMA + Momentum Exit: {pbema_mom_result['trades']:>4} trades | {pbema_mom_result['wr']:.1f}% WR | ${pbema_mom_result['pnl']:.2f} PnL")
+    print(f"      PBEMA v1 (old):        {pbema_v1_result['trades']:>4} trades | {pbema_v1_result['wr']:.1f}% WR | ${pbema_v1_result['pnl']:.2f} PnL")
+    print(f"      PBEMA v2 (optimized):  {pbema_v2_result['trades']:>4} trades | {pbema_v2_result['wr']:.1f}% WR | ${pbema_v2_result['pnl']:.2f} PnL")
 
     # ===== STEP 4: Filter Discovery =====
     print("\n[4/10] Filter discovery (incremental)...")
@@ -1033,18 +1224,23 @@ def run_full_pipeline(symbol: str, timeframe: str, days: int = 365) -> Dict:
             "wr": default_result['wr'],
             "pnl": default_result['pnl'],
         },
-        "pbema_retest": {
-            "standard": {
-                "signals": pbema_result['signals'],
-                "trades": pbema_result['trades'],
-                "wr": pbema_result['wr'],
-                "pnl": pbema_result['pnl'],
+        "pbema_strategies": {
+            "v1_old": {
+                "signals": pbema_v1_result['signals'],
+                "trades": pbema_v1_result['trades'],
+                "wr": pbema_v1_result['wr'],
+                "pnl": pbema_v1_result['pnl'],
             },
-            "with_momentum_exit": {
-                "trades": pbema_mom_result['trades'],
-                "wr": pbema_mom_result['wr'],
-                "pnl": pbema_mom_result['pnl'],
-                "exit_types": pbema_mom_result['exit_types'],
+            "v2_optimized": {
+                "config": pbema_v2_result.get('config', 'long_only + regime(ADX>25)'),
+                "trades": pbema_v2_result['trades'],
+                "wins": pbema_v2_result.get('wins', 0),
+                "losses": pbema_v2_result.get('losses', 0),
+                "wr": pbema_v2_result['wr'],
+                "pnl": pbema_v2_result['pnl'],
+                "max_dd": pbema_v2_result.get('max_dd', 0),
+                "profit_factor": pbema_v2_result.get('profit_factor', 0),
+                "exit_types": pbema_v2_result.get('exit_types', {}),
             },
         },
         "discovery": {
@@ -1140,9 +1336,9 @@ STEP 1 - SSL FLOW BASELINES:
   Baseline (regime):  {baseline['trades']} trades | {baseline['wr']:.1f}% WR | ${baseline['pnl']:.2f}
   Default Config:     {default_result['trades']} trades | {default_result['wr']:.1f}% WR | ${default_result['pnl']:.2f}
 
-STEP 2 - PBEMA RETEST STRATEGY (separate strategy):
-  Standard:      {pbema_result['trades']} trades | {pbema_result['wr']:.1f}% WR | ${pbema_result['pnl']:.2f}
-  + Momentum:    {pbema_mom_result['trades']} trades | {pbema_mom_result['wr']:.1f}% WR | ${pbema_mom_result['pnl']:.2f}
+STEP 2 - PBEMA STRATEGIES (separate from SSL Flow):
+  PBEMA v1 (old):       {pbema_v1_result['trades']} trades | {pbema_v1_result['wr']:.1f}% WR | ${pbema_v1_result['pnl']:.2f}
+  PBEMA v2 (optimized): {pbema_v2_result['trades']} trades | {pbema_v2_result['wr']:.1f}% WR | ${pbema_v2_result['pnl']:.2f}
 
 STEP 3 - FILTER DISCOVERY:
   Tested: {len(discovery_results)} combinations
@@ -1326,6 +1522,541 @@ def run_viz(symbol: str, timeframe: str):
     print(f"\nCreated {count} charts in {viz_dir}")
 
 
+def run_pbema_test(symbol: str, timeframe: str, days: int = 365, full: bool = False) -> Dict:
+    """
+    Run PBEMA v2 test (parallel to SSL Flow).
+
+    Usage:
+        python run.py pbema BTCUSDT 15m          # Quick test
+        python run.py pbema BTCUSDT 15m --full   # Full pipeline (CV + WF + OOS)
+    """
+    from core import set_backtest_mode
+    set_backtest_mode(True)
+
+    mode_suffix = "pbema_v2_full" if full else "pbema_v2"
+    result_dir = get_result_dir(symbol, timeframe, mode_suffix)
+
+    if full:
+        return run_pbema_full_pipeline(symbol, timeframe, days, result_dir)
+    else:
+        return run_pbema_quick_test(symbol, timeframe, days, result_dir)
+
+
+def run_pbema_quick_test(symbol: str, timeframe: str, days: int, result_dir: Path) -> Dict:
+    """Quick PBEMA v2 test (no validation)."""
+    print(f"\n{'='*70}")
+    print(f"PBEMA v2 QUICK TEST: {symbol} {timeframe} ({days} days)")
+    print(f"{'='*70}")
+    print(f"Config: long_only=True, regime_filter=True (ADX>25)")
+    print(f"{'='*70}\n")
+
+    # Fetch data
+    print("[1/3] Fetching data...")
+    df = fetch_data(symbol, timeframe, days)
+    print(f"      {len(df)} candles: {df.index[0].date()} to {df.index[-1].date()}")
+
+    # Run PBEMA v2 backtest
+    print("\n[2/3] Running PBEMA v2 backtest...")
+    result = run_pbema_v2_backtest(df, account_size=1000.0)
+
+    print(f"      Trades: {result['trades']} | WR: {result['wr']:.1f}%")
+    print(f"      PnL: ${result['pnl']:.2f} | Max DD: ${result.get('max_dd', 0):.2f}")
+    print(f"      PF: {result.get('profit_factor', 0):.2f}")
+
+    # Save results
+    print("\n[3/3] Saving results...")
+    verdict = "PASS" if result['pnl'] > 0 else "FAIL"
+
+    output = {
+        "strategy": "PBEMA v2",
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "days": days,
+        "mode": "pbema_v2_quick",
+        "timestamp": datetime.now().isoformat(),
+        "config": {"long_only": True, "regime_filter": True, "regime_adx_min": 25.0},
+        "results": result,
+        "verdict": verdict,
+    }
+
+    with open(result_dir / "result.json", "w") as f:
+        json.dump(output, f, indent=2, default=str)
+
+    with open(result_dir / "trades.json", "w") as f:
+        json.dump(result.get('trades_list', []), f, indent=2, default=str)
+
+    print(f"\n{'='*70}")
+    print(f"PBEMA v2: {result['trades']} trades | {result['wr']:.1f}% WR | ${result['pnl']:.2f} PnL | {verdict}")
+    print(f"{'='*70}")
+
+    return output
+
+
+def run_pbema_full_pipeline(symbol: str, timeframe: str, days: int, result_dir: Path) -> Dict:
+    """
+    Run FULL PBEMA v2 pipeline (same validation as SSL Flow):
+    1. Baseline backtest
+    2. Purged Cross-Validation
+    3. Trade-based Walk-Forward
+    4. R-Multiple & Kelly Analysis
+    5. OOS 2024 Validation
+    """
+    import numpy as np
+
+    print(f"\n{'='*70}")
+    print(f"PBEMA v2 FULL PIPELINE: {symbol} {timeframe} ({days} days)")
+    print(f"{'='*70}")
+    print(f"Config: long_only=True, regime_filter=True (ADX>25)")
+    print(f"Output: {result_dir}")
+    print(f"{'='*70}\n")
+
+    # ===== STEP 1: Fetch Data =====
+    print("[1/7] Fetching data...")
+    df = fetch_data(symbol, timeframe, days)
+    print(f"      {len(df)} candles: {df.index[0].date()} to {df.index[-1].date()}")
+
+    # ===== STEP 2: Baseline Backtest =====
+    print("\n[2/7] PBEMA v2 Baseline backtest...")
+    baseline = run_pbema_v2_backtest(df, account_size=1000.0)
+    print(f"      Trades: {baseline['trades']} | WR: {baseline['wr']:.1f}% | PnL: ${baseline['pnl']:.2f}")
+    print(f"      Max DD: ${baseline.get('max_dd', 0):.2f} | PF: {baseline.get('profit_factor', 0):.2f}")
+
+    # ===== STEP 3: Purged Cross-Validation =====
+    print("\n[3/7] Purged Cross-Validation (overfitting check)...")
+    cv_result = run_pbema_purged_cv(df, n_splits=5, purge_bars=100)
+    print(f"      Folds: {cv_result['valid_folds']}/{cv_result['n_splits']} valid")
+    print(f"      Positive: {cv_result['positive_folds']}/{cv_result['valid_folds']} ({cv_result['fold_wr']:.1f}%)")
+    print(f"      Robust: {'YES' if cv_result['robust'] else 'NO (possible overfitting!)'}")
+    cv_passed = cv_result['robust']
+
+    # ===== STEP 4: Trade-Based Walk-Forward =====
+    print("\n[4/7] Trade-Based Walk-Forward validation...")
+    wf_result = run_pbema_trade_based_wf(df, trades_per_window=5)
+
+    if "error" in wf_result:
+        print(f"      WARNING: {wf_result['error']}")
+        wf_passed = False
+    else:
+        print(f"      {wf_result['windows']} windows ({wf_result['trades_per_window']} trades each)")
+        print(f"      PnL: ${wf_result['pnl']:.2f} | Positive: {wf_result['positive_windows']}/{wf_result['windows']} ({wf_result['window_wr']:.1f}%)")
+        wf_passed = wf_result["pnl"] > 0 and wf_result["window_wr"] >= 50
+
+    # ===== STEP 5: R-Multiple & Kelly Analysis =====
+    print("\n[5/7] R-Multiple & Kelly Analysis...")
+    trades_list = baseline.get('trades_list', [])
+
+    if trades_list:
+        # Calculate R-multiples (risk = 1% of account = $10)
+        risk_per_trade = 10.0
+        r_multiples = [t.get('pnl', 0) / risk_per_trade for t in trades_list]
+        wins_r = [r for r in r_multiples if r > 0]
+        losses_r = [r for r in r_multiples if r < 0]
+
+        avg_win_r = float(np.mean(wins_r)) if wins_r else 0
+        avg_loss_r = float(np.mean(losses_r)) if losses_r else 0
+        expectancy_r = float(np.mean(r_multiples)) if r_multiples else 0
+
+        print(f"      Avg Win: {avg_win_r:.2f}R | Avg Loss: {avg_loss_r:.2f}R")
+        print(f"      Expectancy: {expectancy_r:.2f}R per trade")
+
+        # Kelly Criterion
+        win_rate = baseline['wr'] / 100
+        avg_win = sum(t['pnl'] for t in trades_list if t['pnl'] > 0) / len(wins_r) if wins_r else 0
+        avg_loss = abs(sum(t['pnl'] for t in trades_list if t['pnl'] < 0) / len(losses_r)) if losses_r else 0
+
+        if avg_loss > 0 and avg_win > 0:
+            payoff_ratio = avg_win / avg_loss
+            kelly = win_rate - (1 - win_rate) / payoff_ratio
+            kelly_pct = max(0, kelly * 100)
+            half_kelly = kelly_pct / 2
+        else:
+            kelly_pct = 0
+            half_kelly = 0
+            kelly = 0
+
+        print(f"      Kelly: {kelly_pct:.1f}% | Half-Kelly: {half_kelly:.1f}%")
+
+        r_multiple_stats = {
+            "avg_win_r": avg_win_r,
+            "avg_loss_r": avg_loss_r,
+            "expectancy_r": expectancy_r,
+            "max_win_r": max(r_multiples) if r_multiples else 0,
+            "max_loss_r": min(r_multiples) if r_multiples else 0,
+        }
+        kelly_stats = {"kelly_pct": kelly_pct, "half_kelly": half_kelly, "edge": kelly}
+    else:
+        r_multiple_stats = {"avg_win_r": 0, "avg_loss_r": 0, "expectancy_r": 0}
+        kelly_stats = {"kelly_pct": 0, "half_kelly": 0, "edge": 0}
+
+    # ===== STEP 6: OOS Validation (2024) =====
+    print("\n[6/7] Out-of-Sample Validation (2024)...")
+    oos_result = run_pbema_oos_validation(symbol, timeframe, year=2024)
+
+    if "error" in oos_result:
+        print(f"      WARNING: {oos_result['error']}")
+        oos_passed = False
+    else:
+        print(f"      Trades: {oos_result['trades']} | WR: {oos_result['wr']:.1f}%")
+        print(f"      PnL: ${oos_result['pnl']:.2f}")
+        oos_passed = oos_result['passed']
+
+    # ===== STEP 7: Final Verdict =====
+    print("\n[7/7] Calculating verdict...")
+
+    # Verdict logic (same as SSL Flow)
+    if baseline['pnl'] > 0 and wf_passed and cv_passed and oos_passed:
+        verdict = "PASS"
+        recommendation = "READY FOR PAPER TRADE"
+    elif baseline['pnl'] > 0 and wf_passed and oos_passed:
+        verdict = "GOOD"
+        recommendation = "PAPER TRADE WITH CAUTION"
+    elif baseline['pnl'] > 0 and (wf_passed or cv_passed):
+        verdict = "MARGINAL"
+        recommendation = "NEEDS MORE VALIDATION"
+    elif baseline['pnl'] > 0:
+        verdict = "WEAK"
+        recommendation = "LIKELY OVERFITTING - DO NOT TRADE"
+    else:
+        verdict = "FAIL"
+        recommendation = "DO NOT TRADE"
+
+    # Save results
+    output = {
+        "strategy": "PBEMA v2",
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "days": days,
+        "mode": "pbema_v2_full",
+        "timestamp": datetime.now().isoformat(),
+        "config": {"long_only": True, "regime_filter": True, "regime_adx_min": 25.0},
+        "baseline": {
+            "trades": baseline['trades'],
+            "wins": baseline.get('wins', 0),
+            "losses": baseline.get('losses', 0),
+            "wr": baseline['wr'],
+            "pnl": baseline['pnl'],
+            "max_dd": baseline.get('max_dd', 0),
+            "profit_factor": baseline.get('profit_factor', 0),
+        },
+        "purged_cv": {
+            "n_splits": cv_result['n_splits'],
+            "valid_folds": cv_result['valid_folds'],
+            "positive_folds": cv_result['positive_folds'],
+            "fold_wr": cv_result['fold_wr'],
+            "robust": cv_result['robust'],
+            "passed": cv_passed,
+        },
+        "trade_based_wf": {
+            "windows": wf_result.get('windows', 0),
+            "trades": wf_result.get('trades', 0),
+            "pnl": wf_result.get('pnl', 0),
+            "positive_windows": wf_result.get('positive_windows', 0),
+            "window_wr": wf_result.get('window_wr', 0),
+            "passed": wf_passed,
+        },
+        "r_multiples": r_multiple_stats,
+        "kelly": kelly_stats,
+        "oos_2024": {
+            "trades": oos_result.get('trades', 0),
+            "wr": oos_result.get('wr', 0),
+            "pnl": oos_result.get('pnl', 0),
+            "passed": oos_passed,
+        },
+        "verdict": verdict,
+        "recommendation": recommendation,
+    }
+
+    with open(result_dir / "result.json", "w") as f:
+        json.dump(output, f, indent=2, default=str)
+
+    with open(result_dir / "trades.json", "w") as f:
+        json.dump(baseline.get('trades_list', []), f, indent=2, default=str)
+
+    # Print summary
+    cv_status = "PASSED" if cv_passed else "FAILED"
+    wf_status = "PASSED" if wf_passed else "FAILED"
+    oos_status = "PASSED" if oos_passed else "FAILED"
+
+    summary = f"""
+{'='*70}
+PBEMA v2 FULL PIPELINE RESULT: {symbol} {timeframe}
+{'='*70}
+
+Period: {df.index[0].date()} to {df.index[-1].date()} ({days} days)
+Config: long_only + regime(ADX>25)
+
+STEP 1 - BASELINE BACKTEST:
+  Trades: {baseline['trades']} (W:{baseline.get('wins', 0)} L:{baseline.get('losses', 0)})
+  Win Rate: {baseline['wr']:.1f}%
+  PnL: ${baseline['pnl']:.2f}
+  Max DD: ${baseline.get('max_dd', 0):.2f}
+  Profit Factor: {baseline.get('profit_factor', 0):.2f}
+
+STEP 2 - PURGED CV (Overfitting Check):
+  Folds: {cv_result['valid_folds']}/{cv_result['n_splits']} | Positive: {cv_result['positive_folds']}
+  Robust: {cv_result['robust']} | Status: {cv_status}
+
+STEP 3 - TRADE-BASED WALK-FORWARD:
+  Windows: {wf_result.get('windows', 0)} ({wf_result.get('trades_per_window', 5)} trades each)
+  Positive: {wf_result.get('positive_windows', 0)} ({wf_result.get('window_wr', 0):.1f}%)
+  Status: {wf_status}
+
+STEP 4 - R-MULTIPLE ANALYSIS:
+  Avg Win: {r_multiple_stats['avg_win_r']:.2f}R | Avg Loss: {r_multiple_stats['avg_loss_r']:.2f}R
+  Expectancy: {r_multiple_stats['expectancy_r']:.2f}R per trade
+
+STEP 5 - KELLY CRITERION:
+  Full Kelly: {kelly_stats['kelly_pct']:.1f}%
+  Half Kelly (recommended): {kelly_stats['half_kelly']:.1f}%
+
+STEP 6 - OOS VALIDATION (2024):
+  Trades: {oos_result.get('trades', 0)} | WR: {oos_result.get('wr', 0):.1f}% | PnL: ${oos_result.get('pnl', 0):.2f}
+  Status: {oos_status}
+
+{'='*70}
+VERDICT: {verdict}
+RECOMMENDATION: {recommendation}
+{'='*70}
+
+Validation Summary:
+  [{'PASS' if cv_passed else 'FAIL'}] Purged CV: {cv_status}
+  [{'PASS' if wf_passed else 'FAIL'}] Trade-Based WF: {wf_status}
+  [{'PASS' if oos_passed else 'FAIL'}] OOS 2024: {oos_status}
+  [{'PASS' if baseline['pnl'] > 0 else 'FAIL'}] Profitable: {'YES' if baseline['pnl'] > 0 else 'NO'}
+
+Results saved to: {result_dir}
+"""
+    print(summary)
+
+    with open(result_dir / "summary.txt", "w") as f:
+        f.write(summary)
+
+    return output
+
+
+def run_pbema_purged_cv(df, n_splits: int = 5, purge_bars: int = 100) -> Dict:
+    """Run Purged Cross-Validation for PBEMA v2."""
+    fold_size = len(df) // n_splits
+    fold_results = []
+
+    for fold in range(n_splits):
+        test_start = fold * fold_size
+        test_end = test_start + fold_size
+
+        test_df = df.iloc[test_start:test_end].copy()
+
+        if len(test_df) < 500:  # Need enough data for PBEMA
+            fold_results.append({"pnl": 0, "trades": 0, "valid": False})
+            continue
+
+        result = run_pbema_v2_backtest(test_df, account_size=1000.0)
+        fold_results.append({
+            "pnl": result['pnl'],
+            "trades": result['trades'],
+            "wr": result['wr'],
+            "valid": result['trades'] >= 10,
+            "positive": result['pnl'] > 0
+        })
+
+    valid_folds = [f for f in fold_results if f["valid"]]
+    if not valid_folds:
+        return {
+            "n_splits": n_splits,
+            "valid_folds": 0,
+            "positive_folds": 0,
+            "fold_wr": 0,
+            "robust": False,
+        }
+
+    positive_folds = sum(1 for f in valid_folds if f["positive"])
+
+    return {
+        "n_splits": n_splits,
+        "valid_folds": len(valid_folds),
+        "positive_folds": positive_folds,
+        "fold_wr": positive_folds / len(valid_folds) * 100,
+        "robust": positive_folds >= len(valid_folds) - 1,  # 4/5 or better
+        "fold_details": fold_results
+    }
+
+
+def run_pbema_trade_based_wf(df, trades_per_window: int = 5) -> Dict:
+    """Run Trade-Based Walk-Forward for PBEMA v2."""
+    # Get all trades
+    result = run_pbema_v2_backtest(df, account_size=1000.0)
+    trades_list = result.get('trades_list', [])
+
+    if len(trades_list) < trades_per_window * 2:
+        return {
+            "windows": 0,
+            "trades": len(trades_list),
+            "pnl": result['pnl'],
+            "positive_windows": 0,
+            "window_wr": 0,
+            "trades_per_window": trades_per_window,
+            "error": f"Not enough trades ({len(trades_list)}) for {trades_per_window}-trade windows"
+        }
+
+    # Split into windows
+    windows = []
+    for i in range(0, len(trades_list), trades_per_window):
+        window_trades = trades_list[i:i + trades_per_window]
+        if len(window_trades) >= trades_per_window:
+            window_pnl = sum(t.get('pnl', 0) for t in window_trades)
+            windows.append({
+                "trades": len(window_trades),
+                "pnl": window_pnl,
+                "positive": window_pnl > 0
+            })
+
+    if not windows:
+        return {
+            "windows": 0,
+            "trades": len(trades_list),
+            "pnl": result['pnl'],
+            "positive_windows": 0,
+            "window_wr": 0,
+            "trades_per_window": trades_per_window,
+        }
+
+    positive_windows = sum(1 for w in windows if w["positive"])
+
+    return {
+        "windows": len(windows),
+        "trades": len(trades_list),
+        "pnl": result['pnl'],
+        "positive_windows": positive_windows,
+        "window_wr": positive_windows / len(windows) * 100,
+        "trades_per_window": trades_per_window,
+    }
+
+
+def run_pbema_oos_validation(symbol: str, timeframe: str, year: int = 2024) -> Dict:
+    """Run Out-of-Sample validation for PBEMA v2."""
+    df_oos = fetch_data_for_year(symbol, timeframe, year)
+
+    if df_oos.empty or len(df_oos) < 500:
+        return {
+            "year": year,
+            "error": f"Insufficient data for {year}",
+            "trades": 0,
+            "pnl": 0,
+            "passed": False
+        }
+
+    result = run_pbema_v2_backtest(df_oos, account_size=1000.0)
+    passed = result["pnl"] > 0 and result["trades"] >= 10
+
+    return {
+        "year": year,
+        "candles": len(df_oos),
+        "trades": result["trades"],
+        "wins": result.get("wins", 0),
+        "wr": result["wr"],
+        "pnl": result["pnl"],
+        "passed": passed
+    }
+
+
+def run_compare(symbol: str, timeframe: str, days: int = 365) -> Dict:
+    """
+    Compare SSL Flow vs PBEMA v2 strategies side by side.
+
+    This runs both strategies on the same data and provides
+    a comprehensive comparison.
+
+    Usage: python run.py compare BTCUSDT 15m
+    """
+    from core import set_backtest_mode
+    set_backtest_mode(True)
+
+    result_dir = get_result_dir(symbol, timeframe, "compare")
+
+    print(f"\n{'='*70}")
+    print(f"STRATEGY COMPARISON: {symbol} {timeframe} ({days} days)")
+    print(f"{'='*70}")
+    print(f"SSL Flow vs PBEMA v2")
+    print(f"{'='*70}\n")
+
+    # Fetch data
+    print("[1/4] Fetching data...")
+    df = fetch_data(symbol, timeframe, days)
+    print(f"      {len(df)} candles: {df.index[0].date()} to {df.index[-1].date()}")
+
+    # SSL Flow
+    print("\n[2/4] Running SSL Flow (default config)...")
+    ssl_result = run_portfolio_backtest(df, DEFAULT_FILTERS)
+    print(f"      Trades: {ssl_result['trades']} | WR: {ssl_result['win_rate']:.1f}% | PnL: ${ssl_result['total_pnl']:.2f}")
+
+    # PBEMA v2
+    print("\n[3/4] Running PBEMA v2 (optimized config)...")
+    pbema_result = run_pbema_v2_backtest(df, account_size=1000.0)
+    print(f"      Trades: {pbema_result['trades']} | WR: {pbema_result['wr']:.1f}% | PnL: ${pbema_result['pnl']:.2f}")
+
+    # Save
+    print("\n[4/4] Saving comparison...")
+
+    output = {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "days": days,
+        "mode": "compare",
+        "timestamp": datetime.now().isoformat(),
+        "ssl_flow": {
+            "config": DEFAULT_FILTERS,
+            "trades": ssl_result['trades'],
+            "wins": ssl_result['wins'],
+            "losses": ssl_result['losses'],
+            "win_rate": ssl_result['win_rate'],
+            "pnl": ssl_result['total_pnl'],
+            "max_dd": ssl_result['max_drawdown'],
+            "profit_factor": ssl_result['profit_factor'],
+        },
+        "pbema_v2": {
+            "config": "long_only + regime(ADX>25)",
+            "trades": pbema_result['trades'],
+            "wins": pbema_result.get('wins', 0),
+            "losses": pbema_result.get('losses', 0),
+            "win_rate": pbema_result['wr'],
+            "pnl": pbema_result['pnl'],
+            "max_dd": pbema_result.get('max_dd', 0),
+            "profit_factor": pbema_result.get('profit_factor', 0),
+        },
+        "combined": {
+            "total_pnl": ssl_result['total_pnl'] + pbema_result['pnl'],
+            "total_trades": ssl_result['trades'] + pbema_result['trades'],
+        }
+    }
+
+    with open(result_dir / "result.json", "w") as f:
+        json.dump(output, f, indent=2, default=str)
+
+    # Print comparison
+    ssl_pnl = ssl_result['total_pnl']
+    pbema_pnl = pbema_result['pnl']
+    combined_pnl = ssl_pnl + pbema_pnl
+
+    winner = "SSL Flow" if ssl_pnl > pbema_pnl else "PBEMA v2"
+    winner_margin = abs(ssl_pnl - pbema_pnl)
+
+    print(f"\n{'='*70}")
+    print(f"COMPARISON RESULT: {symbol} {timeframe}")
+    print(f"{'='*70}")
+    print(f"")
+    print(f"{'Strategy':<20} {'Trades':>10} {'WR':>10} {'PnL':>12} {'DD':>10} {'PF':>8}")
+    print(f"{'-'*70}")
+    print(f"{'SSL Flow':<20} {ssl_result['trades']:>10} {ssl_result['win_rate']:>9.1f}% ${ssl_result['total_pnl']:>10.2f} ${ssl_result['max_drawdown']:>8.2f} {ssl_result['profit_factor']:>7.2f}")
+    print(f"{'PBEMA v2':<20} {pbema_result['trades']:>10} {pbema_result['wr']:>9.1f}% ${pbema_result['pnl']:>10.2f} ${pbema_result.get('max_dd', 0):>8.2f} {pbema_result.get('profit_factor', 0):>7.2f}")
+    print(f"{'-'*70}")
+    print(f"{'COMBINED':<20} {ssl_result['trades'] + pbema_result['trades']:>10} {'-':>10} ${combined_pnl:>10.2f}")
+    print(f"")
+    print(f"Winner: {winner} (by ${winner_margin:.2f})")
+    print(f"{'='*70}")
+    print(f"Results saved to: {result_dir}")
+
+    return output
+
+
 def run_report():
     """Show all test results."""
     print(f"\n{'='*70}")
@@ -1374,8 +2105,12 @@ def main():
         epilog="""
 Examples:
   python run.py test BTCUSDT 15m --full    # Full pipeline (recommended)
-  python run.py test BTCUSDT 15m           # Quick test (fixed config)
+  python run.py test BTCUSDT 15m           # Quick test (SSL Flow, fixed config)
   python run.py test BTCUSDT 15m --quick   # 90-day quick test
+
+  python run.py pbema BTCUSDT 15m          # PBEMA v2 standalone test
+  python run.py compare BTCUSDT 15m        # SSL Flow vs PBEMA v2 comparison
+
   python run.py viz BTCUSDT 15m            # Visualize trades
   python run.py report                     # Show all results
         """
@@ -1383,13 +2118,26 @@ Examples:
 
     subparsers = parser.add_subparsers(dest="command")
 
-    # test
-    test_p = subparsers.add_parser("test", help="Run test")
+    # test (SSL Flow)
+    test_p = subparsers.add_parser("test", help="Run SSL Flow test")
     test_p.add_argument("symbol", help="Symbol (e.g., BTCUSDT)")
     test_p.add_argument("timeframe", help="Timeframe (e.g., 15m)")
     test_p.add_argument("--days", type=int, default=365)
     test_p.add_argument("--full", action="store_true", help="Full pipeline (discovery + WF + portfolio)")
     test_p.add_argument("--quick", action="store_true", help="90-day quick test")
+
+    # pbema (PBEMA v2)
+    pbema_p = subparsers.add_parser("pbema", help="Run PBEMA v2 test")
+    pbema_p.add_argument("symbol", help="Symbol (e.g., BTCUSDT)")
+    pbema_p.add_argument("timeframe", help="Timeframe (e.g., 15m)")
+    pbema_p.add_argument("--days", type=int, default=365)
+    pbema_p.add_argument("--full", action="store_true", help="Full pipeline (CV + WF + OOS)")
+
+    # compare (SSL Flow vs PBEMA v2)
+    compare_p = subparsers.add_parser("compare", help="Compare SSL Flow vs PBEMA v2")
+    compare_p.add_argument("symbol", help="Symbol (e.g., BTCUSDT)")
+    compare_p.add_argument("timeframe", help="Timeframe (e.g., 15m)")
+    compare_p.add_argument("--days", type=int, default=365)
 
     # viz
     viz_p = subparsers.add_parser("viz", help="Visualize trades")
@@ -1407,6 +2155,10 @@ Examples:
             run_full_pipeline(args.symbol, args.timeframe, days)
         else:
             run_quick_test(args.symbol, args.timeframe, days)
+    elif args.command == "pbema":
+        run_pbema_test(args.symbol, args.timeframe, args.days, full=args.full)
+    elif args.command == "compare":
+        run_compare(args.symbol, args.timeframe, args.days)
     elif args.command == "viz":
         run_viz(args.symbol, args.timeframe)
     elif args.command == "report":
